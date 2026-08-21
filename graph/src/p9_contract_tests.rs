@@ -748,11 +748,19 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "for backend_count in 1 4 8",
         "resource-samples.tsv",
         "resource-results.csv",
-        "open_type_query_resources.sh",
+        "bash ./tests/heavy/open_type_query_resources.sh",
     ] {
         assert!(
             resource_matrix.contains(required),
             "P9 resource matrix is missing `{required}`"
+        );
+    }
+
+    let resource_probe = repo_source("graph/tests/heavy/open_type_query_resources.sh");
+    for required in ["phase = :'phase';", "phase = 'query-go'"] {
+        assert!(
+            resource_probe.contains(required),
+            "P9 resource probe is missing `{required}`"
         );
     }
 
@@ -764,7 +772,9 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "docker cp",
         "docker-image-inspect.json",
         "resource-postgres-version.txt",
-        "export PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin && cd /src/graph && cargo pgrx start pg17",
+        "export PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
+        "CARGO_TARGET_DIR=/tmp/pggraph-target",
+        "cd /src/graph && cargo pgrx start pg17",
     ] {
         assert!(
             docker.contains(required),

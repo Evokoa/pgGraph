@@ -160,6 +160,7 @@ for backend in $(seq 1 "$BACKEND_COUNT"); do
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'ready');\n" "$backend"
     printf "DO \$wait\$ BEGIN WHILE NOT EXISTS (SELECT 1 FROM public.open_type_resource_control WHERE worker = 0 AND phase = 'query') LOOP PERFORM pg_sleep(0.05); END LOOP; END \$wait\$;\n"
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'query-started');\n" "$backend"
+    printf "DO \$wait\$ BEGIN WHILE NOT EXISTS (SELECT 1 FROM public.open_type_resource_control WHERE worker = 0 AND phase = 'query-go') LOOP PERFORM pg_sleep(0.01); END LOOP; END \$wait\$;\n"
     printf "DO \$query\$ DECLARE round_no integer; BEGIN FOR round_no IN 1..%s LOOP PERFORM count(*) FROM graph.traverse('public.open_type_resource_nodes'::regclass, '1', %s, hydrate := false); END LOOP; END \$query\$;\n" "$QUERY_ROUNDS" "$DEPTH"
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'query-done');\n" "$backend"
     printf 'SELECT pg_sleep(2);\n'
@@ -249,6 +250,8 @@ if [[ "${started_count:-0}" -ne "$BACKEND_COUNT" ]]; then
   echo "resource runner timed out waiting for every query worker" >&2
   exit 1
 fi
+psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
+  -c "INSERT INTO public.open_type_resource_control VALUES (0, 'query-go')" >/dev/null
 PID_LIST="$(for backend in $(seq 1 "$BACKEND_COUNT"); do tr -d '[:space:]' <"$WORKDIR/backend-${backend}.pid"; done | paste -sd, -)"
 query_samples=0
 for _ in $(seq 1 6000); do
