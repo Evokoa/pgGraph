@@ -26,6 +26,7 @@ if [[ -z "$PG_CONFIG" ]]; then
     exit 2
   fi
 fi
+PG_BIN_DIR="$(dirname "$PG_CONFIG")"
 
 install_package() {
   local package_dir="$1"
@@ -125,7 +126,7 @@ END
 $$;
 SQL
 
-pg_dump --format=custom --file="$WORKDIR/pre-upgrade.dump" "$DBNAME"
+"$PG_BIN_DIR/pg_dump" --format=custom --file="$WORKDIR/pre-upgrade.dump" "$DBNAME"
 install_tree "$ROOT_DIR" "$WORKDIR/package-1.1"
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
@@ -185,7 +186,7 @@ psql -X -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT graph.reset()"
 dropdb "$DBNAME"
 install_package "$WORKDIR/package-1.0"
 createdb "$RESTORE_DB"
-pg_restore --dbname="$RESTORE_DB" "$WORKDIR/pre-upgrade.dump"
+"$PG_BIN_DIR/pg_restore" --dbname="$RESTORE_DB" "$WORKDIR/pre-upgrade.dump"
 psql -X -v ON_ERROR_STOP=1 "$RESTORE_DB" <<'SQL'
 SELECT 1 / CASE WHEN extversion = '1.0.0' THEN 1 ELSE 0 END
 FROM pg_extension WHERE extname = 'graph';

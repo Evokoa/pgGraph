@@ -180,6 +180,7 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     --mount=type=secret,id=v1_source_aa,required=false,uid=1000 \
     --mount=type=secret,id=v1_source_ab,required=false,uid=1000 \
+    set -euo pipefail; \
     if [[ "${RUN_V1_UPDATE_ARTIFACT_ROLLBACK}" == "1" ]]; then \
         cat /run/secrets/v1_source_aa /run/secrets/v1_source_ab \
             > /tmp/pggraph-v1.0-source.tar.gz; \
@@ -200,6 +201,7 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=secret,id=v1_1_source_aa,required=false,uid=1000 \
     --mount=type=secret,id=v1_1_source_ab,required=false,uid=1000 \
     --mount=type=secret,id=v1_1_source_ac,required=false,uid=1000 \
+    set -euo pipefail; \
     if [[ "${RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK}" == "1" ]]; then \
         cat /run/secrets/v1_1_source_aa /run/secrets/v1_1_source_ab /run/secrets/v1_1_source_ac \
             > /tmp/pggraph-v1.1-source.tar.gz; \
