@@ -38,7 +38,7 @@ for backend_count in 1 4 8; do
   QUERY_ROUNDS=100 \
   MAX_DIRECTED_EDGES=1048576 \
   SKIP_INSTALL="$skip_install" \
-  ./tests/heavy/open_type_query_resources.sh
+  bash ./tests/heavy/open_type_query_resources.sh
   skip_install=1
   awk -F '\t' -v run_id="$case_run_id" -v labels="$LABEL_COUNT" -v backends="$backend_count" \
     'BEGIN {OFS="\t"} NR > 1 {print run_id, labels, backends, $0}' \
