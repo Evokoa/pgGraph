@@ -214,9 +214,9 @@ sample_phase() {
 
 control_count() {
   local phase="$1"
-  psql -X -v ON_ERROR_STOP=1 -At -d "$DBNAME" \
-    -v phase="$phase" \
-    -c "SELECT count(*) FROM public.open_type_resource_control WHERE phase = :'phase'"
+  printf '%s\n' \
+    "SELECT count(*) FROM public.open_type_resource_control WHERE phase = :'phase';" \
+    | psql -X -v ON_ERROR_STOP=1 -At -d "$DBNAME" -v phase="$phase"
 }
 
 for _ in $(seq 1 10); do
