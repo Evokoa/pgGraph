@@ -432,5 +432,15 @@
     "date": "2026-08-13",
     "new_schema_sha256": "3c9957d2f5f7ba3fe1067eb5a22bbd674c3bdbfc906e2080a952e3f3931c02ce",
     "previous_schema_sha256": "3c9957d2f5f7ba3fe1067eb5a22bbd674c3bdbfc906e2080a952e3f3931c02ce"
+  },
+  {
+    "acknowledgement": "v1.2-reset-overload-review",
+    "changed_sections": [
+      "sql_schema",
+      "sql_signatures"
+    ],
+    "date": "2026-08-20",
+    "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
+    "previous_schema_sha256": "3c9957d2f5f7ba3fe1067eb5a22bbd674c3bdbfc906e2080a952e3f3931c02ce"
   }
 ]

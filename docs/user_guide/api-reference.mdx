@@ -821,9 +821,14 @@ full artifact validation. `sync_log_retention_floor`,
 
 ```sql
 graph.reset() RETURNS void
+graph.reset(clear_registrations boolean) RETURNS void
 ```
 
 Admin-only. Clears the backend-local engine and removes persisted graph files.
+The zero-argument form preserves the selected graph's table, edge, and filter
+registrations so it can be rebuilt. Pass `true` to clear those selected-graph
+registrations as well; PostgreSQL source tables and other named graphs remain
+unchanged.
 
 ## Registration
 

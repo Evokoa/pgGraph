@@ -371,7 +371,7 @@ synchronization replaces any logically restored triggers whose function names
 refer to relation OIDs from the source database:
 
 ```sql
-SELECT graph.reset();
+SELECT graph.reset(true);
 -- Reapply graph.add_table(...), graph.add_edge(...), and
 -- graph.add_filter_column(...) calls for the restored source schema.
 SELECT * FROM graph.build();

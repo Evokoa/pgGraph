@@ -211,11 +211,14 @@ fn graph_catalog_mutation_requires_admin_privileges() {
              'csr_readonly'
          )",
     );
+    let registration_reset_sqlstate =
+        sqlstate_for_prepared_helper("SELECT graph.reset(true)");
     Spi::run("RESET ROLE").expect("reset restricted role failed");
 
     assert_eq!(create_sqlstate, Some("42501".to_string()));
     assert_eq!(selected_default, "default");
     assert_eq!(direct_write_sqlstate, Some("42501".to_string()));
+    assert_eq!(registration_reset_sqlstate, Some("42501".to_string()));
 }
 
 #[pg_test]

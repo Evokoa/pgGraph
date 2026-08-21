@@ -37,25 +37,51 @@ pub(crate) fn record_query_start_pending_probe() {
 #[pg_extern(schema = "graph", security_definer)]
 #[search_path(pg_catalog, pg_temp)]
 fn reset() {
-    with_panic_boundary("reset()", || {
+    reset_selected_graph(false);
+}
+
+/// Reset the engine, optionally clearing selected-graph registrations.
+#[pg_extern(schema = "graph", name = "reset", security_definer)]
+#[search_path(pg_catalog, pg_temp)]
+fn reset_with_registrations(clear_registrations: bool) {
+    reset_selected_graph(clear_registrations);
+}
+
+fn reset_selected_graph(clear_registrations: bool) {
+    with_panic_boundary("reset()", move || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.reset()")
             .unwrap_or_else(|err| err.report());
-        ENGINE.with(|e| {
-            *e.borrow_mut() = Engine::new();
-        });
-        crate::runtime_state::clear_loaded_graph();
 
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
         let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
             .unwrap_or_else(|err| err.report());
+        let cleared: Option<catalog::ClearedRegistrationCounts> = clear_registrations.then(|| {
+            catalog::clear_graph_registrations(&graph.graph_id).unwrap_or_else(|err| err.report())
+        });
+
+        ENGINE.with(|e| {
+            *e.borrow_mut() = Engine::new();
+        });
+        crate::runtime_state::clear_loaded_graph();
         crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
         persistence::remove_graph_artifacts_for(&graph.graph_id).unwrap_or_else(|err| err.report());
-        pgrx::notice!(
-            "graph: removed persisted files for graph {} ({})",
-            graph.graph_name,
-            graph.graph_id
-        );
+        if let Some(cleared) = cleared {
+            pgrx::notice!(
+                "graph: removed persisted files and cleared {} tables, {} edges, and {} filter columns for graph {} ({})",
+                cleared.tables,
+                cleared.edges,
+                cleared.filter_columns,
+                graph.graph_name,
+                graph.graph_id
+            );
+        } else {
+            pgrx::notice!(
+                "graph: removed persisted files for graph {} ({})",
+                graph.graph_name,
+                graph.graph_id
+            );
+        }
     })
 }
 

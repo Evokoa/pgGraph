@@ -765,7 +765,13 @@ The release contract gate regenerates and compares every declaration.
 -- graph::sql_facade::admin::rename_edge CREATE FUNCTION graph."rename_edge"( "graph_name" TEXT, "old_label" TEXT, "new_label" TEXT, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;
 ```
 
-### `graph.reset`
+### `graph.reset` (overload 1)
+
+```sql
+-- graph::sql_facade::runtime::reset CREATE FUNCTION graph."reset"( "clear_registrations" bool ) RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
+```
+
+### `graph.reset` (overload 2)
 
 ```sql
 -- graph::sql_facade::runtime::reset CREATE FUNCTION graph."reset"() RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;

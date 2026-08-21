@@ -956,10 +956,10 @@
     "schema_version": 1
   },
   "sql_schema": {
-    "entity_block_count": 169,
-    "function_contract_count": 167,
-    "function_contracts_sha256": "ffeb7c05ecfd8b34deaa8ad74bdfd2a2baaacc16bd3aeb5f5a9cded5ea8ee12a",
-    "normalized_sha256": "3c9957d2f5f7ba3fe1067eb5a22bbd674c3bdbfc906e2080a952e3f3931c02ce"
+    "entity_block_count": 170,
+    "function_contract_count": 168,
+    "function_contracts_sha256": "0bc17fe3bde7b2a57404f5b8c721b11a2a4fe4dca96b78265a6c39d43a122395",
+    "normalized_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
   },
   "sql_signatures": [
     {
@@ -1465,6 +1465,10 @@
     {
       "declaration": "-- graph::sql_facade::admin::rename_edge CREATE FUNCTION graph.\"rename_edge\"( \"graph_name\" TEXT, \"old_label\" TEXT, \"new_label\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
       "name": "rename_edge"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::reset CREATE FUNCTION graph.\"reset\"( \"clear_registrations\" bool ) RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "reset"
     },
     {
       "declaration": "-- graph::sql_facade::runtime::reset CREATE FUNCTION graph.\"reset\"() RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",

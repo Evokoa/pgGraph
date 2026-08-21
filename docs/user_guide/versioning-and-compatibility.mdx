@@ -105,7 +105,7 @@ pre-upgrade database backup and matching 1.0.0 package until cutover is
 accepted. Rollback restores that backup into a clean database/server using the
 1.0.0 package; do not install an older shared library over 1.1 catalogs or
 artifacts. A logical restore assigns new relation OIDs, so treat the projection
-as derived state: run `graph.reset()`, re-register the restored source tables
+as derived state: run `graph.reset(true)`, re-register the restored source tables
 and relationships, and run `graph.build()` before serving graph queries.
 
 Installing an older binary over 1.x catalogs or artifacts is unsupported.

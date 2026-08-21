@@ -3,6 +3,74 @@ use pgrx::prelude::*;
 
 use super::selected_or_default_graph_metadata;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClearedRegistrationCounts {
+    pub(crate) tables: i64,
+    pub(crate) edges: i64,
+    pub(crate) filter_columns: i64,
+}
+
+pub(crate) fn clear_graph_registrations(
+    graph_id: &str,
+) -> safety::GraphResult<ClearedRegistrationCounts> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH deleted_filters AS (
+                     DELETE FROM graph._registered_filter_columns
+                      WHERE graph_id = $1::uuid
+                  RETURNING 1
+                 ), deleted_edges AS (
+                     DELETE FROM graph._registered_edges
+                      WHERE graph_id = $1::uuid
+                  RETURNING 1
+                 ), deleted_tables AS (
+                     DELETE FROM graph._registered_tables
+                      WHERE graph_id = $1::uuid
+                  RETURNING 1
+                 ), touched AS (
+                     UPDATE graph._graphs
+                        SET updated_at = now()
+                      WHERE graph_id = $1::uuid
+                  RETURNING 1
+                 )
+                 SELECT (SELECT count(*) FROM deleted_tables),
+                        (SELECT count(*) FROM deleted_edges),
+                        (SELECT count(*) FROM deleted_filters)",
+                None,
+                &[graph_id.into()],
+            )
+            .map_err(|error| {
+                safety::GraphError::Internal(format!("graph registration reset failed: {error}"))
+            })?;
+        let row = rows.first();
+        Ok(ClearedRegistrationCounts {
+            tables: row
+                .get::<i64>(1)
+                .map_err(|error| {
+                    safety::GraphError::Internal(format!(
+                        "cleared table count read failed: {error}"
+                    ))
+                })?
+                .unwrap_or_default(),
+            edges: row
+                .get::<i64>(2)
+                .map_err(|error| {
+                    safety::GraphError::Internal(format!("cleared edge count read failed: {error}"))
+                })?
+                .unwrap_or_default(),
+            filter_columns: row
+                .get::<i64>(3)
+                .map_err(|error| {
+                    safety::GraphError::Internal(format!(
+                        "cleared filter-column count read failed: {error}"
+                    ))
+                })?
+                .unwrap_or_default(),
+        })
+    })
+}
+
 pub(crate) fn insert_registered_table(
     table_name: &str,
     id_columns: impl Into<builder::PrimaryKeySpec>,

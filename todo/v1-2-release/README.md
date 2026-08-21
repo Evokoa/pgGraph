@@ -23,7 +23,7 @@ commit.
 | Phase | Status | Exit gate |
 |---|---|---|
 | V12.1 relationship discovery | Complete | Schema-wide and targeted discovery produce one binary mapping for supported junction tables, infer conventional dynamic label columns, preserve exact endpoint identity, and avoid inventing endpoints from composite or multi-way foreign keys. |
-| V12.2 registration reset | Not started | A backward-compatible reset option clears all selected-graph registration mappings without changing zero-argument projection-reset behavior, and stale-registration `PG000` recovery is covered. |
+| V12.2 registration reset | Complete | A backward-compatible reset option clears all selected-graph registration mappings without changing zero-argument projection-reset behavior, and stale-registration `PG000` recovery is covered. |
 | V12.3 open-type closure | Not started | P9.5d retained Criterion, SQL latency, Linux resource, compatibility, and metadata outputs pass the precommitted budgets from one clean checkpoint; public docs match shipped behavior and limits. |
 | V12.4 release closure | Not started | Version and upgrade surfaces name 1.2.0; install/upgrade, PostgreSQL 14-18, package, documentation, and release gates pass from the reviewed release commit. |
 
@@ -38,3 +38,17 @@ commit.
 - `cargo +1.96.0 pgrx test --features "pg17 development" pg17 classify_as_junction`:
   5 passed.
 - Strict Clippy, rustfmt, documentation drift, and `git diff --check` pass.
+
+## V12.2 Evidence
+
+- `cargo +1.96.0 pgrx test --features "pg17 development" pg17 reset`:
+  2 passed, including stale-OID cleanup and zero-argument compatibility.
+- `cargo +1.96.0 pgrx test --features "pg17 development" pg17 graph_catalog_mutation_requires_admin_privileges`:
+  the focused ACL regression passed with SQLSTATE `42501` for
+  `graph.reset(true)` under a restricted role.
+- The generated release contract contains exactly one added SQL object,
+  `graph.reset(bool)`, with no removed objects; the contract and documentation
+  drift checks pass.
+- Strict Clippy, rustfmt, and `git diff --check` pass.
+- A fresh independent Rust review reported no findings after the ACL,
+  generated-contract, and executable-quickstart remediations.

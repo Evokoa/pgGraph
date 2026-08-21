@@ -102,7 +102,7 @@ start_postgres() {
 prepare_demo_graph() {
   compose exec -T postgres psql -U postgres -d graph -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE EXTENSION IF NOT EXISTS graph;
-SELECT graph.reset();
+SELECT graph.reset(true);
 
 DROP TABLE IF EXISTS people;
 DROP TABLE IF EXISTS companies;
@@ -158,7 +158,7 @@ run_demo_sql() {
 \pset pager off
 
 CREATE EXTENSION IF NOT EXISTS graph;
-SELECT graph.reset();
+SELECT graph.reset(true);
 
 DROP TABLE IF EXISTS people;
 DROP TABLE IF EXISTS companies;

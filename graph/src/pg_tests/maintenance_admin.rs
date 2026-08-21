@@ -3371,6 +3371,85 @@ fn projection_sync_input_sizes_after(watermark: i64) -> Vec<i64> {
 }
 
 #[pg_test]
+fn reset_can_clear_selected_graph_registrations_without_changing_default_behavior() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.create_graph('reset_survivor', namespace := 'app');
+         SELECT graph.set_current_graph('reset_survivor', namespace := 'app');
+         SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['name', 'age']
+         );
+         SELECT graph.set_current_graph('default');
+         SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['name', 'age']
+         );
+         SELECT graph.add_edge(
+             'graph_test_friendships_pgtest'::regclass,
+             'user_id',
+             'graph_test_users_pgtest'::regclass,
+             'friend_id',
+             'friend'
+         );
+         SELECT graph.add_filter_column(
+             'graph_test_users_pgtest'::regclass,
+             'age'
+         )",
+    )
+    .expect("register reset fixtures failed");
+
+    Spi::run("SELECT graph.reset()").expect("projection-only reset failed");
+    let preserved = Spi::get_one::<i64>(
+        "SELECT
+             (SELECT count(*) FROM graph._registered_tables WHERE graph_id = (SELECT graph_id::uuid FROM graph.current_graph()))
+           + (SELECT count(*) FROM graph._registered_edges WHERE graph_id = (SELECT graph_id::uuid FROM graph.current_graph()))
+           + (SELECT count(*) FROM graph._registered_filter_columns WHERE graph_id = (SELECT graph_id::uuid FROM graph.current_graph()))",
+    )
+    .expect("read registrations after projection-only reset failed")
+    .unwrap_or_default();
+    assert_eq!(preserved, 3, "zero-argument reset must remain compatible");
+
+    Spi::run("DROP TABLE public.graph_test_friendships_pgtest CASCADE")
+        .expect("drop registered edge table failed");
+    Spi::run("SELECT graph.reset(true)").expect("registration-clearing reset failed");
+    let remaining = Spi::get_one::<i64>(
+        "SELECT
+             (SELECT count(*) FROM graph._registered_tables WHERE graph_id = (SELECT graph_id::uuid FROM graph.current_graph()))
+           + (SELECT count(*) FROM graph._registered_edges WHERE graph_id = (SELECT graph_id::uuid FROM graph.current_graph()))
+           + (SELECT count(*) FROM graph._registered_filter_columns WHERE graph_id = (SELECT graph_id::uuid FROM graph.current_graph()))",
+    )
+    .expect("read registrations after clearing reset failed")
+    .unwrap_or(-1);
+    assert_eq!(remaining, 0);
+    let survivor_registrations = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph._registered_tables AS registered
+           JOIN graph._graphs AS metadata USING (graph_id)
+          WHERE metadata.graph_name = 'reset_survivor'
+            AND metadata.namespace = 'app'",
+    )
+    .expect("read other-graph registrations failed")
+    .unwrap_or_default();
+    let source_rows = Spi::get_one::<i64>("SELECT count(*) FROM graph_test_users_pgtest")
+        .expect("read source rows after reset failed")
+        .unwrap_or_default();
+    assert_eq!(survivor_registrations, 1);
+    assert_eq!(source_rows, 2);
+
+    Spi::run(
+        "SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['name', 'age']
+         )",
+    )
+    .expect("register after stale-catalog cleanup failed");
+}
+
+#[pg_test]
 fn ingest_projection_publishes_committed_sync_log_rows() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");

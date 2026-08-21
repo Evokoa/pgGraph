@@ -342,13 +342,20 @@ Rebuild with `graph.build()` when:
 
 ```sql
 SELECT graph.reset();
+-- Or also clear the selected graph's registration mappings:
+SELECT graph.reset(true);
 ```
 
 `graph.reset()` clears the backend-local engine and removes persisted files for
-the selected graph's UUID directory. It requires graph-admin privileges.
+the selected graph's UUID directory while preserving its registration catalog
+for a rebuild. `graph.reset(true)` additionally clears the selected graph's
+registered tables, edges, and filter columns. Both forms require graph-admin
+privileges; neither changes PostgreSQL source tables or registrations belonging
+to another graph.
 
 <Callout type="error">
-`graph.reset()` removes the selected graph's persisted artifact root. The source
+Both reset forms remove the selected graph's persisted artifact root. The source
 tables remain unchanged, but graph queries for that graph need a rebuild or a
-new persisted artifact before they can run again.
+new persisted artifact before they can run again. After `graph.reset(true)`,
+registration must also be reapplied before the rebuild.
 </Callout>

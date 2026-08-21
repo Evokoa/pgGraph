@@ -106,7 +106,7 @@ Paste this whole block into `psql`:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS graph;
-SELECT graph.reset();
+SELECT graph.reset(true);
 
 DROP TABLE IF EXISTS people CASCADE;
 DROP TABLE IF EXISTS companies CASCADE;
@@ -258,7 +258,7 @@ Keep the `::regclass` casts shown below; omitting one causes PostgreSQL to
 report that the overloaded function does not exist.
 
 ```sql
-SELECT graph.reset();
+SELECT graph.reset(true);
 
 SELECT graph.add_table(
   'public.people'::regclass,

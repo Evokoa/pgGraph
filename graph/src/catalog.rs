@@ -32,6 +32,7 @@ pub(crate) use validate::{
     validate_registered_table,
 };
 pub(crate) use write::{
-    insert_registered_edge, insert_registered_edge_for_graph, insert_registered_table,
-    insert_registered_table_for_graph, RegisteredEdgeInsert,
+    clear_graph_registrations, insert_registered_edge, insert_registered_edge_for_graph,
+    insert_registered_table, insert_registered_table_for_graph, ClearedRegistrationCounts,
+    RegisteredEdgeInsert,
 };
