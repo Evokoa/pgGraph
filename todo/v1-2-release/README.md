@@ -1,6 +1,6 @@
 # pgGraph 1.2 Release Program
 
-> Active planning snapshot: 2026-08-20 on `dev`, resumed after the 1.1 release.
+> Completed planning snapshot: 2026-08-21 on `dev`, resumed after the 1.1 release.
 
 ## Outcome
 
@@ -25,7 +25,7 @@ commit.
 | V12.1 relationship discovery | Complete | Schema-wide and targeted discovery produce one binary mapping for supported junction tables, infer conventional dynamic label columns, preserve exact endpoint identity, and avoid inventing endpoints from composite or multi-way foreign keys. |
 | V12.2 registration reset | Complete | A backward-compatible reset option clears all selected-graph registration mappings without changing zero-argument projection-reset behavior, and stale-registration `PG000` recovery is covered. |
 | V12.3 open-type closure | Complete | P9.5d retained Criterion, SQL latency, Linux resource, compatibility, and metadata outputs pass the precommitted budgets from one clean checkpoint; public docs match shipped behavior and limits. |
-| V12.4 release closure | In progress | Version and upgrade surfaces name 1.2.0; install/upgrade, PostgreSQL 14-18, package, documentation, and release gates pass from the reviewed release commit. |
+| V12.4 release closure | Complete | Version and upgrade surfaces name 1.2.0; install/upgrade, PostgreSQL 14-18, package, documentation, and release gates pass from the reviewed release commit. |
 
 ## V12.1 Evidence
 
@@ -69,3 +69,25 @@ commit.
   active in the marked traversal statement.
 - The four retained-evidence Rust contracts are active rather than ignored and
   re-run the lineage, case-matrix, raw-summary, and budget checks.
+
+## V12.4 Evidence
+
+- Reviewed release checkpoint:
+  `3e9fb41c8fb4e4e555533660e8c71a32c2aacf20`.
+- The exact clean-source archive gate passed fresh package installation on
+  PostgreSQL 14-18, the v0.1.8-to-v1.2.0 transition, the public quickstart, all
+  40 CSR playground queries, and all 41 mutable-overlay playground queries.
+- The exact packaged v1.1.0-to-v1.2.0 matrix passed on PostgreSQL 14-18. It
+  verified pre-rebuild v6 artifact reads, owner and ACL preservation,
+  registration-clearing reset, 259 exact dynamic relationship types,
+  high-ID traversal, version-matched backup/restore, and rollback rebuilds.
+- The Rust suite passed with 1,169 tests and three ignored tests. Strict
+  Clippy, rustfmt, rustdoc/doctests, generated-SQL validation, public-doc drift,
+  shell syntax, script inventory, and the unsafe allowlist all passed.
+- Focused pgrx coverage for relationship discovery, reset/ACL behavior, and
+  edge-type inventory passed. The release PR tier passed from the candidate
+  source tree.
+- A fresh independent Rust review of the complete release diff reported no
+  findings. It also matched the generated `edge_types` and `reset(bool)` SQL
+  attributes to the additive 1.1.0-to-1.2.0 upgrade script and verified that
+  existing object identities, owners, and ACLs remain unchanged.
