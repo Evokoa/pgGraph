@@ -761,12 +761,17 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "phase = :'phase';",
         "phase = 'query-go'",
         "PERFORM pg_sleep(0.01)",
+        "pid = ANY (ARRAY[$PID_LIST]) AND state = 'active'",
     ] {
         assert!(
             resource_probe.contains(required),
             "P9 resource probe is missing `{required}`"
         );
     }
+    assert!(
+        !resource_probe.contains("query LIKE '%graph.traverse%'"),
+        "P9 resource sampling must not depend on pg_stat_activity query text"
+    );
 
     let docker = repo_source("graph/tests/heavy/run_open_type_query_resources_docker.sh");
     for required in [

@@ -261,7 +261,7 @@ for _ in $(seq 1 6000); do
     break
   fi
   active_count="$(psql -X -v ON_ERROR_STOP=1 -At -d "$DBNAME" \
-    -c "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid = ANY (ARRAY[$PID_LIST]) AND state = 'active' AND query LIKE '%graph.traverse%'")"
+    -c "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid = ANY (ARRAY[$PID_LIST]) AND state = 'active'")"
   if (( active_count > max_active_count )); then
     max_active_count="$active_count"
   fi
