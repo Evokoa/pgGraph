@@ -8287,8 +8287,17 @@ fn gql_no_rls_identity_bounded_fast_path_has_zero_resolver_spi() {
          RETURN v.id AS id",
     );
     let metrics = p46_visibility_metrics();
+    Spi::run("DELETE FROM public.graph_test_friendships_pgtest WHERE id = 'f1'")
+        .expect("delete no-RLS relationship source row failed");
+    let stale_state = p46_captured_sqlstate(
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest)
+            RETURN v.id AS id')",
+    );
 
     assert_eq!(rows.as_array().map(Vec::len), Some(1));
+    assert_eq!(stale_state.as_deref(), Some("22000"));
+    assert_eq!(metrics["selected_strategy"].as_str(), Some("lazy"));
     assert_eq!(metrics["spi_calls"].as_u64(), Some(0));
     assert_eq!(metrics["requested_keys"].as_u64(), Some(0));
     assert_eq!(metrics["gql_read_recheck_calls"].as_u64(), Some(1));

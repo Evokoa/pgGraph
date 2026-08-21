@@ -379,7 +379,7 @@ fn execute_statement_governed(
     debug_assert!(statement_uses_projection_matching(&statement));
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
-            if let Some(matches) = execute_identity_one_hop_lazy(
+            if let Some(targeted) = execute_identity_one_hop_lazy(
                 &plan,
                 tenant_scope,
                 params,
@@ -387,16 +387,26 @@ fn execute_statement_governed(
                 catalog_tables,
                 catalog_edges,
             )? {
+                if targeted.requires_source_recheck {
+                    measure_gql_read_recheck(targeted.matches.len(), || {
+                        ensure_gql_rows_visible(&targeted.matches, governor, catalog_tables)?;
+                        ensure_gql_relationship_rows_visible(&targeted.matches, &plan, governor)
+                    })?;
+                }
                 let hydrated = hydrate_gql_rows_governed(
-                    &matches,
+                    &targeted.matches,
                     crate::query::value::requires_hydration(&plan, hydrate),
                     governor,
                     catalog_tables,
                 )?;
-                let hydrated_relationships =
-                    hydrate_gql_relationship_rows_governed(&matches, &plan, hydrate, governor)?;
+                let hydrated_relationships = hydrate_gql_relationship_rows_governed(
+                    &targeted.matches,
+                    &plan,
+                    hydrate,
+                    governor,
+                )?;
                 return crate::query::value::project_rows_with_relationships_governed(
-                    matches,
+                    targeted.matches,
                     &plan,
                     &hydrated,
                     &hydrated_relationships,
@@ -642,6 +652,11 @@ fn execute_statement_governed(
 
 const GQL_VISIBILITY_CANDIDATE_KEY_BYTES: usize = 1024 * 1024;
 
+struct IdentityOneHopExecution {
+    matches: Vec<crate::query::execute::GqlRow>,
+    requires_source_recheck: bool,
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "bounded GQL expansion keeps the plan, caller scope, catalog, and governor explicit"
@@ -653,7 +668,7 @@ fn execute_identity_one_hop_lazy(
     governor: &crate::resource::ResourceGovernor,
     catalog_tables: &[crate::builder::RegisteredTable],
     catalog_edges: &[crate::builder::RegisteredEdge],
-) -> safety::GraphResult<Option<Vec<crate::query::execute::GqlRow>>> {
+) -> safety::GraphResult<Option<IdentityOneHopExecution>> {
     if plan.hops.variable
         || plan.hops.min != 1
         || plan.hops.max != 1
@@ -685,9 +700,10 @@ fn execute_identity_one_hop_lazy(
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             crate::sql_visibility::prepare_bfs_visibility(catalog_tables, catalog_edges)
         }))?;
-    if !crate::sql_visibility::lazy_bfs_strategy_enabled(&lazy) {
+    if !crate::sql_visibility::identity_bounded_gql_strategy_enabled(&lazy) {
         return Ok(None);
     }
+    let requires_source_recheck = !lazy.is_enforced();
     crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
         check_plan_acl(plan)
     }));
@@ -698,7 +714,10 @@ fn execute_identity_one_hop_lazy(
     )?
     else {
         crate::sql_visibility::record_selected_visibility_strategy(true);
-        return Ok(Some(Vec::new()));
+        return Ok(Some(IdentityOneHopExecution {
+            matches: Vec::new(),
+            requires_source_recheck,
+        }));
     };
     let source_idx = ENGINE.with(|engine| {
         let engine = engine.borrow();
@@ -716,7 +735,10 @@ fn execute_identity_one_hop_lazy(
     });
     let Some(source_idx) = source_idx else {
         crate::sql_visibility::record_selected_visibility_strategy(true);
-        return Ok(Some(Vec::new()));
+        return Ok(Some(IdentityOneHopExecution {
+            matches: Vec::new(),
+            requires_source_recheck,
+        }));
     };
     crate::sql_visibility::reserve_direct_visibility_candidate(governor, &source_id)?;
     let source_batch = crate::bfs::BfsAdjacencyCandidateBatch::try_new(
@@ -751,7 +773,10 @@ fn execute_identity_one_hop_lazy(
         .first()
         .is_some_and(|verdict| verdict.visible())
     {
-        return Ok(Some(Vec::new()));
+        return Ok(Some(IdentityOneHopExecution {
+            matches: Vec::new(),
+            requires_source_recheck,
+        }));
     }
     let direction = match plan.direction {
         crate::query::logical_plan::BoundDirection::Out => crate::types::TraversalDirection::Out,
@@ -877,7 +902,10 @@ fn execute_identity_one_hop_lazy(
         })?);
     }
     output_lease.retain_until_governor_drop();
-    Ok(Some(rows))
+    Ok(Some(IdentityOneHopExecution {
+        matches: rows,
+        requires_source_recheck,
+    }))
 }
 
 fn prepare_gql_eager_visibility(

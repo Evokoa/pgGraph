@@ -110,6 +110,24 @@ pub(crate) fn lazy_bfs_strategy_enabled(coordinator: &LazyVisibilityCoordinator)
     coordinator.is_enforced()
 }
 
+/// Identity-bounded GQL execution is selective even without an RLS probe.
+///
+/// The development override retains the eager parity oracle, while production
+/// uses the bounded executor for both unrestricted and RLS-enforced callers.
+pub(crate) fn identity_bounded_gql_strategy_enabled(
+    _coordinator: &LazyVisibilityCoordinator,
+) -> bool {
+    #[cfg(feature = "development")]
+    {
+        !matches!(
+            VISIBILITY_STRATEGY_OVERRIDE.with(Cell::get),
+            VisibilityStrategyOverride::Eager
+        )
+    }
+    #[cfg(not(feature = "development"))]
+    true
+}
+
 pub(crate) fn record_selected_visibility_strategy(lazy: bool) {
     #[cfg(feature = "development")]
     VISIBILITY_SELECTED_STRATEGY.with(|slot| {
