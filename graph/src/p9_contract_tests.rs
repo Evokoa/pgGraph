@@ -761,7 +761,7 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "phase = :'phase';",
         "phase = 'query-go'",
         "PERFORM pg_sleep(0.01)",
-        "pid = ANY (ARRAY[$PID_LIST]) AND state = 'active'",
+        "if [[ \"$done_count\" -ne 0 ]]",
     ] {
         assert!(
             resource_probe.contains(required),
@@ -769,7 +769,7 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         );
     }
     assert!(
-        !resource_probe.contains("query LIKE '%graph.traverse%'"),
+        !resource_probe.contains("pg_stat_activity"),
         "P9 resource sampling must not depend on pg_stat_activity query text"
     );
 
