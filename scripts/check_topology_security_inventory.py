@@ -13,7 +13,7 @@ from check_sql_api_drift import implemented_functions
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GRAPH_SRC = ROOT / "graph" / "src"
 CONTRACT = ROOT / "release" / "v1-contract.json"
-INVENTORY = ROOT / "todo" / "post-v1-1" / "topology-security-inventory.json"
+INVENTORY = ROOT / "release" / "fixtures" / "topology-security-inventory.json"
 PARTITION_KEYS = (
     "topology_visibility_required",
     "postgres_direct_visibility",

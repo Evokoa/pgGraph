@@ -42,6 +42,27 @@ The 1.0 SQL and GQL profiles remain the named compatibility profiles because
 1.1 extends rather than replaces them. Future work must preserve the 1.1 RLS,
 publication, caller-identity, and PostgreSQL source-of-truth guarantees.
 
+## Post-1.2 Focus: Complete Selective-RLS Scale Evidence
+
+pgGraph 1.2 includes the bounded visibility coordinator, lazy direct-identity
+resolution, lazy bounded BFS/DFS and path execution, deterministic
+targeted-lazy/global-eager strategy selection, and fixed relationship-identity
+completeness summaries. Whole-graph analytics and other global work continue
+to use the eager visibility oracle by design.
+
+The remaining work is release-evidence closure rather than a change to the RLS
+security contract:
+
+| Delivery slice | Status | Remaining exit gate |
+|---|---|---|
+| P4.7 targeted traversal/path closure | In progress | Retain final differential evidence and public links for DFS, reverse traversal, bidirectional and weighted paths, overlays, and eligible GQL/Cypher expansions. |
+| P5.3 strategy and scale closure | In progress | Retain complete `p5-selective-rls-1m` and `p5-selective-rls-10m` runs, publish the relationship-identity completeness summary and deterministic targeted-lazy/global-eager selection evidence, and measure remaining GQL read-result rechecks. |
+
+Any future adaptive selector must reuse known verdicts when completing an eager
+scope and may never restart policy work from zero. Until the retained 1M/10M
+matrix is complete, the user-visible performance limitation remains documented
+in [Known Issues](./known-issues#some-rls-workloads-still-use-eager-visibility-preparation).
+
 ## 1.0 Production Baseline
 
 The 1.0 release established these ongoing release requirements:
@@ -71,6 +92,16 @@ parameter objects becomes a typed input relation that preserves input order.
 PostgreSQL then performs set-based DML per mapping group and operation phase. A
 Rust loop that still issues one SPI statement per input row does not satisfy
 the delivery track.
+
+The former internal P10-P14 work queue is now tracked here:
+
+| Slice | Status | Scope |
+|---|---|---|
+| P10 batch contract core | Planned | Validate and type bounded ordered input once, reject duplicate identities deterministically, and prove that execution does not issue one DML statement per input row. |
+| P11 node batches | Planned | Implement set-based node `CREATE`/`MERGE` with PostgreSQL authority, preserved input order, atomicity, savepoint behavior, partitions, and idempotent replay. |
+| P12 relationship batches | Planned | Implement set-based relationship `CREATE`/`MERGE`, exact endpoint and relationship identity, open labels, parallel edges, and same-transaction node-to-edge ingestion. |
+| P13 remaining mutation verbs | Planned | Reuse the bounded input relation for `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE`, with sync, reload, compaction, cancellation, and concurrency coverage. |
+| P14 release closure | Planned | Complete public contracts, install/update paths, supported-feature documentation, benchmarks, fuzz/property coverage, and the PostgreSQL 14-18 package matrix on one reviewed commit. |
 
 | Delivery gate | Required outcome |
 |---|---|

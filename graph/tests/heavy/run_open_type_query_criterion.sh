@@ -3,7 +3,7 @@ set -euo pipefail
 
 GRAPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$GRAPH_DIR/.." && pwd)"
-EVIDENCE_DIR="${EVIDENCE_DIR:-$REPO_ROOT/todo/measurements/2026-08-13-p9-open-type-query}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$REPO_ROOT/release/evidence/engine/2026-08-13-p9-open-type-query}"
 CRITERION_ROOT="$GRAPH_DIR/target/criterion"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 

@@ -126,8 +126,12 @@ fn p8_unseen_sync_labels_survive_reload_and_fail_closed_on_corruption() {
         );
     }
 
-    let roadmap = repo_source("todo/post-v1-1/README.md");
-    assert!(roadmap.contains("### P8: Persist dictionaries and incremental labels"));
+    let supported = repo_source("docs/user_guide/supported_features.mdx");
+    assert!(
+        supported
+            .contains("Trigger-backed committed `graph.apply_sync()` interns valid unseen labels")
+            && supported.contains("atomically publishes their cumulative dictionary")
+    );
 }
 
 #[test]

@@ -309,6 +309,9 @@ fn p7_v7_migration_recovery_and_public_docs_ship_together() {
         "P7.4 contributor docs must describe the activated adaptive format"
     );
 
-    let roadmap = repo_source("todo/post-v1-1/README.md");
-    assert!(roadmap.contains("| P7 | Complete |"));
+    let supported = repo_source("docs/user_guide/supported_features.mdx");
+    assert!(
+        supported.contains("| Open-vocabulary relationship types |")
+            && supported.contains("adaptive v7 one-, two-, or four-byte type storage")
+    );
 }

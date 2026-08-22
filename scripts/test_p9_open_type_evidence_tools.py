@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT / "todo/measurements/2026-08-13-p9-open-type-query"
+EVIDENCE = ROOT / "release/evidence/engine/2026-08-13-p9-open-type-query"
 sys.dont_write_bytecode = True
 
 

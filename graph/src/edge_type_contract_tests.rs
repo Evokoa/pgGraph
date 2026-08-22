@@ -460,7 +460,7 @@ fn p6_width_benchmark_keeps_reserved_boundaries_and_low_cardinality_control() {
 
 #[test]
 fn p6_retains_width_measurement_evidence_before_closure() {
-    let evidence = repo_path("todo/measurements/2026-08-13-p6-edge-type-width");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p6-edge-type-width");
     let readme = fs::read_to_string(evidence.join("README.md"))
         .expect("P6 must retain a reproducible edge-type-width measurement README");
     let summary = fs::read_to_string(evidence.join("summary.csv"))

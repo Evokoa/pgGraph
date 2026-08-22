@@ -72,7 +72,7 @@ fn csv_column<'a>(header: &[&str], row: &'a [&str], name: &str) -> &'a str {
 #[test]
 fn deterministic_selector_inventory_keeps_targeted_work_lazy_and_global_work_eager() {
     let inventory: serde_json::Value = serde_json::from_str(&repo_source(
-        "todo/post-v1-1/topology-security-inventory.json",
+        "release/fixtures/topology-security-inventory.json",
     ))
     .expect("topology security inventory must be valid JSON");
     let entries = inventory["entrypoints"]
@@ -195,7 +195,7 @@ fn relationship_identity_completeness_is_summarized_across_base_durable_and_tx_s
 #[test]
 fn any_future_adaptive_selector_reuses_known_verdicts_instead_of_restarting_policy_work() {
     let visibility = crate_source("src/sql_visibility.rs");
-    let design = repo_source("todo/post-v1-1/scalable-rls.md");
+    let design = repo_source("docs/roadmap.mdx");
     let normalized_design = design.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         normalized_design.contains("must reuse known verdicts when completing an eager scope")
@@ -357,7 +357,7 @@ fn p5_metrics_surface_resets_statement_counters_and_reports_resource_snapshot() 
 #[test]
 #[ignore = "P5.3 retained 1M/10M evidence checkpoint"]
 fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
-    let measurements = repo_path("todo/measurements");
+    let measurements = repo_path("release/evidence/engine");
     for scale in ["1m", "10m"] {
         let expected_nodes = match scale {
             "1m" => "node_count=1000000",
@@ -561,7 +561,7 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
 #[test]
 #[ignore = "P4.7/P5.3 documentation and evidence closure checkpoint"]
 fn p4_and_p5_close_only_with_public_docs_and_retained_evidence_links() {
-    let ledger = repo_source("todo/post-v1-1/README.md");
+    let ledger = repo_source("docs/roadmap.mdx");
     let supported = repo_source("docs/user_guide/supported_features.mdx");
     assert!(
         ledger.contains("| P4 | Complete |") && ledger.contains("| P5 | Complete |"),

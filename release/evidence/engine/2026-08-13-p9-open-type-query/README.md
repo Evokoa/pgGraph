@@ -17,29 +17,33 @@ is clean, run the following commands from the recorded exact commit:
 
 ```bash
 RUN_ID=<full-exact-commit> \
-EVIDENCE_DIR=todo/measurements/2026-08-13-p9-open-type-query \
+EVIDENCE_DIR=release/evidence/engine/2026-08-13-p9-open-type-query \
 ./graph/tests/heavy/run_open_type_query_criterion.sh
 
 cd graph
 PG_VERSION_FEATURE=pg17 \
 RUN_ID=<full-exact-commit> \
-OUTPUT_DIR=../todo/measurements/2026-08-13-p9-open-type-query \
+OUTPUT_DIR=../release/evidence/engine/2026-08-13-p9-open-type-query \
 ./tests/heavy/open_type_query_latency.sh
 cd ..
 
 RUN_ID=<full-exact-commit> \
-OUTPUT_DIR=todo/measurements/2026-08-13-p9-open-type-query \
+OUTPUT_DIR=release/evidence/engine/2026-08-13-p9-open-type-query \
 ./graph/tests/heavy/run_open_type_query_resources_docker.sh
 
 python3 scripts/write_p9_open_type_run_metadata.py \
   --repo-root . \
-  --evidence-dir todo/measurements/2026-08-13-p9-open-type-query \
+  --evidence-dir release/evidence/engine/2026-08-13-p9-open-type-query \
   --measurement-commit <full-exact-commit>
-python3 todo/measurements/2026-08-13-p9-open-type-query/check_results.py \
+python3 release/evidence/engine/2026-08-13-p9-open-type-query/check_results.py \
   --repo-root . \
-  --evidence-dir todo/measurements/2026-08-13-p9-open-type-query \
+  --evidence-dir release/evidence/engine/2026-08-13-p9-open-type-query \
   --budget-commit dd730b8
 ```
+
+The frozen budget files still resolve from their original paths inside the
+historical `dd730b8` tree. The reconciler uses those historical Git objects;
+the live retained evidence now belongs under `release/evidence/engine/`.
 
 The `cargo bench` Criterion run measures internal production Rust seams. The PostgreSQL runner
 measures the public SQL surfaces with same-backend warmups. The resource runner

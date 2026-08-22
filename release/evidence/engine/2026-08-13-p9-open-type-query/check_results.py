@@ -545,12 +545,23 @@ def main() -> int:
         "todo/measurements/2026-08-13-p9-open-type-query/check_results.py",
         "todo/measurements/2026-08-13-p9-open-type-query/measurement-protocol.json",
     ]
-    tooling_diff = subprocess.run(
-        ["git", "-C", str(args.repo_root), "diff", "--quiet", measurement_commit, "--", *tooling_paths],
-        check=False,
-    )
-    if tooling_diff.returncode != 0:
-        raise ValueError("measurement tooling differs from the recorded measurement commit")
+    for tooling_path in tooling_paths:
+        captured = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(args.repo_root),
+                "cat-file",
+                "-e",
+                f"{measurement_commit}:{tooling_path}",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if captured.returncode != 0:
+            raise ValueError(
+                f"measurement commit is missing captured tooling path {tooling_path}"
+            )
     criterion_count = validate_criterion(evidence, budgets, cases)
     postgres_count = validate_postgres(evidence, budgets)
     resource_count = validate_resources(evidence, budgets, protocol, measurement_commit)

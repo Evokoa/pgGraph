@@ -240,7 +240,7 @@ boundaries without changing the production artifact format. The traversal
 group is a synthetic encoded-section access microbenchmark across filter
 selectivity, degree, direction, and depth; it is not production graph traversal
 or RLS latency. The retained P6 evidence and predeclared acceptance budgets are
-in `todo/measurements/2026-08-13-p6-edge-type-width/`.
+in `release/evidence/engine/2026-08-13-p6-edge-type-width/`.
 
 The heavy RLS runner retains raw samples, percentile summaries, fixture
 metadata, source policy plans, and the exact commit. Development builds expose
@@ -263,8 +263,8 @@ It measures Engine registry lookup and filter resolution plus CSR BFS across a
 predeclared one-factor-at-a-time matrix. It is still an internal Rust benchmark;
 PostgreSQL SQL latency and Linux multi-backend RSS/PSS are separate retained
 evidence domains. The exact cases and acceptance budgets are frozen in
-`todo/measurements/2026-08-13-p9-open-type-query/` before any result files are
-created. Encoding labels are the current adaptive `u8`, `u16`, and `u32`
+`release/evidence/engine/2026-08-13-p9-open-type-query/` before any result files
+are created. Encoding labels are the current adaptive `u8`, `u16`, and `u32`
 representations, not a synthetic v6 control. Selection cases state their exact
 shape (`one_of_32`, `half_of_32`, and so on) instead of implying percentages
 that the bounded fixture cannot represent exactly.

@@ -422,7 +422,7 @@ fn p9_open_type_query_benchmark_and_linux_backend_resource_runner_are_declared()
 
 #[test]
 fn p9_open_type_query_and_resource_budgets_are_predeclared() {
-    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p9-open-type-query");
     let cases = fs::read_to_string(evidence.join("cases.json"))
         .expect("P9 must retain the exact predeclared benchmark case matrix");
     let case_json: serde_json::Value =
@@ -612,7 +612,7 @@ fn p9_open_type_query_and_resource_budgets_are_predeclared() {
 
 #[test]
 fn p9_open_type_measurement_tooling_is_declared_before_results() {
-    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p9-open-type-query");
     let protocol: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(evidence.join("measurement-protocol.json"))
             .expect("P9 needs a premeasurement protocol"),
@@ -799,7 +799,8 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         );
     }
 
-    let checker = repo_source("todo/measurements/2026-08-13-p9-open-type-query/check_results.py");
+    let checker =
+        repo_source("release/evidence/engine/2026-08-13-p9-open-type-query/check_results.py");
     for required in [
         "validate_criterion",
         "validate_postgres",
@@ -851,7 +852,7 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
 
 #[test]
 fn p9_retained_criterion_results_reconcile_all_predeclared_cases() {
-    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p9-open-type-query");
     let estimates = retained_delimited_rows(
         &evidence.join("criterion-estimates.csv"),
         ',',
@@ -939,7 +940,7 @@ fn p9_retained_criterion_results_reconcile_all_predeclared_cases() {
 
 #[test]
 fn p9_retained_postgres_results_cover_low_and_high_cardinality_surfaces() {
-    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p9-open-type-query");
     let samples = retained_delimited_rows(
         &evidence.join("postgres-samples.csv"),
         ',',
@@ -1028,7 +1029,7 @@ fn p9_retained_postgres_results_cover_low_and_high_cardinality_surfaces() {
 
 #[test]
 fn p9_retained_linux_resources_use_real_backend_pids_and_nonzero_pss() {
-    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p9-open-type-query");
     let samples = retained_delimited_rows(
         &evidence.join("resource-samples.tsv"),
         '\t',
@@ -1128,7 +1129,7 @@ fn p9_retained_linux_resources_use_real_backend_pids_and_nonzero_pss() {
 #[test]
 fn p9_retained_metadata_and_checker_reconcile_budgets_and_lineage() {
     const BUDGET_COMMIT: &str = "dd730b8";
-    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let evidence = repo_path("release/evidence/engine/2026-08-13-p9-open-type-query");
     let readme = fs::read_to_string(evidence.join("README.md"))
         .expect("P9 must retain reproducible open-type measurement instructions");
     for required in [

@@ -21,7 +21,7 @@ const LABEL_COUNTS: [u32; 5] = [254, 255, 65_534, 65_535, 65_536];
 const DEGREES: [u32; 4] = [1, 8, 64, 1_024];
 const DEPTHS: [i32; 3] = [1, 4, 16];
 const CASES_JSON: &str =
-    include_str!("../../todo/measurements/2026-08-13-p9-open-type-query/cases.json");
+    include_str!("../../release/evidence/engine/2026-08-13-p9-open-type-query/cases.json");
 
 #[derive(Clone, Copy)]
 enum Selectivity {

@@ -4,6 +4,11 @@ Compatibility fixtures are immutable once published. Each release directory
 captures the contract needed to prove upgrade, rebuild, and rollback behavior
 without treating derived graph artifacts as authoritative data.
 
+`topology-security-inventory.json` is the generated release fixture that binds
+every public topology entry point to its caller-visibility strategy. Contract
+tests and `scripts/check_topology_security_inventory.py` keep it synchronized
+with the SQL surface.
+
 ## Policy
 
 - Keep the final pre-1.0 fixture and, for 1.x, the oldest supported minor plus

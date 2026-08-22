@@ -22,9 +22,9 @@ if [[ "$RUN_PROFILE" == "p5_release" ]]; then
     10000000) P5_SCALE=10m ;;
     *) P5_SCALE="${NODE_COUNT}" ;;
   esac
-  DEFAULT_OUTPUT_DIR="${ROOT_DIR}/todo/measurements/$(date +%F)-p5-selective-rls-${P5_SCALE}"
+  DEFAULT_OUTPUT_DIR="${ROOT_DIR}/release/evidence/engine/$(date +%F)-p5-selective-rls-${P5_SCALE}"
 else
-  DEFAULT_OUTPUT_DIR="${ROOT_DIR}/todo/measurements/$(date +%F)-p0-eager-rls-${NODE_COUNT}"
+  DEFAULT_OUTPUT_DIR="${ROOT_DIR}/release/evidence/engine/$(date +%F)-p0-eager-rls-${NODE_COUNT}"
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
 STATEMENT_TIMEOUT_MS="${STATEMENT_TIMEOUT_MS:-600000}"

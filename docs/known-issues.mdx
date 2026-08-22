@@ -29,6 +29,21 @@ boundary. The supported contract is PostgreSQL-like result and topology
 visibility; pgGraph does not claim formal timing or resource-exhaustion
 noninterference between roles with different policies.
 
+### Some RLS workloads still use eager visibility preparation
+
+pgGraph 1.2 uses bounded lazy visibility resolution for supported targeted
+identity, traversal, path, and GQL/Cypher expansion work. Whole-graph analytics,
+wide source scans, all-possible-path enumeration, and other global work retain
+the eager PostgreSQL visibility oracle. Large policy-scoped graphs can therefore
+spend work proportional to the visible source set and may reach
+`statement_timeout` even when the final result is small.
+
+The eager route is a correctness-preserving fallback, not an authorization
+bypass. Use bounded targeted queries where possible, keep PostgreSQL source-key
+indexes current, and set an explicit `statement_timeout`. Completion of the
+retained 1M/10M comparison and the remaining targeted-path evidence is tracked
+in the [selective-RLS roadmap section](/roadmap#post-1-2-focus-complete-selective-rls-scale-evidence).
+
 ### Tenant scope requires the session-setting path under enforcement
 
 For a graph whose tables are registered with `tenant_column` rather than
