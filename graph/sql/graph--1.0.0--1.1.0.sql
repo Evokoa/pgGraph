@@ -10,12 +10,12 @@ ALTER FUNCTION graph.traverse(
 ALTER FUNCTION graph.traverse(
     oid, text, integer, text[], text, oid[], jsonb, text, text, text,
     boolean, boolean, integer, integer, integer, integer
-) RESET ALL;
+) RESET search_path;
 
 ALTER FUNCTION graph.connected_components() SECURITY INVOKER;
-ALTER FUNCTION graph.connected_components() RESET ALL;
+ALTER FUNCTION graph.connected_components() RESET search_path;
 ALTER FUNCTION graph.component_stats() SECURITY INVOKER;
-ALTER FUNCTION graph.component_stats() RESET ALL;
+ALTER FUNCTION graph.component_stats() RESET search_path;
 
 -- Query start now passes catalog-derived table OIDs through backend-private
 -- one-shot state. Remove the 1.0 helper that accepted a caller-supplied

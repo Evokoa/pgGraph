@@ -562,7 +562,7 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
 #[ignore = "P4.7/P5.3 documentation and evidence closure checkpoint"]
 fn p4_and_p5_close_only_with_public_docs_and_retained_evidence_links() {
     let ledger = repo_source("todo/post-v1-1/README.md");
-    let supported = repo_source("docs/user_guide/supported_features.md");
+    let supported = repo_source("docs/user_guide/supported_features.mdx");
     assert!(
         ledger.contains("| P4 | Complete |") && ledger.contains("| P5 | Complete |"),
         "P4/P5 may close only after retained release evidence passes"

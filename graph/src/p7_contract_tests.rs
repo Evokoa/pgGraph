@@ -243,7 +243,7 @@ fn p7_v7_migration_recovery_and_public_docs_ship_together() {
     }
     assert!(tests.contains("adaptive_edge_types_above_v6_roundtrip_and_filter_exactly"));
 
-    let supported = repo_source("docs/user_guide/supported_features.md");
+    let supported = repo_source("docs/user_guide/supported_features.mdx");
     let limits = repo_source("docs/user_guide/limitations-and-fit.mdx");
     let registration = repo_source("docs/user_guide/schema-registration.mdx");
     let api = repo_source("docs/user_guide/api-reference.mdx");

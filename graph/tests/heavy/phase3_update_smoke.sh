@@ -44,6 +44,10 @@ ALTER FUNCTION graph.traverse(
     oid, text, integer, text[], text, oid[], jsonb, text, text, text,
     boolean, boolean, integer, integer, integer, integer
 ) SECURITY DEFINER;
+ALTER FUNCTION graph.traverse(
+    oid, text, integer, text[], text, oid[], jsonb, text, text, text,
+    boolean, boolean, integer, integer, integer, integer
+) SET work_mem TO '64kB';
 ALTER FUNCTION graph.connected_components() SECURITY DEFINER;
 ALTER FUNCTION graph.component_stats() SECURITY DEFINER;
 ALTER FUNCTION graph.build_status(text) SECURITY INVOKER;
@@ -57,33 +61,14 @@ ALTER FUNCTION graph.maintenance_status_for_graph(text, text, text, integer) RES
 GRANT SELECT ON TABLE graph._build_jobs TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs TO PUBLIC;
 
-ALTER EXTENSION graph DROP FUNCTION graph._pending_sync_rows_for_current_role();
-DROP FUNCTION graph._pending_sync_rows_for_current_role();
-CREATE FUNCTION graph._pending_sync_rows_for_current_role(applied_sync_id bigint)
-RETURNS bigint
-STRICT SECURITY DEFINER
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c
-AS '$libdir/graph', 'pending_sync_rows_for_current_role_wrapper';
-ALTER EXTENSION graph ADD FUNCTION graph._pending_sync_rows_for_current_role(bigint);
-
-ALTER EXTENSION graph DROP FUNCTION graph._require_selected_graph_privilege_for_current_role(text);
-ALTER EXTENSION graph DROP FUNCTION graph._graph_id_for_current_role_with_privilege(text, text, text, text);
-ALTER EXTENSION graph DROP FUNCTION graph._expire_projection_heartbeats_for_current_role();
-ALTER EXTENSION graph DROP FUNCTION graph._expire_sync_watermarks_for_current_role();
-ALTER EXTENSION graph DROP FUNCTION graph._record_sync_watermark_for_current_role();
-ALTER EXTENSION graph DROP FUNCTION graph._record_projection_heartbeat_for_current_role();
-ALTER EXTENSION graph DROP FUNCTION graph._active_generation_count_for_current_role();
-ALTER EXTENSION graph DROP FUNCTION graph._enforce_loaded_graph_quota_for_current_role(bigint);
-
-DROP FUNCTION graph._require_selected_graph_privilege_for_current_role(text);
-DROP FUNCTION graph._graph_id_for_current_role_with_privilege(text, text, text, text);
-DROP FUNCTION graph._expire_projection_heartbeats_for_current_role();
-DROP FUNCTION graph._expire_sync_watermarks_for_current_role();
-DROP FUNCTION graph._record_sync_watermark_for_current_role();
-DROP FUNCTION graph._record_projection_heartbeat_for_current_role();
-DROP FUNCTION graph._active_generation_count_for_current_role();
-DROP FUNCTION graph._enforce_loaded_graph_quota_for_current_role(bigint);
+DO $$
+BEGIN
+    IF to_regprocedure('graph._pending_sync_rows_for_current_role(bigint)') IS NULL
+       OR to_regprocedure('graph._pending_sync_rows_for_current_role()') IS NOT NULL THEN
+        RAISE EXCEPTION 'installed 1.0 package has an unexpected pending-sync helper signature';
+    END IF;
+END
+$$;
 SQL
 
 cp "$UPDATE_SQL" "$SHAREDIR/"
@@ -96,15 +81,30 @@ DECLARE
     wrong_modes bigint;
     wrong_status_modes bigint;
     missing_helpers bigint;
+    traverse_settings text[];
 BEGIN
     SELECT count(*) INTO wrong_modes
     FROM pg_catalog.pg_proc AS proc
     JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = proc.pronamespace
     WHERE namespace.nspname = 'graph'
       AND proc.proname IN ('traverse', 'connected_components', 'component_stats')
-      AND proc.prosecdef;
+      AND (
+          proc.prosecdef
+          OR EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(proc.proconfig, ARRAY[]::text[])) AS setting
+              WHERE setting LIKE 'search_path=%'
+          )
+      );
     IF wrong_modes <> 0 THEN
-        RAISE EXCEPTION 'topology functions retained SECURITY DEFINER';
+        RAISE EXCEPTION 'topology functions retained SECURITY DEFINER or search_path';
+    END IF;
+
+    SELECT proc.proconfig INTO traverse_settings
+    FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid = 'graph.traverse(oid,text,integer,text[],text,oid[],jsonb,text,text,text,boolean,boolean,integer,integer,integer,integer)'::regprocedure;
+    IF NOT COALESCE(traverse_settings, ARRAY[]::text[]) @> ARRAY['work_mem=64kB'] THEN
+        RAISE EXCEPTION 'topology update removed an unrelated function setting';
     END IF;
 
     SELECT count(*) INTO wrong_status_modes

@@ -3928,8 +3928,6 @@ fn ensure_tenant_matches_graph_scope(
 // closes that gap with a per-backend, per-graph heartbeat, mirroring the
 // existing `_projection_generations` pattern
 // (`projection/manifest.rs::record_active_generation_heartbeat`).
-//
-// See: `todo/full-graph-engine/12-sync-log-retention-plan.md`
 
 /// How long a registered sync watermark heartbeat remains valid without a
 /// refresh. Matches `projection::manifest::DEFAULT_ACTIVE_GENERATION_TTL`;

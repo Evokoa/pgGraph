@@ -622,7 +622,7 @@ P9.5.
 - Complete high-cardinality build/sync/query resource tests, ACL/RLS and
   transaction matrices, fuzz/property evidence, migration/rollback docs,
   PostgreSQL-version tests, and performance evidence.
-- Update `supported_features.md` only when the feature and migration contract
+- Update `supported_features.mdx` only when the feature and migration contract
   are complete.
 
 **Exit:** the 254-label limitation is removed from the supported product with
@@ -696,7 +696,7 @@ durably convergent without per-batch rebuild.
   reporting DML statements, throughput, latency, WAL, RSS/PSS, sync lag, and
   compaction state.
 - Update API/querying/security/operations/migration docs and
-  `docs/user_guide/supported_features.md` in the same checkpoint.
+  `docs/user_guide/supported_features.mdx` in the same checkpoint.
 
 **Exit:** all three tracks have reviewed retained evidence on one exact commit,
 and this ledger contains no actionable incomplete phase.
@@ -708,7 +708,7 @@ For every phase:
 1. write or identify the red test and retain the failure reason;
 2. implement the smallest coherent vertical slice;
 3. run targeted tests in parallel where they do not share PostgreSQL state;
-4. update public docs and `supported_features.md` when supported behavior or an
+4. update public docs and `supported_features.mdx` when supported behavior or an
    existing supported contract changes;
 5. run formatting, strict clippy, production check, affected pgrx/heavy tests,
    docs drift, release contract, and `git diff --check` in proportion to risk;

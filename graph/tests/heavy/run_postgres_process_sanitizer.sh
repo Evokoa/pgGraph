@@ -73,6 +73,20 @@ trap report_error ERR
 trap cleanup EXIT
 
 if ! command -v valgrind >/dev/null 2>&1; then
+  if command -v docker >/dev/null 2>&1; then
+    # macOS has no valgrind. Run the same sanitizer profile inside the
+    # Linux pg-matrix image, which installs valgrind and re-invokes this
+    # script with PG_VERSION_FEATURE=pg17. Docker is unavailable inside
+    # the container, so the fallback cannot recurse.
+    echo "valgrind unavailable on this host; running the PostgreSQL-process sanitizer via Docker" >&2
+    PG_VERSIONS="$PG_MAJOR" \
+      RUN_RUST_TESTS=0 \
+      RUN_PGRX_SQL=0 \
+      RUN_GQL_WRITE_MATRIX=0 \
+      RUN_POSTGRES_SANITIZER=1 \
+      "$SCRIPT_DIR/run_pg_matrix_docker.sh"
+    exit 0
+  fi
   echo "valgrind is required for the PostgreSQL-process sanitizer gate" >&2
   exit 2
 fi

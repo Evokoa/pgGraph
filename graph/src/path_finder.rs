@@ -3407,7 +3407,7 @@ mod tests {
         };
         let pairs = [(0, 1), (1, 3), (0, 2), (2, 4), (4, 3)];
         let mut identified = Vec::new();
-        for (relationship_id, (source, target)) in (20..).zip(pairs) {
+        for (relationship_id, (source, target)) in (20_u32..).zip(pairs) {
             identified.push((raw(source, target), relationship_id));
             identified.push((raw(target, source), relationship_id));
         }

@@ -514,10 +514,6 @@ with `GraphError::SyncLogPruned` (`PG022`) instead of silently replaying past
 a gap. `applied_sync_id == 0` is exempt from this check — a backend that has
 never applied anything is not blocked by a prior prune.
 
-See: `todo/full-graph-engine/12-sync-log-retention-plan.md` for the original
-design and `todo/progress.md`'s 2026-07-17 entry for the implementation
-record.
-
 ## Status Interaction
 
 Runtime status and graph validation refresh:
