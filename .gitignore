@@ -62,10 +62,21 @@ node_modules/
 # AI Related Files
 .agents/
 .codex/
+.claude/
+planning/
+todo/
+TODO
+TODO.md
+TODO.txt
+todo.md
+todo.txt
+.todo
 
 # Environment Variables
 .env
 **/.env
+.env.*
+**/.env.*
 .venv/
 
 # Sandbox benchmark outputs and downloaded datasets

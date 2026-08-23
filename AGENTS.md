@@ -29,6 +29,39 @@ This applies strictly to subcommands that introduce new dependencies, such as
 `run`, and other routine package-manager subcommands unless the user explicitly
 asks to bypass this rule.
 
+# Current Project Scope
+
+pgGraph is an Apache-2.0 PostgreSQL extension at version 1.2.0, written in Rust
+2021 with Rust 1.96 and pgrx 0.19.1. PostgreSQL 14 through 18 are supported,
+PostgreSQL 17 is the default development target, and the PostgreSQL 13 feature
+is legacy best-effort rather than release-gated.
+
+Use `graph/Cargo.toml` for version and feature facts. Use
+`docs/contributor_guide/repository-map.mdx` for the current source layout and
+`docs/contributor_guide/testing-release.mdx` for validation. Do not copy old
+module or test inventories into this file.
+
+# Repository Independence And Compatibility
+
+This is an independent public open source repository. pgGraph must build,
+install, test, run, and release without a sibling repository or another Evokoa
+extension being present. Do not add local path dependencies or require a sibling
+checkout.
+
+pgGraph is designed to coexist with pgContext when both are installed. Keep that
+integration optional and use documented PostgreSQL SQL and data contracts.
+PostgreSQL source tables remain authoritative, and graph indexes remain derived
+and rebuildable. Standalone pgGraph verification is required even when a change
+also has a combined compatibility test.
+
+# Local Planning And Task Files
+
+Do not commit local plans, handoffs, progress notes, TODO files, or scratch task
+lists to this public repository. Keep them outside a standalone clone or in the
+external planning workspace configured by the contributor. Public roadmaps,
+architecture documents, API contracts, and release policies under `docs/`
+remain tracked product documentation.
+
 # pgGraph Source-Of-Truth Principle
 
 PostgreSQL source tables are the source of truth. pgGraph should feel like a
