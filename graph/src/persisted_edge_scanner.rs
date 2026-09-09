@@ -3,7 +3,7 @@
 use pgrx::prelude::*;
 
 use crate::build_runs::{merge_runs, RunCollector, RunKind, RunRecord, RunWorkspace, StagedRun};
-use crate::builder::{PrimaryKeySpec, RegisteredEdge, RegisteredTable};
+use crate::builder::{edge_source_node_oid, PrimaryKeySpec, RegisteredEdge, RegisteredTable};
 use crate::catalog::sql_table_name_from_oid;
 use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::quote::quote_ident;
@@ -91,6 +91,10 @@ pub(crate) fn scan_persisted_edges<'governor>(
             None
         };
         let source = sql_table_name_from_oid(edge.from_table_oid)?;
+        let source_oid = edge_source_node_oid(edge, tables)?;
+        let source_relation = source_oid
+            .map(|oid| format!("AND table_oid = {oid}"))
+            .unwrap_or_default();
         let fk_source = tables
             .iter()
             .find(|table| table.table_oid == edge.from_table_oid)
@@ -119,18 +123,16 @@ pub(crate) fn scan_persisted_edges<'governor>(
             "SELECT source_node.node_idx, target_node.node_idx, ({source_key})::text{weight}{label}
              FROM {} AS edge_row
              JOIN LATERAL (
-               SELECT node_idx FROM pg_temp.graph_build_nodes
-               WHERE primary_key = ({from_expr})::text
-               ORDER BY (table_oid = {}) DESC, table_oid LIMIT 1
+               SELECT min(node_idx) AS node_idx FROM pg_temp.graph_build_nodes
+               WHERE primary_key = ({from_expr})::text {source_relation}
+               HAVING count(*) = 1
              ) source_node ON true
              JOIN LATERAL (
                SELECT node_idx FROM pg_temp.graph_build_nodes
-               WHERE primary_key = ({to_expr})::text
-               ORDER BY (table_oid = {}) DESC, table_oid LIMIT 1
+               WHERE primary_key = ({to_expr})::text AND table_oid = {}
              ) target_node ON true
              ORDER BY 3, 1, 2{}",
             source.as_sql(),
-            edge.from_table_oid,
             edge.to_table_oid,
             stable_optional_order(edge.weight_column.is_some(), edge.label_column.is_some()),
         );

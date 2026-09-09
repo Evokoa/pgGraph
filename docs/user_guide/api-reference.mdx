@@ -926,9 +926,10 @@ For FK-style edges, `to_column` must exist on the target table.
 
 Many-to-many junction tables use edge-table mode. For example,
 `graph.add_edge('public.follows', 'follower', 'public.users', 'followee', ...)`
-registers `follows.follower -> follows.followee`. `to_table` is the preferred
-target node table when it is registered; otherwise endpoint resolution falls
-back across the registered node tables. Use the target table primary-key
+registers `follows.follower -> follows.followee`. `to_table` is the exact
+target node table; missing targets omit the relationship. Source foreign keys
+must identify one registered single-column node identifier. Without a source
+foreign key, only a unique match across registered nodes resolves. Use the target table primary-key
 column, such as `'id'`, only for FK-style edges from a registered source node
 table.
 

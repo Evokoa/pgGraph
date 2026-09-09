@@ -207,11 +207,11 @@ pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> 
 /// PostgreSQL creates inherited constraint rows for partitions. Canonicalizing
 /// both sides to their partition roots keeps those physical rows equivalent to
 /// the single logical relationship mapping. Multiple distinct referenced roots
-/// remain ambiguous and return `None` rather than selecting an arbitrary table.
+/// remain ambiguous and are rejected rather than treated as an untyped source.
 pub(crate) fn foreign_key_target_table_oid(
     relation_oid: u32,
     column: &str,
-) -> safety::GraphResult<Option<u32>> {
+) -> safety::GraphResult<Option<(u32, String)>> {
     Spi::connect(|client| {
         let rows = client
             .select(
@@ -224,13 +224,20 @@ pub(crate) fn foreign_key_target_table_oid(
                         pg_catalog.count(DISTINCT COALESCE(
                             pg_catalog.pg_partition_root(foreign_key.confrelid),
                             foreign_key.confrelid
-                        ))::bigint
+                        ))::bigint,
+                        bool_and(cardinality(foreign_key.conkey) = 1
+                             AND cardinality(foreign_key.confkey) = 1),
+                        min(target_attribute.attname::text),
+                        count(DISTINCT target_attribute.attname)::bigint
                    FROM pg_catalog.pg_constraint AS foreign_key
                    JOIN pg_catalog.unnest(foreign_key.conkey) WITH ORDINALITY
                         AS source_key(attnum, ordinality) ON true
                    JOIN pg_catalog.pg_attribute AS source_attribute
                      ON source_attribute.attrelid = foreign_key.conrelid
                     AND source_attribute.attnum = source_key.attnum
+                   JOIN pg_catalog.pg_attribute AS target_attribute
+                     ON target_attribute.attrelid = foreign_key.confrelid
+                    AND target_attribute.attnum = foreign_key.confkey[1]
                   WHERE foreign_key.contype = 'f'
                     AND COALESCE(
                             pg_catalog.pg_partition_root(foreign_key.conrelid),
@@ -254,16 +261,30 @@ pub(crate) fn foreign_key_target_table_oid(
                 "foreign-key target count read failed for relation OID {relation_oid}: {err}"
             ))
         })?;
-        if target_count != Some(1) {
+        if target_count == Some(0) {
             return Ok(None);
         }
-        row.get::<i32>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!(
-                    "foreign-key target read failed for relation OID {relation_oid}: {err}"
-                ))
-            })
-            .map(|oid| oid.map(|oid| oid as u32))
+        let read_error = |err| {
+            safety::GraphError::Internal(format!(
+                "foreign-key target read failed for relation OID {relation_oid}: {err}"
+            ))
+        };
+        if target_count != Some(1)
+            || row.get::<bool>(3).map_err(read_error)? != Some(true)
+            || row.get::<i64>(5).map_err(read_error)? != Some(1)
+        {
+            return Err(safety::GraphError::InvalidFilter {
+                reason: format!("edge source column '{column}' on relation OID {relation_oid} must reference one single-column node identity"),
+            });
+        }
+        let oid = row.get::<i32>(1).map_err(read_error)?;
+        let column = row.get::<String>(4).map_err(read_error)?;
+        match (oid, column) {
+            (Some(oid), Some(column)) => Ok(Some((oid as u32, column))),
+            _ => Err(safety::GraphError::Internal(
+                "foreign-key target identity was NULL".into(),
+            )),
+        }
     })
 }
 

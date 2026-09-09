@@ -1,9 +1,8 @@
 //! SQL sync-log replay, trigger management, and tenant-scope helpers.
 
 use crate::catalog::{
-    catalog_fingerprint, foreign_key_target_table_oid, read_catalog,
-    selected_or_default_graph_metadata, selected_or_default_graph_metadata_via_definer,
-    table_oid_from_name,
+    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata,
+    selected_or_default_graph_metadata_via_definer, table_oid_from_name,
 };
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
@@ -677,7 +676,7 @@ impl SyncReplayContext {
             .collect::<HashSet<_>>();
         let mut edge_source_node_oids = HashMap::with_capacity(edges.len());
         for edge in &edges {
-            if let Some(source_oid) = sync_edge_source_node_oid(edge, &tables)? {
+            if let Some(source_oid) = builder::edge_source_node_oid(edge, &tables)? {
                 edge_source_node_oids.insert(edge.mapping_id, source_oid);
             }
         }
@@ -719,19 +718,6 @@ impl SyncReplayContext {
         self.all_table_oids.push(oid);
         Ok(oid)
     }
-}
-
-fn sync_edge_source_node_oid(
-    edge: &builder::RegisteredEdge,
-    tables: &[builder::RegisteredTable],
-) -> safety::GraphResult<Option<u32>> {
-    if tables
-        .iter()
-        .any(|table| table.table_oid == edge.from_table_oid)
-    {
-        return Ok(Some(edge.from_table_oid));
-    }
-    foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)
 }
 
 struct LegacySyncEntry {

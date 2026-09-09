@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{PrimaryKeySpec, RegisteredEdge, RegisteredTable};
-use crate::catalog::{foreign_key_target_table_oid, read_catalog};
+use crate::catalog::read_catalog;
 use crate::gql::errors::{GqlError, Span};
 use crate::safety::GraphError;
 use crate::safety::GraphResult;
@@ -303,7 +303,7 @@ fn load_rels(
                 (Some(edge.from_table.as_str()), Some(edge.from_table_oid))
             } else {
                 let edge_table_oid = edge.from_table_oid;
-                let source_table_oid = edge_source_fk_table_oid(edge)?;
+                let source_table_oid = crate::builder::edge_source_node_oid(edge, tables)?;
                 let from_node_table =
                     source_table_oid.and_then(|oid| registered_table_oids.get(&oid).copied());
                 (from_node_table, source_table_oid.map(|_| edge_table_oid))
@@ -371,10 +371,6 @@ fn gql_identifier_from_text(text: &str) -> Option<String> {
         return None;
     }
     Some(text.to_string())
-}
-
-fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
-    foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)
 }
 
 fn gql_label_from_regclass(regclass: &str) -> Option<String> {

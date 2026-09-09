@@ -531,14 +531,7 @@ pub(crate) fn build_graph_with_governor(
         } else {
             None
         };
-        let from_oid = if tables
-            .iter()
-            .any(|table| table.table_oid == edge.from_table_oid)
-        {
-            Some(edge.from_table_oid)
-        } else {
-            foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)?
-        };
+        let from_oid = edge_source_node_oid(edge, tables)?;
         let to_oid = Some(edge.to_table_oid);
         let fk_style_source = from_oid.and_then(|_| {
             tables
@@ -882,6 +875,32 @@ fn register_edge_type_governed(
     engine.register_edge_type(label)
 }
 
+/// Infer the canonical source relation shared by builds and sync replay.
+/// An untyped source is resolved only when its key names one registered node.
+pub(crate) fn edge_source_node_oid(
+    edge: &RegisteredEdge,
+    tables: &[RegisteredTable],
+) -> GraphResult<Option<u32>> {
+    if tables
+        .iter()
+        .any(|table| table.table_oid == edge.from_table_oid)
+    {
+        return Ok(Some(edge.from_table_oid));
+    }
+    let Some((oid, column)) = foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)?
+    else {
+        return Ok(None);
+    };
+    if let Some(table) = tables.iter().find(|table| table.table_oid == oid) {
+        if table.id_columns.columns() != [column] {
+            return Err(GraphError::InvalidFilter {
+                reason: format!("edge source foreign key does not reference the registered node identity for table OID {oid}"),
+            });
+        }
+    }
+    Ok(Some(oid))
+}
+
 fn resolve_edge_batch(
     from_oid: Option<u32>,
     to_oid: Option<u32>,
@@ -929,23 +948,21 @@ fn resolve_edge_batch(
                   AND preferred_from.table_oid = $3::int8
                   AND preferred_from.primary_key = input.from_pk
                  LEFT JOIN LATERAL (
-                    SELECT node_idx
+                    SELECT min(node_idx) AS node_idx
                     FROM pg_temp.graph_build_nodes fallback
-                    WHERE fallback.primary_key = input.from_pk
-                    ORDER BY fallback.table_oid
-                    LIMIT 1
-                 ) fallback_from ON preferred_from.node_idx IS NULL
+                    WHERE $3::int8 < 0 AND fallback.primary_key = input.from_pk
+                    HAVING count(*) = 1
+                 ) fallback_from ON true
                  LEFT JOIN pg_temp.graph_build_nodes preferred_to
                    ON $4::int8 >= 0
                   AND preferred_to.table_oid = $4::int8
                   AND preferred_to.primary_key = input.to_pk
                  LEFT JOIN LATERAL (
-                    SELECT node_idx
+                    SELECT min(node_idx) AS node_idx
                     FROM pg_temp.graph_build_nodes fallback
-                    WHERE fallback.primary_key = input.to_pk
-                    ORDER BY fallback.table_oid
-                    LIMIT 1
-                 ) fallback_to ON preferred_to.node_idx IS NULL
+                    WHERE $4::int8 < 0 AND fallback.primary_key = input.to_pk
+                    HAVING count(*) = 1
+                 ) fallback_to ON true
                  ORDER BY input.ord",
                 None,
                 &[
