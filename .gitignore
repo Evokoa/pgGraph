@@ -66,7 +66,14 @@ node_modules/
 # Environment Variables
 .env
 **/.env
+.env.*
 .venv/
+
+# Local task lists and scratch work
+TODO.md
+TODO-*.md
+todos/
+scratch/
 
 # Sandbox benchmark outputs and downloaded datasets
 sandbox/benchmark/results/
