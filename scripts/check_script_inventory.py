@@ -45,6 +45,7 @@ LINUX_ONLY = {
     "graph/tests/heavy/run_open_type_query_resource_matrix.sh",
 }
 TOOL_OVERRIDES = {
+    "graph/tests/heavy/stability_regressions.sh": ["bash", "psql", "createdb", "dropdb"],
     "graph/tests/heavy/open_type_package_smoke.sh": [
         "bash",
         "psql",

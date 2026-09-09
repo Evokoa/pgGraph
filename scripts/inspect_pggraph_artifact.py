@@ -3,7 +3,7 @@
 
 Usage:
   python3 scripts/inspect_pggraph_artifact.py /path/to/main.pggraph
-  python3 scripts/inspect_pggraph_artifact.py -g <graph-id> --pgdata /var/lib/postgresql/data
+  python3 scripts/inspect_pggraph_artifact.py -g <graph-id> --database-oid <oid> --pgdata /var/lib/postgresql/data
   python3 scripts/inspect_pggraph_artifact.py --resolve-only /path/to/main.pggraph
 
 When the requested path is the logical `main.pggraph` path, the checker first
@@ -11,7 +11,7 @@ resolves `projection-current.json` to its checksummed generation manifest and
 then resolves that manifest's relative `base_artifact_path`. If no current
 pointer exists, the logical path remains available as a compatibility fallback.
 
-The checker validates the v6 header, aligned section descriptors, section
+The checker validates v6 and v7 headers, aligned section descriptors, section
 bounds, zero padding, and header/body CRC32 values. It does not require a
 running PostgreSQL server.
 """
@@ -28,7 +28,7 @@ import zlib
 import uuid
 
 MAGIC = b"PGGH"
-VERSION = 6
+SUPPORTED_VERSIONS = (6, 7)
 HEADER_SIZE = 512
 SECTION_ALIGNMENT = 64
 KNOWN_FLAGS = 0b111
@@ -37,7 +37,7 @@ SECTION_DESCRIPTOR_SIZE = 16
 BODY_CRC_OFFSET = 40
 HEADER_CRC_OFFSET = 44
 CURRENT_POINTER_VERSION = 1
-MANIFEST_VERSION = 2
+MANIFEST_VERSIONS = (2, 3)
 MAX_CURRENT_POINTER_BYTES = 4 * 1024
 SECTION_NAMES = [
     "is_active",
@@ -131,7 +131,7 @@ def resolve_artifact(path: pathlib.Path) -> pathlib.Path:
 
     manifest = _read_json_object(manifest_path)
     if (
-        manifest.get("version") != MANIFEST_VERSION
+        manifest.get("version") not in MANIFEST_VERSIONS
         or manifest.get("generation_id") != generation_id
     ):
         raise ValueError(f"{manifest_path} does not describe current generation {generation_id}")
@@ -144,7 +144,7 @@ def resolve_artifact(path: pathlib.Path) -> pathlib.Path:
 def inspect(path: pathlib.Path) -> dict[str, object]:
     data = path.read_bytes()
     if len(data) < HEADER_SIZE:
-        raise ValueError(f"{path} is too small to be a v{VERSION} .pggraph artifact")
+        raise ValueError(f"{path} is too small to be a .pggraph artifact")
     if data[:4] != MAGIC:
         raise ValueError(f"{path} has invalid magic bytes")
 
@@ -157,17 +157,21 @@ def inspect(path: pathlib.Path) -> dict[str, object]:
         inbound_edges,
         section_count,
     ) = struct.unpack_from("<7I", data, 4)
-    if version != VERSION:
-        raise ValueError(f"{path} has version {version}, expected {VERSION}; rebuild the graph")
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError(f"{path} has unsupported version {version}; rebuild the graph")
     if header_size != HEADER_SIZE or section_count != len(SECTION_NAMES):
-        raise ValueError(f"{path} has an invalid v{VERSION} header or section count")
+        raise ValueError(f"{path} has an invalid v{version} header or section count")
     if flags & ~KNOWN_FLAGS:
         raise ValueError(f"{path} has unsupported flags {flags:#x}")
     if forward_edges != inbound_edges:
         raise ValueError("forward and inbound edge counts differ")
     if bool(flags & 0b001) != bool(flags & 0b010):
         raise ValueError("forward and inbound weight flags differ")
-    if any(data[48:64]) or any(data[480:HEADER_SIZE]):
+    type_width = struct.unpack_from("<I", data, 48)[0] if version == 7 else 1
+    if type_width not in (1, 2, 4):
+        raise ValueError(f"invalid relationship type width: {type_width}")
+    reserved_start = 52 if version == 7 else 48
+    if any(data[reserved_start:64]) or any(data[480:HEADER_SIZE]):
         raise ValueError("reserved header bytes are not zero")
 
     body_length = struct.unpack_from("<Q", data, 32)[0]
@@ -200,6 +204,8 @@ def inspect(path: pathlib.Path) -> dict[str, object]:
             )
         if any(data[previous_end:offset]):
             raise ValueError(f"alignment padding before section {index} ({name}) is not zero")
+        if name in {"forward_type_ids", "inbound_type_ids"} and size != forward_edges * type_width:
+            raise ValueError(f"{name} size does not match edge count and type width")
         sections.append({"name": name, "offset": offset, "size_bytes": size})
         previous_end = end
     if previous_end != len(data):
@@ -216,6 +222,7 @@ def inspect(path: pathlib.Path) -> dict[str, object]:
         "forward_edge_count": forward_edges,
         "inbound_edge_count": inbound_edges,
         "section_count": section_count,
+        "edge_type_width_bytes": type_width,
         "header_crc32_valid": True,
         "body_crc32_valid": True,
         "crc32_valid": True,
@@ -231,7 +238,8 @@ def main() -> int:
         nargs="?",
         help="Logical main.pggraph, generation artifact, or graph root",
     )
-    parser.add_argument("-g", "--graph-id", help="Graph ID under PGDATA/<graph-data-dir>")
+    parser.add_argument("-g", "--graph-id", help="Graph ID within a database's artifact namespace")
+    parser.add_argument("--database-oid", type=int, help="Database OID, required with --graph-id")
     parser.add_argument(
         "--pgdata",
         type=pathlib.Path,
@@ -257,6 +265,9 @@ def main() -> int:
         if not args.graph_id:
             print("error: must provide either artifact path or --graph-id", file=sys.stderr)
             return 1
+        if args.database_oid is None or not 0 < args.database_oid <= 0xFFFFFFFF:
+            print("error: --graph-id requires a valid --database-oid", file=sys.stderr)
+            return 1
         try:
             graph_id = str(uuid.UUID(args.graph_id))
         except ValueError:
@@ -272,7 +283,7 @@ def main() -> int:
         if str(pgdata) in {"", "."}:
             print("error: PGDATA is not set; use --pgdata or set PGDATA", file=sys.stderr)
             return 1
-        artifact_path = pgdata.joinpath(*graph_data_dir.parts, graph_id, "main.pggraph")
+        artifact_path = pgdata.joinpath(*graph_data_dir.parts, f"database-{args.database_oid}", graph_id, "main.pggraph")
 
     try:
         if artifact_path.is_dir() or artifact_path.name == "main.pggraph":

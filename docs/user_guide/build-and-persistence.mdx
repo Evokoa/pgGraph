@@ -223,15 +223,25 @@ session C: graph.vacuum() -> 55P03 / PG006
 Default artifact-root layout:
 
 ```text
-$PGDATA/graph/<graph_id>/main.pggraph
-$PGDATA/graph/<graph_id>/main.pggraph.sync
-$PGDATA/graph/<graph_id>/projection-generation-<generation>-base.pggraph
-$PGDATA/graph/<graph_id>/projection-generation-<generation>.json
-$PGDATA/graph/<graph_id>/projection-current.json
+$PGDATA/graph/database-<database_oid>/<graph_id>/main.pggraph
+$PGDATA/graph/database-<database_oid>/<graph_id>/main.pggraph.sync
+$PGDATA/graph/database-<database_oid>/<graph_id>/projection-generation-<generation>-base.pggraph
+$PGDATA/graph/database-<database_oid>/<graph_id>/projection-generation-<generation>.json
+$PGDATA/graph/database-<database_oid>/<graph_id>/projection-current.json
 ```
 
 `graph.data_dir` changes the top-level subdirectory under `$PGDATA`. The graph
-directory name is always the catalog `graph_id`, not `graph_name`.
+directory name is always the catalog `graph_id`, not `graph_name`. The database
+OID namespace applies to default and named graphs, including absolute
+`graph.data_dir` paths. Rebuild graphs after changing their database OID or
+adopting this layout from an older installation; old shared roots are not loaded.
+
+If a transaction or savepoint aborts after readonly sync replay, the backend
+discards its replayed cache on the next graph call. Persisted graphs can reload
+when auto-load is enabled. For an in-memory graph or with auto-load disabled,
+explicitly rebuild or load the graph before continuing. This prevents aborted
+source rows, labels and replay watermarks from surviving in the cache.
+
 `main.pggraph` is the logical compatibility path and the fallback when no
 projection manifest exists. A current manifest takes precedence and selects
 the immutable generation-specific base used for serving.

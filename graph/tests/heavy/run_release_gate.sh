@@ -63,6 +63,7 @@ RUN_ALPHA_TO_V1_FIXTURE="${RUN_ALPHA_TO_V1_FIXTURE:-1}"
 
 PYTHONDONTWRITEBYTECODE=1 python3 ../scripts/check_script_inventory.py
 PYTHONDONTWRITEBYTECODE=1 python3 ../scripts/check_unsafe_allowlist.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ../scripts/tests -p 'test_*.py'
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground \
   python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'
 
@@ -107,6 +108,7 @@ fi
 
 if [[ "$RUN_BOUNDARY" == "1" ]]; then
   DBNAME="${DB_PREFIX}_boundary" ./tests/heavy/run_sqlstate_acl_boundary.sh
+  DB_PREFIX="${DB_PREFIX}_stability" bash ./tests/heavy/stability_regressions.sh
 fi
 
 if [[ "$RUN_BACKUP_RESTORE" == "1" ]]; then

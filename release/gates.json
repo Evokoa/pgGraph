@@ -17,7 +17,7 @@
   },
   "gates": {
     "script-contracts": {
-      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_bundle.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_validation.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
+      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ../scripts/tests -p 'test_*.py' && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_bundle.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_validation.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
       "cwd": "graph",
       "timeout_seconds": 300,
       "depends_on": [],

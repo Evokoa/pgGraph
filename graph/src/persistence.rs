@@ -2940,7 +2940,7 @@ pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<Strin
     Ok(graph_artifact_checksum(computed_crc))
 }
 
-/// Resolve the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
+/// Resolve `$PGDATA/{data_dir}/database-{database_oid}/{graph_id}`.
 ///
 /// The graph id must be canonical UUID text. Graph names are intentionally not
 /// accepted here because filesystem paths must be derived from stable catalog
@@ -2962,10 +2962,13 @@ fn graph_root_path_for_uncreated(graph_id: &str) -> GraphResult<PathBuf> {
         ));
     }
     let subdir = graph_data_dir();
-    Ok(PathBuf::from(&pgdata).join(&subdir).join(graph_id.as_str()))
+    Ok(PathBuf::from(&pgdata)
+        .join(&subdir)
+        .join(format!("database-{}", database_oid_for_paths()?))
+        .join(graph_id.as_str()))
 }
 
-/// Get the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
+/// Get the current database's artifact root for a graph.
 ///
 /// The directory is created for callers that intend to write artifacts.
 pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
@@ -2978,6 +2981,21 @@ pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
         ))
     })?;
     Ok(dir)
+}
+
+fn database_oid_for_paths() -> GraphResult<u32> {
+    #[cfg(all(test, not(feature = "pg_test")))]
+    let oid = 1;
+    #[cfg(any(not(test), feature = "pg_test"))]
+    // SAFETY: artifact paths are resolved inside a PostgreSQL backend. The
+    // server sets MyDatabaseId at connection startup and owns its lifetime.
+    let oid = unsafe { pgrx::pg_sys::MyDatabaseId.to_u32() };
+    if oid == 0 {
+        return Err(GraphError::Internal(
+            "cannot resolve graph artifacts without a database identity".into(),
+        ));
+    }
+    Ok(oid)
 }
 
 /// Get the `.pggraph` artifact path for a graph id.
@@ -3234,6 +3252,7 @@ mod tests {
             path,
             pgdata
                 .join("graph")
+                .join("database-1")
                 .join(crate::graph_policy::DEFAULT_GRAPH_ID_TEXT)
                 .join("main.pggraph")
         );
@@ -3263,17 +3282,32 @@ mod tests {
 
         assert_eq!(
             path_a,
-            pgdata.join("graph").join(graph_a).join("main.pggraph")
+            pgdata
+                .join("graph")
+                .join("database-1")
+                .join(graph_a)
+                .join("main.pggraph")
         );
         assert_eq!(
             path_b,
-            pgdata.join("graph").join(graph_b).join("main.pggraph")
+            pgdata
+                .join("graph")
+                .join("database-1")
+                .join(graph_b)
+                .join("main.pggraph")
         );
         assert_eq!(
             checkpoint_a,
-            pgdata.join("graph").join(graph_a).join("main.pggraph.sync")
+            pgdata
+                .join("graph")
+                .join("database-1")
+                .join(graph_a)
+                .join("main.pggraph.sync")
         );
-        assert_eq!(manifest_root_a, pgdata.join("graph").join(graph_a));
+        assert_eq!(
+            manifest_root_a,
+            pgdata.join("graph").join("database-1").join(graph_a)
+        );
         assert_ne!(path_a.parent(), path_b.parent());
         let _ = std::fs::remove_dir_all(&pgdata);
     }
@@ -3309,7 +3343,11 @@ mod tests {
 
         remove_graph_artifacts_for(graph_id).unwrap();
 
-        assert!(!pgdata.join("graph").join(graph_id).exists());
+        assert!(!pgdata
+            .join("graph")
+            .join("database-1")
+            .join(graph_id)
+            .exists());
         let _ = std::fs::remove_dir_all(&pgdata);
     }
 
