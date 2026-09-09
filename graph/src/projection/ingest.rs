@@ -528,7 +528,7 @@ impl ProjectionIngester {
             now_unix_micros()?,
         );
         if let Some(previous) = previous.as_ref() {
-            manifest.inherit_operation_timestamps(previous);
+            manifest.inherit_generation_metadata(previous);
             manifest.segments = previous.segments.clone();
             manifest.base_chunks = previous.base_chunks.clone();
             manifest.obsolete_files = previous.obsolete_files.clone();

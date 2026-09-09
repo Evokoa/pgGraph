@@ -356,7 +356,7 @@ fn publish_base_chunk_rewrite_inner(
         now_unix_micros()?,
     );
     manifest.previous_generation_id = Some(previous.generation_id);
-    manifest.inherit_operation_timestamps(previous);
+    manifest.inherit_generation_metadata(previous);
     match reason {
         BaseChunkRewriteReason::None => {}
         BaseChunkRewriteReason::Compaction => manifest.mark_compaction(),

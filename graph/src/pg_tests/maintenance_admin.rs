@@ -1,4 +1,36 @@
 #[pg_test]
+fn missing_catalog_provenance_cannot_be_loaded_through_compaction() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id');
+              SET graph.persist_on_build = on;
+              SELECT * FROM graph.build();")
+        .expect("build provenance fixture");
+    let path = crate::persistence::graph_file_path().unwrap();
+    let root = crate::persistence::projection_manifest_root(&path);
+    let store = crate::projection::manifest::ProjectionManifestStore::new(root);
+    let mut legacy = store.load_latest_current().unwrap().unwrap();
+    legacy.previous_generation_id = Some(legacy.generation_id);
+    legacy.generation_id += 1;
+    legacy.version = 3;
+    legacy.catalog_fingerprint = None;
+    store.publish(&legacy).unwrap();
+    Spi::run("SELECT graph.unload_graph('default'); SET graph.auto_load = on").unwrap();
+    Spi::run("DO $$ BEGIN
+      BEGIN
+        PERFORM * FROM graph.projection_compact();
+        RAISE EXCEPTION 'legacy compaction installed an unverified graph';
+      EXCEPTION WHEN SQLSTATE 'XX000' THEN NULL;
+      END;
+      BEGIN
+        PERFORM * FROM graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 1);
+        RAISE EXCEPTION 'legacy graph was accepted after compaction';
+      EXCEPTION WHEN SQLSTATE 'XX000' THEN NULL;
+      END;
+    END $$;")
+        .expect("legacy provenance must fail closed");
+}
+
+#[pg_test]
 fn adaptive_edge_types_above_v6_roundtrip_and_filter_exactly() {
     reset_and_create_fixtures();
     Spi::run(
@@ -2812,6 +2844,7 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
             dirty_source_count: 2,
             dirty_edge_count: 1,
         });
+    manifest.catalog_fingerprint = store.load_latest_current().unwrap().unwrap().catalog_fingerprint;
     store.publish(&manifest).expect("chunk manifest publishes");
     std::fs::write(&chunk_path, b"corrupt chunk").expect("chunk corruption writes");
 

@@ -460,7 +460,7 @@ pub(crate) fn compact_generation(
         now_unix_micros()?,
     );
     manifest.previous_generation_id = Some(previous.generation_id);
-    manifest.inherit_operation_timestamps(previous);
+    manifest.inherit_generation_metadata(previous);
     manifest.mark_compaction();
     manifest.relationship_identities = previous.relationship_identities.clone();
     manifest.edge_type_dictionary = previous.edge_type_dictionary.clone();

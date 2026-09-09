@@ -1,5 +1,10 @@
 # Build And Persistence
 
+Persisted graphs must include the catalog provenance captured at build time.
+After upgrading from artifacts without that metadata, run `graph.build()`
+before serving graph queries. Registration changes also require a rebuild;
+opening a new connection does not make an older artifact current.
+
 New base builds write version 7 artifacts with adaptive one-, two-, or
 four-byte relationship type IDs. Version 6 artifacts remain readable and move
 to v7 on rebuild. Candidate validation happens before generation publication,

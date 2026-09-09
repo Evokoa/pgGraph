@@ -2511,6 +2511,9 @@ fn load_graph_file_internal(
     }
     if let Some(manifest) = pinned_manifest.as_ref() {
         validate_projection_manifest_base(path, computed_crc, artifact_version, manifest)?;
+        if let Some(fingerprint) = manifest.catalog_fingerprint {
+            engine.set_catalog_fingerprint(fingerprint);
+        }
     }
     let manifest = pinned_manifest;
     let projection_workspace = manifest

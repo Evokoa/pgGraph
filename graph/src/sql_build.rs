@@ -107,7 +107,8 @@ fn build_persisted_and_publish_engine(
             crate::projection::recovery::prepare_generation_specific_rebuilt_base_manifest(
                 request.publication_plan,
                 request.source_boundary.sync_watermark(),
-            )?;
+            )?
+            .with_catalog_fingerprint(request.source_boundary.catalog_fingerprint());
 
         report_progress(
             progress,
@@ -134,7 +135,7 @@ fn build_persisted_and_publish_engine(
             });
         }
         crate::runtime_state::inject_replacement_fault("validation")?;
-        loaded.set_catalog_fingerprint(request.source_boundary.catalog_fingerprint());
+        loaded.validate_catalog_fingerprint(Some(request.source_boundary.catalog_fingerprint()))?;
         loaded.record_applied_sync_id(request.source_boundary.sync_watermark());
         loaded.set_projection_mode(request.projection_mode);
         loaded.build_resource_pressure_events = direct.pressure_events;

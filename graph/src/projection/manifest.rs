@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::safety::{GraphError, GraphResult};
 
 /// Current JSON manifest format version.
-pub(crate) const MANIFEST_VERSION: u32 = 3;
+pub(crate) const MANIFEST_VERSION: u32 = 4;
 const LEGACY_MANIFEST_VERSION: u32 = 2;
 /// Validation state for a generation whose artifacts are ready to read.
 pub(crate) const VALIDATION_STATUS_VALID: &str = "valid";
@@ -96,6 +96,9 @@ pub(crate) struct ProjectionManifest {
     pub(crate) obsolete_files: Vec<ManifestFileRef>,
     /// Highest durable sync-log row represented by this generation.
     pub(crate) sync_watermark: i64,
+    /// Registration fingerprint captured by the source build boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) catalog_fingerprint: Option<u64>,
     /// Current validation status for the manifest and referenced files.
     pub(crate) validation_status: String,
     /// Manifest creation timestamp as Unix microseconds.
@@ -134,6 +137,7 @@ impl ProjectionManifest {
             base_chunks: Vec::new(),
             obsolete_files: Vec::new(),
             sync_watermark,
+            catalog_fingerprint: None,
             validation_status: VALIDATION_STATUS_VALID.to_string(),
             created_at_unix_micros,
             last_ingestion_unix_micros: None,
@@ -142,8 +146,9 @@ impl ProjectionManifest {
         }
     }
 
-    /// Carry forward persisted operation timestamps from the previous manifest.
-    pub(crate) fn inherit_operation_timestamps(&mut self, previous: &Self) {
+    /// Carry forward build provenance and operation timestamps from the previous manifest.
+    pub(crate) fn inherit_generation_metadata(&mut self, previous: &Self) {
+        self.catalog_fingerprint = previous.catalog_fingerprint;
         self.last_ingestion_unix_micros = previous.last_ingestion_unix_micros;
         self.last_compaction_unix_micros = previous.last_compaction_unix_micros;
         self.last_repair_unix_micros = previous.last_repair_unix_micros;
@@ -173,7 +178,7 @@ impl ProjectionManifest {
     /// fields are empty, watermarks are negative, or child references are
     /// incomplete.
     pub(crate) fn validate(&self) -> GraphResult<()> {
-        if !matches!(self.version, LEGACY_MANIFEST_VERSION | MANIFEST_VERSION) {
+        if !matches!(self.version, LEGACY_MANIFEST_VERSION | 3 | MANIFEST_VERSION) {
             return Err(GraphError::IncompatibleVersion(format!(
                 "projection manifest version {} is unsupported; expected {}",
                 self.version, MANIFEST_VERSION
@@ -1720,6 +1725,26 @@ mod tests {
         assert_eq!(decoded, manifest);
         assert!(decoded.segments.is_empty());
         assert_eq!(decoded.validation_status, VALIDATION_STATUS_VALID);
+    }
+
+    #[test]
+    fn projection_manifest_preserves_catalog_provenance_and_legacy_absence() {
+        let mut original = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:abcd", 7, 0, 1);
+        original.catalog_fingerprint = Some(42);
+        let mut derived = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:abcd", 7, 3, 2);
+        derived.inherit_generation_metadata(&original);
+        let decoded = ProjectionManifest::from_json(&derived.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(decoded.catalog_fingerprint, Some(42));
+        assert_eq!(decoded.version, 4);
+        let mut legacy = original;
+        legacy.version = 3;
+        legacy.catalog_fingerprint = None;
+        let decoded = ProjectionManifest::from_json(&legacy.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(decoded.catalog_fingerprint, None);
+        assert!(
+            crate::engine::validate_catalog_provenance(decoded.catalog_fingerprint, Some(42))
+                .is_err()
+        );
     }
 
     #[test]

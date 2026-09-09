@@ -921,15 +921,18 @@ fn sync_apply_stats_from_entries(entries: &[SyncLogEntry]) -> SyncApplyStats {
 
 fn install_loaded_engine_for_selected_graph(
     graph: &crate::catalog::GraphMetadata,
-    mut loaded: engine::Engine,
+    loaded: engine::Engine,
     query_catalog_fingerprint: Option<u64>,
 ) -> safety::GraphResult<()> {
     crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.apply_sync()")?;
-    if let Some(catalog_fingerprint) = query_catalog_fingerprint {
-        loaded.set_catalog_fingerprint(catalog_fingerprint);
-    } else if let Ok((tables, edges, filters)) = read_catalog() {
-        loaded.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
-    }
+    let expected = match query_catalog_fingerprint {
+        Some(fingerprint) => fingerprint,
+        None => {
+            let (tables, edges, filters) = read_catalog()?;
+            catalog_fingerprint(&tables, &edges, &filters)?
+        }
+    };
+    loaded.validate_catalog_fingerprint(Some(expected))?;
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
@@ -1033,6 +1036,19 @@ fn ingest_projection_until_internal(
         .map_err(crate::safety::resource_limit_error)?;
     let store = ProjectionManifestStore::new(root.clone());
     let previous = store.load_latest_current()?;
+    let expected_fingerprint = match query_catalog_fingerprint {
+        Some(fingerprint) => fingerprint,
+        None => {
+            let (tables, edges, filters) = read_catalog()?;
+            catalog_fingerprint(&tables, &edges, &filters)?
+        }
+    };
+    engine::validate_catalog_provenance(
+        previous
+            .as_ref()
+            .and_then(|manifest| manifest.catalog_fingerprint),
+        Some(expected_fingerprint),
+    )?;
     let previous_watermark = match previous.as_ref() {
         Some(manifest) => manifest.sync_watermark,
         None => read_sync_checkpoint(&graph_path)?.unwrap_or(0),

@@ -1904,6 +1904,8 @@ fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::Gr
             safety::GraphError::Internal("engine residency does not fit u64".to_string())
         })?;
     let loaded = crate::persistence::load_graph_file_with_residency(path, resident)?;
+    let (tables, edges, filters) = read_catalog()?;
+    loaded.validate_catalog_fingerprint(Some(catalog_fingerprint(&tables, &edges, &filters)?))?;
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
@@ -4033,7 +4035,7 @@ fn graph_map(
 
 fn graph_map_json(graph: &catalog::GraphMetadata) -> safety::GraphResult<serde_json::Value> {
     let (tables, edges, filter_columns) = crate::catalog::read_catalog_for_graph(&graph.graph_id)?;
-    let catalog_fingerprint = catalog_fingerprint(&tables, &edges, &filter_columns);
+    let catalog_fingerprint = catalog_fingerprint(&tables, &edges, &filter_columns)?;
     let mut warnings = graph_map_warnings(graph, &tables, &edges, &filter_columns)?;
     let status = graph_map_status(graph)?;
     if status

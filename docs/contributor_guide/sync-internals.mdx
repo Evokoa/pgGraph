@@ -384,6 +384,15 @@ reference is absent. The loader preserves the immutable base registry as an
 exact prefix and rejects segment or base-chunk IDs outside the cumulative
 dictionary before topology installation.
 
+Manifest version 4 persists the source build's catalog fingerprint. It uses
+XXH3-64 over a versioned, length-prefixed encoding of registrations, with
+little-endian integers and UTF-8 text. Derived generations retain the build's
+fingerprint. Load and ingestion compare it against current registrations;
+missing or mismatched provenance requires rebuilding. Version 2 and 3 metadata
+can be inspected for recovery, but cannot authorize serving without provenance.
+Older releases cannot read version 4 manifests, so rebuild derived artifacts
+when downgrading.
+
 Ingestion generations retain all segment, base-chunk, and obsolete-file
 references from the preceding manifest before appending new segments. A sync
 batch that cannot produce a durable row does not advance the watermark.

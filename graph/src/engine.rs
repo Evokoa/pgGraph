@@ -30,6 +30,23 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub(crate) fn validate_catalog_provenance(
+    actual: Option<u64>,
+    expected: Option<u64>,
+) -> GraphResult<()> {
+    let Some(actual) = actual else {
+        return Err(GraphError::Internal(
+            "persisted graph has no catalog provenance; rebuild required".into(),
+        ));
+    };
+    if expected.is_some_and(|expected| expected != actual) {
+        return Err(GraphError::Internal(
+            "registered graph catalog changed since graph.build(); rebuild required".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolution storage backend.
 ///
 /// - `Builder`: compact append-only entries used during node ingestion.
@@ -971,6 +988,11 @@ impl Engine {
         }
     }
 
+    /// Require persisted registration provenance before a loaded graph is served.
+    pub(crate) fn validate_catalog_fingerprint(&self, expected: Option<u64>) -> GraphResult<()> {
+        validate_catalog_provenance(self.catalog_fingerprint, expected)
+    }
+
     /// Refresh status-only observations without replacing graph data stores.
     pub fn refresh_observed_state(
         &mut self,
@@ -989,6 +1011,11 @@ impl Engine {
         }
 
         if !self.built {
+            return;
+        }
+
+        if self._mmap.is_some() && self.catalog_fingerprint.is_none() {
+            self.mark_schema_invalid("persisted graph has no catalog provenance; rebuild required");
             return;
         }
 

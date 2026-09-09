@@ -674,18 +674,16 @@ fn load_selected_graph_from_disk(
         pgrx::log!("graph: loading from {} (mmap)", path.display());
         match persistence::load_graph_file(&path) {
             Ok(mut loaded_engine) => {
-                match catalog_fingerprint {
-                    CatalogFingerprintForLoad::Known(catalog_fingerprint) => {
-                        loaded_engine.set_catalog_fingerprint(catalog_fingerprint);
-                    }
+                let expected = match catalog_fingerprint {
+                    CatalogFingerprintForLoad::Known(fingerprint) => Some(fingerprint),
                     CatalogFingerprintForLoad::Resolve => {
-                        if let Ok((tables, edges, filters)) = read_catalog() {
-                            loaded_engine.set_catalog_fingerprint(super::catalog_fingerprint(
-                                &tables, &edges, &filters,
-                            ));
-                        }
+                        let (tables, edges, filters) = read_catalog()?;
+                        Some(super::catalog_fingerprint(&tables, &edges, &filters)?)
                     }
-                    CatalogFingerprintForLoad::Omit => {}
+                    CatalogFingerprintForLoad::Omit => None,
+                };
+                if let Err(error) = loaded_engine.validate_catalog_fingerprint(expected) {
+                    loaded_engine.refresh_observed_state(0, 0, &Err(error));
                 }
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
@@ -817,8 +815,8 @@ pub(crate) struct QueryStartState {
 
 fn load_query_start_state(graph: catalog::GraphMetadata) -> safety::GraphResult<QueryStartState> {
     let (tables, edges, filter_columns) = catalog::read_catalog_for_graph(&graph.graph_id)?;
-    let catalog_fingerprint = catalog::catalog_fingerprint(&tables, &edges, &filter_columns);
-    let catalog_state = catalog::current_catalog_state_from_rows(&tables, &edges, &filter_columns);
+    let catalog_state = catalog::current_catalog_state_from_rows(&tables, &edges, &filter_columns)?;
+    let catalog_fingerprint = catalog_state.0;
     let applicable_table_oids =
         crate::sql_sync::applicable_table_oids_from_catalog(&tables, &edges);
     let sync_mode = current_sync_mode()?;
@@ -828,7 +826,7 @@ fn load_query_start_state(graph: catalog::GraphMetadata) -> safety::GraphResult<
         edges,
         filter_columns,
         catalog_fingerprint,
-        catalog_state,
+        catalog_state: Ok(catalog_state),
         applicable_table_oids,
         sync_mode,
     })
