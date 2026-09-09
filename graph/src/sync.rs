@@ -254,7 +254,20 @@ pub fn generate_trigger_sql(
 
     let key_val_pairs_new = columns
         .iter()
-        .map(|c| format!("{}, NEW.{}::text", quote_literal(c), quote_ident(c)))
+        .map(|column| {
+            let value = match column.split_once('.') {
+                Some((base, path)) => {
+                    let mut expression = format!("NEW.{}", quote_ident(base));
+                    for key in path.split('.') {
+                        expression.push_str(" -> ");
+                        expression.push_str(&quote_literal(key));
+                    }
+                    format!("({expression})::text")
+                }
+                None => format!("NEW.{}::text", quote_ident(column)),
+            };
+            format!("{}, {value}", quote_literal(column))
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -415,6 +428,26 @@ mod tests {
         assert!(sql.contains(r#"'Display Name', NEW."Display Name"::text"#));
         assert!(sql.contains(r#"'order', NEW."order"::text"#));
         assert!(sql.contains(r##"'"Weird Schema"."select"'"##));
+    }
+
+    #[test]
+    fn generate_trigger_sql_extracts_nested_jsonb_properties() {
+        let qt = QualifiedTable {
+            oid: 42,
+            schema: "public".into(),
+            name: "nodes".into(),
+        };
+        let sql = generate_trigger_sql(
+            &qt,
+            &PrimaryKeySpec::from_columns(vec!["id".into()]),
+            &["props.w".into(), "Profile.details.owner's name".into()],
+        );
+
+        assert!(sql.contains(r#"'props.w', (NEW."props" -> 'w')::text"#));
+        assert!(sql.contains(
+            r#"'Profile.details.owner''s name', (NEW."Profile" -> 'details' -> 'owner''s name')::text"#
+        ));
+        assert!(!sql.contains(r#"NEW."props.w""#));
     }
 
     // ─── INSERT ───

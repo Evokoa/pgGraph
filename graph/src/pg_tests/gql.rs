@@ -6370,6 +6370,7 @@ fn gql_remove_typed_property_sets_source_column_null_idempotently() {
 #[pg_test]
 fn gql_remove_jsonb_property_path_drops_key_idempotently() {
     reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("enable sync triggers failed");
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
     Spi::run("ALTER TABLE public.graph_test_users_pgtest ADD COLUMN profile jsonb")
     .expect("add profile column failed");

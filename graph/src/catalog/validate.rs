@@ -403,10 +403,12 @@ pub(crate) fn validate_column_exists(table_oid: u32, column: &str) -> safety::Gr
     if exists {
         Ok(())
     } else {
-        Err(safety::GraphError::Internal(format!(
-            "column '{}' does not exist on table OID {}",
-            column, table_oid
-        )))
+        Err(safety::GraphError::InvalidFilter {
+            reason: format!(
+                "column '{}' does not exist on table OID {}",
+                column, table_oid
+            ),
+        })
     }
 }
 
@@ -472,10 +474,12 @@ pub(crate) fn validate_numeric_column(table_oid: u32, column: &str) -> safety::G
     if is_numeric {
         Ok(())
     } else {
-        Err(safety::GraphError::Internal(format!(
-            "column '{}' on table OID {} is not numeric",
-            column, table_oid
-        )))
+        Err(safety::GraphError::InvalidFilter {
+            reason: format!(
+                "column '{}' on table OID {} is not numeric",
+                column, table_oid
+            ),
+        })
     }
 }
 
