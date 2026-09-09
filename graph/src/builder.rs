@@ -875,16 +875,40 @@ fn register_edge_type_governed(
     engine.register_edge_type(label)
 }
 
-/// Infer the canonical source relation shared by builds and sync replay.
+/// Validate endpoint identities and infer the source relation for builds and replay.
 /// An untyped source is resolved only when its key names one registered node.
 pub(crate) fn edge_source_node_oid(
     edge: &RegisteredEdge,
     tables: &[RegisteredTable],
 ) -> GraphResult<Option<u32>> {
-    if tables
+    let source_is_node = tables
         .iter()
-        .any(|table| table.table_oid == edge.from_table_oid)
+        .any(|table| table.table_oid == edge.from_table_oid);
+    if let Some(target) = tables
+        .iter()
+        .find(|table| table.table_oid == edge.to_table_oid)
     {
+        if source_is_node && target.id_columns.columns() != [edge.to_column.as_str()] {
+            return Err(GraphError::InvalidFilter {
+                reason: "FK-style target column must be the registered node identifier".into(),
+            });
+        }
+        let target_column = if source_is_node {
+            &edge.from_column
+        } else {
+            &edge.to_column
+        };
+        if let Some((oid, column)) =
+            foreign_key_target_table_oid(edge.from_table_oid, target_column)?
+        {
+            if oid != target.table_oid || target.id_columns.columns() != [column] {
+                return Err(GraphError::InvalidFilter {
+                    reason: "edge target foreign key does not reference the registered target node identity".into(),
+                });
+            }
+        }
+    }
+    if source_is_node {
         return Ok(Some(edge.from_table_oid));
     }
     let Some((oid, column)) = foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)?

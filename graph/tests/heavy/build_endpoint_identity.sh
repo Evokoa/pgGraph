@@ -52,7 +52,7 @@ SQL
 done
 
 for persist in on off; do
-  for mapping in ambiguous alternate composite; do
+  for mapping in ambiguous alternate composite target_alternate node_target_alternate node_target_fk; do
     database="${DB_PREFIX}_${persist}_${mapping}"
     pggraph_validate_database_name "$database"
     if (( ${#database} > 63 )); then
@@ -76,10 +76,25 @@ DO $$ BEGIN
       ALTER TABLE e ADD FOREIGN KEY (src) REFERENCES n(alternative);
     WHEN 'composite' THEN
       ALTER TABLE e ADD FOREIGN KEY (src, second_key) REFERENCES n(id, alternative);
+    WHEN 'target_alternate' THEN
+      ALTER TABLE e ADD FOREIGN KEY (dst) REFERENCES n(alternative);
+    WHEN 'node_target_alternate' THEN
+      ALTER TABLE e ADD FOREIGN KEY (src) REFERENCES n(alternative);
+    WHEN 'node_target_fk' THEN
+      ALTER TABLE e ADD FOREIGN KEY (src) REFERENCES n(alternative);
   END CASE;
 END $$;
 SELECT graph.add_table('n'::regclass, 'id');
-SELECT graph.add_edge('e'::regclass, 'src', 'n'::regclass, 'dst', 'invalid_source', false);
+INSERT INTO n VALUES ('a', 'b'), ('b', 'a');
+INSERT INTO m VALUES ('a');
+INSERT INTO e(src, second_key, dst) VALUES ('a', 'b', 'a');
+SELECT graph.add_table('e'::regclass, 'id')
+WHERE current_setting('endpoint_test.mapping') IN ('node_target_alternate', 'node_target_fk');
+SELECT graph.add_edge('e'::regclass, 'src', 'n'::regclass,
+  CASE WHEN current_setting('endpoint_test.mapping') = 'node_target_alternate'
+       THEN 'alternative'
+       WHEN current_setting('endpoint_test.mapping') = 'node_target_fk'
+       THEN 'id' ELSE 'dst' END, 'invalid_mapping', false);
 DO $$
 DECLARE detail text;
 BEGIN

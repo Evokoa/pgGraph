@@ -274,7 +274,7 @@ pub(crate) fn foreign_key_target_table_oid(
             || row.get::<i64>(5).map_err(read_error)? != Some(1)
         {
             return Err(safety::GraphError::InvalidFilter {
-                reason: format!("edge source column '{column}' on relation OID {relation_oid} must reference one single-column node identity"),
+                reason: format!("edge endpoint column '{column}' on relation OID {relation_oid} must reference one single-column node identity"),
             });
         }
         let oid = row.get::<i32>(1).map_err(read_error)?;

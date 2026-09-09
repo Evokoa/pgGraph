@@ -298,12 +298,13 @@ fn load_rels(
     }
     let mut rels = Vec::with_capacity(edges.len());
     for edge in edges {
+        let source_node_oid = crate::builder::edge_source_node_oid(edge, tables)?;
         let (from_node_table, relationship_source_table_oid) =
             if registered_tables.contains(edge.from_table.as_str()) {
                 (Some(edge.from_table.as_str()), Some(edge.from_table_oid))
             } else {
                 let edge_table_oid = edge.from_table_oid;
-                let source_table_oid = crate::builder::edge_source_node_oid(edge, tables)?;
+                let source_table_oid = source_node_oid;
                 let from_node_table =
                     source_table_oid.and_then(|oid| registered_table_oids.get(&oid).copied());
                 (from_node_table, source_table_oid.map(|_| edge_table_oid))
