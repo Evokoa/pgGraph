@@ -37,7 +37,7 @@ fn build_workflow_rls_fixture() {
 fn workflow_json(statement: &str) -> pgrx::JsonB {
     Spi::get_one::<pgrx::JsonB>(statement)
         .expect("workflow JSON query failed")
-        .unwrap_or_else(|| pgrx::JsonB(serde_json::Value::Null))
+        .unwrap_or(pgrx::JsonB(serde_json::Value::Null))
 }
 
 #[cfg(feature = "development")]

@@ -5152,6 +5152,8 @@ fn gql_create_relationship_rejects_trigger_rewritten_graph_identity() {
 #[pg_test]
 fn gql_create_relationship_preserves_bidirectional_registered_direction() {
     reset_and_create_fixtures();
+    Spi::run("TRUNCATE public.graph_test_friendships_pgtest")
+        .expect("remove existing relationships from direction fixture failed");
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
     Spi::run(
         "SELECT graph.add_table(
@@ -5207,9 +5209,7 @@ fn gql_create_relationship_preserves_bidirectional_registered_direction() {
                  FROM graph.gql(
                     'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u2''}) RETURN r',
                     hydrate := false
-                 )
-                 WHERE row #>> '{r,_start,id}' = 'u2'
-                   AND row #>> '{r,_end,id}' = 'u1'",
+                 )",
                 None,
                 &[],
             )

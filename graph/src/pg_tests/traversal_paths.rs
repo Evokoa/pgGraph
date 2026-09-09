@@ -528,9 +528,8 @@ fn weighted_paths_lazy_durable_segments_match_eager() {
 
 #[cfg(feature = "development")]
 #[pg_test]
-fn weighted_paths_durable_unseen_dynamic_label_remains_pg018() {
+fn weighted_paths_durable_new_label_honors_changed_relationship_policy() {
     build_weighted_path_rls_fixture();
-    create_error_sqlstate_helper();
     Spi::run(
         "SET graph.mutable_enabled = on;
          SET graph.persist_on_build = on;
@@ -539,16 +538,31 @@ fn weighted_paths_durable_unseen_dynamic_label_remains_pg018() {
          SELECT * FROM graph.build(mode := 'mutable_overlay');
          INSERT INTO public.graph_test_weighted_path_edges_p45
            (id, src, dst, cost, rel_type)
-         VALUES ('durable-new-label', 's', 't', 1, 'runtime-only')",
+         VALUES ('durable-new-label', 's', 't', 1, 'runtime-only');
+         SELECT * FROM graph.ingest_projection();
+         SET ROLE graph_weighted_path_rls_reader",
     )
     .expect("create unseen weighted dynamic label failed");
 
-    let state = captured_path_sqlstate("SELECT * FROM graph.ingest_projection()");
-    assert_eq!(
-        state.as_deref(),
-        Some("0A000"),
-        "a durable label absent from the persisted projection must require a rebuild"
-    );
+    let eager = forced_weighted_path_detail("eager", "s", "t", None);
+    let lazy = forced_weighted_path_detail("lazy", "s", "t", None);
+    assert_eq!(eager, "0:s:<start>:<start>:0:1,1:t:runtime-only:1:1:1");
+    assert_eq!(lazy, eager);
+
+    Spi::run(
+        "RESET ROLE;
+         ALTER POLICY graph_weighted_path_visible_edges
+           ON public.graph_test_weighted_path_edges_p45
+           USING (rel_type NOT IN ('secret', 'runtime-only'));
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("hide newly ingested relationship failed");
+    let hidden_eager = forced_weighted_path_detail("eager", "s", "t", None);
+    let hidden_lazy = forced_weighted_path_detail("lazy", "s", "t", None);
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore weighted strategy failed");
+    assert_eq!(hidden_eager, "0:s:<start>:<start>:0:4,1:a:route:2:2:4,2:t:route:2:4:4");
+    assert_eq!(hidden_lazy, hidden_eager);
 }
 
 #[cfg(feature = "development")]
