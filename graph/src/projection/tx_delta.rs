@@ -1209,6 +1209,10 @@ fn ensure_transaction_callbacks_registered() {
     }
 }
 
+pub(crate) fn subtransaction_depth() -> u32 {
+    SUBTRANSACTION_DEPTH.with(Cell::get)
+}
+
 #[cfg(not(test))]
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn xact_callback(
@@ -1224,6 +1228,10 @@ unsafe extern "C-unwind" fn xact_callback(
             | XactEvent::XACT_EVENT_PARALLEL_COMMIT
             | XactEvent::XACT_EVENT_PARALLEL_ABORT
     ) {
+        crate::sql_sync::finish_replay_transaction(matches!(
+            event,
+            XactEvent::XACT_EVENT_ABORT | XactEvent::XACT_EVENT_PARALLEL_ABORT
+        ));
         clear_current_transaction_state();
     }
 }
@@ -1242,9 +1250,11 @@ unsafe extern "C-unwind" fn subxact_callback(
             SUBTRANSACTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
         }
         SubXactEvent::SUBXACT_EVENT_COMMIT_SUB => {
+            crate::sql_sync::finish_replay_subtransaction(subtransaction_depth(), false);
             finish_subtransaction(false);
         }
         SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
+            crate::sql_sync::finish_replay_subtransaction(subtransaction_depth(), true);
             finish_subtransaction(true);
         }
         SubXactEvent::SUBXACT_EVENT_PRE_COMMIT_SUB => {}

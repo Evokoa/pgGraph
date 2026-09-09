@@ -714,7 +714,12 @@ fn edge_buffer_overflow_reserves_high_fanout_row_before_mutation() {
             .expect("child-1 sync id query failed")
             .unwrap_or(0);
 
-    assert!(sql_raises("SELECT * FROM graph.apply_sync()"));
+    // Inspect row reservation before a PostgreSQL error abort invalidates the
+    // replayed cache. The client regression separately covers abort recovery.
+    assert!(matches!(
+        crate::sql_sync::apply_sync_internal(),
+        Err(crate::safety::GraphError::EdgeBufferFull { .. })
+    ));
     let (read_only, edge_buffer_used, node_count_after, applied_sync_id) = Spi::connect(|client| {
         let result = client
             .select(

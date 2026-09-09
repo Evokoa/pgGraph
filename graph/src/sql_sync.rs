@@ -26,6 +26,57 @@ use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
 use xxhash_rust::xxh3::xxh3_64;
 
+thread_local! {
+    static REPLAYED_SUBTRANSACTIONS: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    static REPLAY_ABORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn mark_backend_replay() {
+    let depth = crate::projection::tx_delta::subtransaction_depth() as usize;
+    REPLAYED_SUBTRANSACTIONS.with(|levels| {
+        let mut levels = levels.borrow_mut();
+        levels.resize(depth + 1, false);
+        levels[depth] = true;
+    });
+}
+
+pub(crate) fn finish_replay_transaction(aborted: bool) {
+    REPLAYED_SUBTRANSACTIONS.with(|levels| {
+        let mut levels = levels.borrow_mut();
+        if aborted && levels.iter().any(|dirty| *dirty) {
+            REPLAY_ABORTED.set(true);
+        }
+        levels.clear();
+    });
+}
+
+pub(crate) fn finish_replay_subtransaction(depth: u32, aborted: bool) {
+    REPLAYED_SUBTRANSACTIONS.with(|levels| {
+        let mut levels = levels.borrow_mut();
+        let depth = depth as usize;
+        if levels.get(depth).copied().unwrap_or(false) {
+            if aborted {
+                REPLAY_ABORTED.set(true);
+            } else if depth > 0 {
+                levels[depth - 1] = true;
+            }
+        }
+        levels.truncate(depth);
+    });
+}
+
+/// Discard replayed source rows only after PostgreSQL has finished aborting.
+/// Transaction callbacks set a flag without borrowing an engine or calling SPI.
+pub(crate) fn recover_aborted_replay() -> safety::GraphResult<()> {
+    if REPLAY_ABORTED.get() {
+        crate::projection::tx_delta::ensure_engine_replacement_allowed("sync rollback recovery")?;
+        ENGINE.with(|engine| *engine.borrow_mut() = engine::Engine::new());
+        crate::runtime_state::clear_loaded_graph();
+        REPLAY_ABORTED.set(false);
+    }
+    Ok(())
+}
+
 #[cfg(not(test))]
 thread_local! {
     static PENDING_SYNC_ROW_PROBE: std::cell::RefCell<Option<PendingSyncRowProbe>> =
@@ -2340,6 +2391,24 @@ fn apply_sync_log_entry_with_context(
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.reserve_edge_mutation_capacity(edge_mutation_reservation)?;
+        // Reject invalid labels before any row mutation or rollback bookkeeping.
+        for row in [rows.old.as_ref(), rows.new.as_ref()].into_iter().flatten() {
+            for edge in &context.edges {
+                if context.table_oid(&edge.from_table) == Some(table_oid)
+                    && projection_edge_endpoints(context, edge, row).is_some()
+                {
+                    let label = sync_row_edge_label(edge, row);
+                    eng.edge_type_registry
+                        .registration_heap_upper_bound(&label)?;
+                    if eng.edge_type_registry.id(&label).is_none() {
+                        crate::projection::tx_delta::ensure_engine_replacement_allowed(
+                            "relationship type sync replay",
+                        )?;
+                    }
+                }
+            }
+        }
+        mark_backend_replay();
         apply_sync_row_operation(&mut eng, table_oid, entry, context, &rows, operation)?;
         match entry.op {
             SyncOp::Insert => {
@@ -3496,6 +3565,14 @@ fn json_value_bool(raw: &serde_json::Value) -> safety::GraphResult<bool> {
         })
 }
 
+fn sync_row_edge_label(edge: &builder::RegisteredEdge, row: &serde_json::Value) -> String {
+    edge.label_column
+        .as_deref()
+        .and_then(|column| row_text_value(row, column))
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| edge.label.clone())
+}
+
 pub(crate) fn apply_row_edge_mutations(
     eng: &mut engine::Engine,
     context: &SyncReplayContext,
@@ -3516,15 +3593,27 @@ pub(crate) fn apply_row_edge_mutations(
         else {
             continue;
         };
-        let edge_label = edge
-            .label_column
-            .as_deref()
-            .and_then(|column| row_text_value(row, column))
-            .filter(|label| !label.trim().is_empty())
-            .unwrap_or_else(|| edge.label.clone());
-        let type_id = eng
-            .edge_type_id(&edge_label)
-            .ok_or(safety::GraphError::EdgeTypeLimit)?;
+        let edge_label = sync_row_edge_label(edge, row);
+        let type_id = match eng.edge_type_registry.id(&edge_label) {
+            Some(type_id) => type_id,
+            None => {
+                // Buffered replay needs a base ID, never a provisional transaction ID.
+                crate::projection::tx_delta::ensure_engine_replacement_allowed(
+                    "relationship type sync replay",
+                )?;
+                let growth = eng
+                    .edge_type_registry
+                    .registration_heap_upper_bound(&edge_label)?;
+                let governor = eng.query_resource_governor()?;
+                let _memory = governor
+                    .reserve_memory(
+                        crate::resource::ResourcePhase::SyncIngest,
+                        crate::resource::ByteCount::from_bytes(growth as u64),
+                    )
+                    .map_err(crate::safety::resource_limit_error)?;
+                eng.register_edge_type(&edge_label)?
+            }
+        };
         let source = resolve_sync_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
         let target = resolve_sync_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
@@ -4306,6 +4395,35 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_abort_tracks_nested_scopes_and_survives_outer_commit() {
+        super::REPLAY_ABORTED.set(false);
+        super::REPLAYED_SUBTRANSACTIONS.with(|levels| *levels.borrow_mut() = vec![true, false]);
+        super::finish_replay_subtransaction(1, true);
+        assert!(
+            !super::REPLAY_ABORTED.get(),
+            "an untouched savepoint must not invalidate its parent"
+        );
+        super::REPLAYED_SUBTRANSACTIONS
+            .with(|levels| *levels.borrow_mut() = vec![false, false, true]);
+        super::finish_replay_subtransaction(2, false);
+        super::finish_replay_subtransaction(1, true);
+        assert!(
+            super::REPLAY_ABORTED.get(),
+            "released child replay belongs to its parent"
+        );
+        super::finish_replay_transaction(false);
+        assert!(
+            super::REPLAY_ABORTED.get(),
+            "outer commit must not hide an unrecovered abort"
+        );
+        super::REPLAY_ABORTED.set(false);
+        super::REPLAYED_SUBTRANSACTIONS.with(|levels| *levels.borrow_mut() = vec![true]);
+        super::finish_replay_transaction(true);
+        assert!(super::REPLAY_ABORTED.get());
+        super::REPLAY_ABORTED.set(false);
+    }
+
     use super::{
         applicable_table_oids_from_catalog, artifact_quota_peak_bytes,
         compute_sync_log_retention_floor, encoded_edge_type_dictionary_bytes,

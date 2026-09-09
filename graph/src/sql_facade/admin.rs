@@ -1085,8 +1085,11 @@ pub(super) fn with_panic_boundary<T>(_context: &str, f: impl FnOnce() -> T) -> T
     // pgrx already installs the real panic boundary around #[pg_extern] calls.
     // Catching inside SPI/user-code paths can accidentally intercept pgrx
     // ErrorReport panics and either erase the SQLSTATE or abort the backend, so
-    // this helper is deliberately just a uniform call site.
+    // shared entry checks and deferred cache recovery run here instead.
     if let Err(error) = crate::sql_visibility::ensure_graph_api_available() {
+        error.report();
+    }
+    if let Err(error) = crate::sql_sync::recover_aborted_replay() {
         error.report();
     }
     f()
