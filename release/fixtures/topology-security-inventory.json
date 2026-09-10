@@ -143,6 +143,7 @@
       "status",
       "sync_health",
       "sync_policy_status",
+      "sync_retention",
       "transfer_graph_ownership",
       "unload_graph",
       "vacuum",

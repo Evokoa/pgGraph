@@ -1,3 +1,7 @@
+# A named build context can provide public Git ancestry for contract tests.
+# Source-archive package builds use this empty fallback.
+FROM scratch AS source_history
+
 FROM rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc
 
 ARG SOURCE_COMMIT=unknown
@@ -27,6 +31,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+        git \
+        python3-venv \
+        unzip \
+        zip \
         clang \
         libclang-dev \
         pkg-config \
@@ -82,21 +90,8 @@ ENV CARGO_NET_RETRY=5 \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/tmp/cargo-pgrx-target \
     export CARGO_TARGET_DIR=/tmp/cargo-pgrx-target; \
-    installed=0; \
-    for attempt in 1 2 3; do \
-        sfw cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked || true; \
-        if command -v cargo-pgrx >/dev/null 2>&1 \
-            && cargo pgrx --version 2>/dev/null | grep -Fq "${PGRX_VERSION}"; then \
-            installed=1; \
-            break; \
-        fi; \
-        rm -f /usr/local/cargo/bin/cargo-pgrx; \
-        sleep "$((attempt * 2))"; \
-    done; \
-    if [[ "$installed" != "1" ]]; then \
-        echo "sfw did not install verified cargo-pgrx ${PGRX_VERSION}" >&2; \
-        exit 1; \
-    fi
+    sfw cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked \
+    && cargo pgrx --version | grep -Fx "cargo-pgrx ${PGRX_VERSION}"
 
 RUN groupadd --gid 1000 pggraph \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash pggraph \
@@ -107,14 +102,15 @@ ENV CARGO_HOME=/home/pggraph/.cargo
 ENV RUSTUP_HOME=/home/pggraph/.rustup
 ENV USER=pggraph
 ENV LOGNAME=pggraph
-ENV PATH=/usr/local/cargo/bin:/home/pggraph/.cargo/bin:${PATH}
+ENV PATH=/home/pggraph/venv/bin:/usr/local/cargo/bin:/home/pggraph/.cargo/bin:${PATH}
 
 WORKDIR /src/graph
 COPY --chown=pggraph:pggraph graph/rust-toolchain.toml /src/graph/rust-toolchain.toml
 
 USER pggraph
 
-RUN rustup show active-toolchain
+RUN python3 -m venv /home/pggraph/venv \
+    && rustup show active-toolchain
 
 RUN set -euo pipefail; \
     for pg in 14 15 16 17 18; do \
@@ -126,7 +122,15 @@ USER root
 COPY --chown=pggraph:pggraph graph/ /src/graph/
 COPY --chown=pggraph:pggraph release/ /src/release/
 COPY --chown=pggraph:pggraph scripts/ /src/scripts/
+COPY --chown=pggraph:pggraph docs/ /src/docs/
+RUN chown pggraph:pggraph /src
 USER pggraph
+
+RUN --mount=type=bind,from=source_history,target=/source-history \
+    if [[ -f /source-history/source-history.bundle ]]; then \
+        git -C /src init \
+        && git -C /src fetch /source-history/source-history.bundle HEAD; \
+    fi
 
 ARG PG_VERSIONS="14 15 16 17 18"
 ARG RUN_RUST_TESTS=1
@@ -144,19 +148,14 @@ ARG RUN_V1_UPDATE_ARTIFACT_ROLLBACK=0
 ARG RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK=0
 ARG PROFILE_TIMEOUT_SECONDS=600
 
-# Linux test executables retain PostgreSQL backend references from the extension
-# crate even though unit-test code must not call them directly. The symbols
-# resolve when the packaged shared object is loaded by each PostgreSQL server;
-# allow that same late binding while linking the harness.
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     set -euo pipefail; \
-    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,--unresolved-symbols=ignore-all"; \
     for pg in ${PG_VERSIONS}; do \
         feature="pg${pg}"; \
         if [[ "${RUN_RUST_TESTS}" == "1" ]]; then \
             echo "==> cargo test --release --features ${feature} development"; \
-            cargo test --release --no-default-features --features "${feature} development"; \
+            RUST_TEST_THREADS=1 cargo test --release --no-default-features --features "${feature} development"; \
         fi; \
         if [[ "${RUN_PGRX_SQL}" == "1" ]]; then \
             echo "==> cargo pgrx test --features development ${feature} (serial shared cluster)"; \

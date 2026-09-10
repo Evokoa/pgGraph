@@ -25,9 +25,13 @@ if [[ -z "$PG_CONFIG" ]]; then
   fi
 fi
 
+pggraph_validate_database_name "$DBNAME"
+if (( ${#DBNAME} > 63 )); then
+  pggraph_die "database name exceeds PostgreSQL's identifier limit"
+  exit 2
+fi
 cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
-dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
-createdb "$DBNAME"
+createdb -- "$DBNAME"
 
 start_postgres() {
   if [[ -n "$POSTGRES_OPTS" ]]; then
@@ -67,9 +71,19 @@ INSERT INTO public.graph_crash_edges (from_id, to_id)
 SELECT i::text, (i + 1)::text
 FROM generate_series(1, 49999) AS i;
 SELECT graph.add_table('public.graph_crash_nodes'::regclass, 'id', ARRAY['name']);
-SELECT graph.add_edge('public.graph_crash_edges'::regclass, 'from_id', 'public.graph_crash_nodes'::regclass, 'id', 'crash', false);
+SELECT graph.add_edge('public.graph_crash_edges'::regclass, 'from_id', 'public.graph_crash_nodes'::regclass, 'to_id', 'crash', false);
 SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
+DO $$
+BEGIN
+    IF (SELECT array_agg(node_id ORDER BY depth)
+        FROM graph.traverse('public.graph_crash_nodes'::regclass, '1', 3,
+                            edge_types := ARRAY['crash'], direction := 'out'))
+        IS DISTINCT FROM ARRAY['1', '2', '3', '4']::text[] THEN
+        RAISE EXCEPTION 'crash fixture did not build the source-table chain';
+    END IF;
+END
+$$;
 SELECT graph.enable_sync();
 INSERT INTO public.graph_crash_nodes VALUES ('50001', 'node-50001');
 INSERT INTO public.graph_crash_edges (from_id, to_id) VALUES ('50000', '50001');
@@ -89,7 +103,7 @@ DO $$
 DECLARE
     nodes INTEGER;
     edges INTEGER;
-    traversed BIGINT;
+    traversed TEXT[];
     applied BIGINT;
 BEGIN
     SELECT inserts_applied + updates_applied + deletes_applied INTO applied FROM graph.apply_sync();
@@ -97,9 +111,17 @@ BEGIN
         RAISE EXCEPTION 'committed trigger rows were not recoverable after restart';
     END IF;
 
-    SELECT count(*) INTO traversed FROM graph.traverse('public.graph_crash_nodes'::regclass, '1', 3);
-    IF traversed = 0 THEN
-        RAISE EXCEPTION 'post-restart traversal returned no rows';
+    SELECT array_agg(node_id ORDER BY depth) INTO traversed
+    FROM graph.traverse('public.graph_crash_nodes'::regclass, '1', 3,
+                        edge_types := ARRAY['crash'], direction := 'out');
+    IF traversed IS DISTINCT FROM ARRAY['1', '2', '3', '4']::text[] THEN
+        RAISE EXCEPTION 'post-restart base traversal changed: %', traversed;
+    END IF;
+    SELECT array_agg(node_id ORDER BY depth) INTO traversed
+    FROM graph.traverse('public.graph_crash_nodes'::regclass, '49999', 2,
+                        edge_types := ARRAY['crash'], direction := 'out');
+    IF traversed IS DISTINCT FROM ARRAY['49999', '50000', '50001']::text[] THEN
+        RAISE EXCEPTION 'post-restart traversal lost the committed sync edge: %', traversed;
     END IF;
 
     SELECT node_count, edge_count INTO nodes, edges FROM graph.status();

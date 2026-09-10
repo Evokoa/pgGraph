@@ -65,6 +65,39 @@ def validate_version_metadata(version: str) -> None:
         fail(f"docs/release-notes.mdx is missing {release_heading}")
 
 
+def validate_matrix_base_images(dockerfile: str) -> None:
+    stages: set[str] = set()
+    stage_count = 0
+    external_count = 0
+    for line_number, line in enumerate(dockerfile.splitlines(), start=1):
+        if not re.match(r"\s*FROM\s", line, re.IGNORECASE):
+            continue
+        match = re.fullmatch(
+            r"\s*FROM(?:\s+--platform=\S+)?\s+(\S+)"
+            r"(?:\s+AS\s+([A-Za-z0-9_.-]+))?\s*",
+            line,
+            re.IGNORECASE,
+        )
+        if not match:
+            fail(f"Dockerfile.pg-matrix:{line_number} has an unsupported FROM declaration")
+        image, stage = match.groups()
+        internal = image.lower() in stages or (
+            image.isdecimal() and int(image) < stage_count
+        )
+        if image.lower() != "scratch" and not internal:
+            if not IMAGE_DIGEST_RE.fullmatch(image):
+                fail(
+                    f"Dockerfile.pg-matrix:{line_number} external builder image "
+                    f"must be pinned by digest: {image}"
+                )
+            external_count += 1
+        stage_count += 1
+        if stage:
+            stages.add(stage.lower())
+    if external_count == 0:
+        fail("Dockerfile.pg-matrix must declare a pinned external builder image")
+
+
 def validate_release_dependencies() -> None:
     for path in (".github/workflows/release.yml",):
         for line_number, line in enumerate(read_text(path).splitlines(), start=1):
@@ -85,9 +118,7 @@ def validate_release_dependencies() -> None:
                 f"Dockerfile {name} must use a fully qualified Docker Hub "
                 "library image pinned by digest"
             )
-    matrix_image = read_text("graph/tests/heavy/Dockerfile.pg-matrix").splitlines()[0]
-    if not re.fullmatch(r"FROM\s+[^\s]+@sha256:[0-9a-f]{64}", matrix_image):
-        fail("Dockerfile.pg-matrix builder image must be pinned by digest")
+    validate_matrix_base_images(read_text("graph/tests/heavy/Dockerfile.pg-matrix"))
 
     release_workflow = read_text(".github/workflows/release.yml")
     postgres_images = re.findall(r'image="(postgres:[^"]+)"', release_workflow)

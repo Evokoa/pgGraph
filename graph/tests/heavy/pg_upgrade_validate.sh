@@ -117,13 +117,48 @@ new_started=1
 -- derived pgGraph artifact is rebuilt in the new cluster data directory.
 SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
-SELECT node_count, edge_count FROM graph.status();
-SELECT count(*)
-FROM graph.search(
-  'name',
-  'Child',
-  table_filter := 'graph_upgrade_nodes'::regclass
-);
+DO $$
+DECLARE
+    source_rows jsonb;
+    nodes bigint;
+    edges bigint;
+    reached text[];
+    matches text[];
+BEGIN
+    SELECT jsonb_agg(jsonb_build_array(id, name, parent_id) ORDER BY id)
+    INTO source_rows FROM graph_upgrade_nodes;
+    IF source_rows IS DISTINCT FROM
+       '[["child", "Child", "root"], ["root", "Root", null]]'::jsonb THEN
+        RAISE EXCEPTION 'upgrade changed authoritative source rows: %', source_rows;
+    END IF;
+
+    SELECT node_count, edge_count INTO nodes, edges FROM graph.status();
+    IF nodes IS DISTINCT FROM 2::bigint OR edges IS DISTINCT FROM 1::bigint THEN
+        RAISE EXCEPTION 'expected upgraded graph to contain 2 nodes and 1 edge, got % and %', nodes, edges;
+    END IF;
+
+    SELECT array_agg(node_id ORDER BY depth) INTO reached
+    FROM graph.traverse('graph_upgrade_nodes'::regclass, 'child', 1,
+                        edge_types := ARRAY['parent'], direction := 'out');
+    IF reached IS DISTINCT FROM ARRAY['child', 'root']::text[] THEN
+        RAISE EXCEPTION 'upgrade lost child-to-parent topology: %', reached;
+    END IF;
+
+    SELECT array_agg(node_id ORDER BY depth) INTO reached
+    FROM graph.traverse('graph_upgrade_nodes'::regclass, 'root', 1,
+                        edge_types := ARRAY['parent'], direction := 'out');
+    IF reached IS DISTINCT FROM ARRAY['root']::text[] THEN
+        RAISE EXCEPTION 'upgrade changed parent edge direction: %', reached;
+    END IF;
+
+    SELECT array_agg(node_id ORDER BY node_id) INTO matches
+    FROM graph.search('name', 'Child',
+                      table_filter := 'graph_upgrade_nodes'::regclass);
+    IF matches IS DISTINCT FROM ARRAY['child']::text[] THEN
+        RAISE EXCEPTION 'upgrade changed indexed property search: %', matches;
+    END IF;
+END
+$$;
 SQL
 "$NEW_BINDIR/pg_ctl" -D "$NEW_DATADIR" -w stop
 new_started=0

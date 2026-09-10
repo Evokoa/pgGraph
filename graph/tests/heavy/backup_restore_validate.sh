@@ -8,13 +8,33 @@ PG_MAJOR="${PG_VERSION_FEATURE#pg}"
 PG_CONFIG="${PG_CONFIG:-}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-backup-restore.XXXXXX")"
+SOURCE_CREATED=0
+RESTORE_CREATED=0
 
 cleanup() {
-  dropdb --if-exists "$SOURCE_DB" >/dev/null 2>&1 || true
-  dropdb --if-exists "$RESTORE_DB" >/dev/null 2>&1 || true
+  local status=$?
+  trap - EXIT
+  if (( RESTORE_CREATED == 1 )) && ! dropdb -- "$RESTORE_DB"; then
+    status=1
+  fi
+  if (( SOURCE_CREATED == 1 )) && ! dropdb -- "$SOURCE_DB"; then
+    status=1
+  fi
   rm -rf "$WORKDIR"
+  exit "$status"
 }
 trap cleanup EXIT
+
+for database in "$SOURCE_DB" "$RESTORE_DB"; do
+  if [[ ! "$database" =~ ^pggraph_[A-Za-z0-9_]+$ ]] || (( ${#database} > 63 )); then
+    echo "Fixture database names must have a pggraph_ prefix and fit 63 bytes" >&2
+    exit 2
+  fi
+done
+if [[ "$SOURCE_DB" == "$RESTORE_DB" ]]; then
+  echo "Source and restore fixture databases must differ" >&2
+  exit 2
+fi
 
 if [[ -z "$PG_CONFIG" ]]; then
   if [[ -x "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" ]]; then
@@ -28,7 +48,8 @@ if [[ -z "$PG_CONFIG" ]]; then
 fi
 
 cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
-createdb "$SOURCE_DB"
+createdb -- "$SOURCE_DB"
+SOURCE_CREATED=1
 
 psql -X -v ON_ERROR_STOP=1 "$SOURCE_DB" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS graph;
@@ -51,16 +72,27 @@ INSERT INTO public.graph_backup_edges (from_id, to_id)
 SELECT i::text, (i + 1)::text
 FROM generate_series(1, 199) AS i;
 SELECT graph.add_table('public.graph_backup_nodes'::regclass, 'id', ARRAY['tenant', 'name']);
-SELECT graph.add_edge('public.graph_backup_edges'::regclass, 'from_id', 'public.graph_backup_nodes'::regclass, 'id', 'linked', false);
+SELECT graph.add_edge('public.graph_backup_edges'::regclass, 'from_id', 'public.graph_backup_nodes'::regclass, 'to_id', 'linked', false);
 SELECT * FROM graph.build();
 SELECT graph.enable_sync();
 INSERT INTO public.graph_backup_nodes VALUES ('201', 'odd', 'node-201');
 INSERT INTO public.graph_backup_edges (from_id, to_id) VALUES ('200', '201');
 SELECT * FROM graph.apply_sync();
+DO $$
+BEGIN
+    IF (SELECT array_agg(node_id ORDER BY depth)
+        FROM graph.traverse('public.graph_backup_nodes'::regclass, '199', 2,
+                            edge_types := ARRAY['linked'], direction := 'out'))
+        IS DISTINCT FROM ARRAY['199', '200', '201']::text[] THEN
+        RAISE EXCEPTION 'backup source did not retain the built and synchronized chain';
+    END IF;
+END
+$$;
 SQL
 
 pg_dump --format=custom --file="$WORKDIR/graph.dump" "$SOURCE_DB"
-createdb "$RESTORE_DB"
+createdb -- "$RESTORE_DB"
+RESTORE_CREATED=1
 pg_restore --dbname="$RESTORE_DB" --clean --if-exists "$WORKDIR/graph.dump"
 
 psql -X -v ON_ERROR_STOP=1 "$RESTORE_DB" <<'SQL'
@@ -69,7 +101,7 @@ CREATE EXTENSION IF NOT EXISTS graph;
 -- logical restore. Re-register the restored source relations before rebuilding.
 SELECT graph.reset();
 SELECT graph.add_table('public.graph_backup_nodes'::regclass, 'id', ARRAY['tenant', 'name']);
-SELECT graph.add_edge('public.graph_backup_edges'::regclass, 'from_id', 'public.graph_backup_nodes'::regclass, 'id', 'linked', false);
+SELECT graph.add_edge('public.graph_backup_edges'::regclass, 'from_id', 'public.graph_backup_nodes'::regclass, 'to_id', 'linked', false);
 SELECT * FROM graph.build();
 SELECT graph.enable_sync();
 INSERT INTO public.graph_backup_nodes VALUES ('202', 'even', 'node-202');
@@ -77,7 +109,7 @@ INSERT INTO public.graph_backup_edges (from_id, to_id) VALUES ('201', '202');
 DO $$
 DECLARE
     applied BIGINT;
-    traversed BIGINT;
+    traversed TEXT[];
     matches BIGINT;
 BEGIN
     SELECT inserts_applied + updates_applied + deletes_applied INTO applied FROM graph.apply_sync();
@@ -85,16 +117,17 @@ BEGIN
         RAISE EXCEPTION 'expected restored sync apply to consume rows, got %', applied;
     END IF;
 
-    SELECT count(*) INTO traversed
-    FROM graph.traverse('public.graph_backup_nodes'::regclass, '200', 3, edge_types := ARRAY['linked'], direction := 'out');
-    IF traversed < 1 THEN
-        RAISE EXCEPTION 'expected restored traversal to see rows, got %', traversed;
+    SELECT array_agg(node_id ORDER BY depth) INTO traversed
+    FROM graph.traverse('public.graph_backup_nodes'::regclass, '199', 3, edge_types := ARRAY['linked'], direction := 'out');
+    IF traversed IS DISTINCT FROM ARRAY['199', '200', '201', '202']::text[] THEN
+        RAISE EXCEPTION 'restored traversal lost a built or synchronized edge: %', traversed;
     END IF;
 
     SELECT count(*) INTO matches
-    FROM graph.search('tenant', 'even', table_filter := 'public.graph_backup_nodes'::regclass);
-    IF matches < 100 THEN
-        RAISE EXCEPTION 'expected restored tenant search to see at least 100 even nodes, got %', matches;
+    FROM graph.search('tenant', 'even', table_filter := 'public.graph_backup_nodes'::regclass,
+                      max_rows := 202);
+    IF matches <> 101 THEN
+        RAISE EXCEPTION 'expected restored tenant search to see exactly 101 even nodes, got %', matches;
     END IF;
 END
 $$;
