@@ -69,6 +69,7 @@ mod sql_sync;
 mod sql_traversal;
 mod sql_visibility;
 mod sync;
+mod sync_capture;
 mod tenant_store;
 mod types;
 mod visibility;

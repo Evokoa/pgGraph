@@ -28,6 +28,7 @@ use xxhash_rust::xxh3::xxh3_64;
 thread_local! {
     static REPLAYED_SUBTRANSACTIONS: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     static REPLAY_ABORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FIXED_SNAPSHOT_ENTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn mark_backend_replay() {
@@ -40,6 +41,9 @@ pub(crate) fn mark_backend_replay() {
 }
 
 pub(crate) fn finish_replay_transaction(aborted: bool) {
+    if FIXED_SNAPSHOT_ENTERED.replace(false) {
+        REPLAY_ABORTED.set(true);
+    }
     REPLAYED_SUBTRANSACTIONS.with(|levels| {
         let mut levels = levels.borrow_mut();
         if aborted && levels.iter().any(|dirty| *dirty) {
@@ -67,6 +71,11 @@ pub(crate) fn finish_replay_subtransaction(depth: u32, aborted: bool) {
 /// Discard replayed source rows only after PostgreSQL has finished aborting.
 /// Transaction callbacks set a flag without borrowing an engine or calling SPI.
 pub(crate) fn recover_aborted_replay() -> safety::GraphResult<()> {
+    if crate::projection::publication::uses_fixed_snapshot()
+        && !FIXED_SNAPSHOT_ENTERED.replace(true)
+    {
+        REPLAY_ABORTED.set(true);
+    }
     if REPLAY_ABORTED.get() {
         crate::projection::tx_delta::ensure_engine_replacement_allowed("sync rollback recovery")?;
         ENGINE.with(|engine| *engine.borrow_mut() = engine::Engine::new());
@@ -1071,17 +1080,14 @@ fn ingest_projection_until_internal(
             .as_ref()
             .map(|state| state.applicable_table_oids.as_slice()),
     )?;
-    acquire_sync_writer_barrier()?;
     ensure_no_current_transaction_sync_rows(
         previous_watermark,
         query_sync
             .as_ref()
             .map(|state| state.applicable_table_oids.as_slice()),
     )?;
-    // Read only after taking the exclusive writer barrier. All earlier
-    // shared-lock writers have either committed or caused barrier acquisition
-    // to fail, and later writers cannot publish sync rows until this
-    // transaction releases the barrier.
+    // Capture owned rows under a short writer fence and one pinned snapshot.
+    // The fence is released before normalization and artifact publication.
     let entries = read_sync_log_entries_after_bounded(
         previous_watermark,
         row_limit,
@@ -1970,6 +1976,24 @@ fn read_sync_log_entries_after_internal(
     bounded: Option<(usize, &mut crate::resource::ResourceLease<'_>)>,
     applicable_table_oids: Option<&[i32]>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
+    crate::sync_capture::capture(|| {
+        read_captured_sync_log_entries(
+            applied_sync_id,
+            limit,
+            high_watermark,
+            bounded,
+            applicable_table_oids,
+        )
+    })
+}
+
+fn read_captured_sync_log_entries(
+    applied_sync_id: i64,
+    limit: usize,
+    high_watermark: Option<i64>,
+    bounded: Option<(usize, &mut crate::resource::ResourceLease<'_>)>,
+    applicable_table_oids: Option<&[i32]>,
+) -> safety::GraphResult<Vec<SyncLogEntry>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -1984,6 +2008,8 @@ fn read_sync_log_entries_after_internal(
     if applicable_table_oids.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_sync_replay_not_pruned(applied_sync_id)?;
+    ensure_sync_writer_barrier_triggers(Some(applicable_table_oids))?;
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     if let Some((max_bytes, memory)) = bounded {
         let ids = read_sync_log_entry_plan_after(
@@ -1997,9 +2023,9 @@ fn read_sync_log_entries_after_internal(
         return read_sync_log_entries_by_ids(&ids, applicable_table_oids);
     }
     Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT id, op::text, table_oid::oid::integer, table_name,
+        let mut cursor = crate::sync_capture::open_cursor(
+            client,
+            "SELECT id, op::text, table_oid::oid::integer, table_name,
                     old_pk, new_pk, properties::text, old_row::text, new_row::text
              FROM graph._sync_log
              WHERE id > $1
@@ -2007,14 +2033,15 @@ fn read_sync_log_entries_after_internal(
                AND ($4::bigint IS NULL OR id <= $4)
              ORDER BY id
              LIMIT $2",
-                None,
-                &[
-                    applied_sync_id.into(),
-                    limit.into(),
-                    applicable_table_oids.to_vec().into(),
-                    high_watermark.into(),
-                ],
-            )
+            &[
+                applied_sync_id.into(),
+                limit.into(),
+                applicable_table_oids.to_vec().into(),
+                high_watermark.into(),
+            ],
+        )?;
+        let rows = cursor
+            .fetch(limit)
             .map_err(|e| safety::GraphError::Internal(format!("sync log read failed: {e}")))?;
         let mut entries = Vec::new();
         for row in rows {
@@ -2085,7 +2112,8 @@ fn read_sync_log_entry_plan_after(
     memory: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<Vec<i64>> {
     Spi::connect(|client| {
-        let mut cursor = client.open_cursor(
+        let mut cursor = crate::sync_capture::open_cursor(
+            client,
             "SELECT id,
                     octet_length(op::text)::bigint + octet_length(table_name)
                     + COALESCE(octet_length(old_pk), 0)
@@ -2105,7 +2133,7 @@ fn read_sync_log_entry_plan_after(
                 applicable_table_oids.to_vec().into(),
                 high_watermark.into(),
             ],
-        );
+        )?;
         let row_limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut ids = Vec::new();
         let mut raw_payload_bytes = 0usize;
@@ -2312,17 +2340,18 @@ fn read_sync_log_entries_by_ids(
         return Ok(Vec::new());
     }
     let entries = Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT id, op::text, table_oid::oid::integer, table_name,
+        let mut cursor = crate::sync_capture::open_cursor(
+            client,
+            "SELECT id, op::text, table_oid::oid::integer, table_name,
                         old_pk, new_pk, properties::text, old_row::text, new_row::text
                    FROM graph._sync_log
                   WHERE id = ANY($1::bigint[])
                     AND table_oid::oid::integer = ANY($2::int4[])
                   ORDER BY id",
-                None,
-                &[ids.into(), applicable_table_oids.into()],
-            )
+            &[ids.into(), applicable_table_oids.into()],
+        )?;
+        let rows = cursor
+            .fetch(i64::try_from(ids.len()).unwrap_or(i64::MAX))
             .map_err(|err| {
                 safety::GraphError::Internal(format!("bounded sync log read failed: {err}"))
             })?;
@@ -4067,6 +4096,11 @@ const SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS: i64 = 10_000;
 /// `sync_log_retention_floor` does not treat this backend as gone.
 #[cfg(not(test))]
 pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    if crate::projection::publication::uses_fixed_snapshot() {
+        // Snapshot-local progress must not replace a backend's newer durable
+        // heartbeat. The native horizon retains the required generation/log.
+        return Ok(());
+    }
     let caller_oid = crate::catalog::current_role_oid()?;
     let result = with_pending_sync_watermark(
         PendingSyncWatermark {

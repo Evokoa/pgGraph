@@ -45,7 +45,7 @@ to install or reinstall those triggers explicitly. Trigger rows are durable in
 
 After upgrading from a pgGraph release whose sync triggers predate the durable
 writer barrier, run `graph.enable_sync()` before resuming durable ingestion, or
-run `graph.build()` with `graph.sync_mode = 'trigger'`. Durable
+run `graph.build()` with `graph.sync_mode = 'trigger'`.
 `graph.apply_sync()` and `graph.ingest_projection()` verify the installed
 trigger definitions and fail with upgrade guidance until every registered
 source table is protected. A trigger-mode build refreshes the definitions
@@ -108,6 +108,13 @@ Current apply behavior includes:
 pending when the call started. Internally, replay is bounded by
 `graph.sync_batch_size`, so large backlogs are processed in smaller batches
 without changing the public admin contract.
+
+Replay briefly fences source writers while copying each batch under one
+PostgreSQL snapshot. If an earlier writer is still active, it returns `55P03`
+(`PG006`) without skipping that writer's rows; retry after the writer commits.
+The replay fence is released before processing the batch and does not remain
+held until the surrounding reader transaction ends. Fixed-snapshot readers
+keep replay local to their transaction and discard it at transaction end.
 
 <Callout type="warning">
 The base CSR store is immutable. Durable projection segments make committed

@@ -15,6 +15,7 @@ every backend-local engine.
 |---|---|
 | `sync.rs` | Generate trigger functions/triggers and create sync tables |
 | `sql_sync.rs` | Parse sync mode, read durable sync log in bounded batches, apply row changes |
+| `sync_capture.rs` | Brief writer fencing and explicit snapshot capture for bounded replay batches |
 | `sql_build.rs` | Maintenance rebuild and vacuum orchestration |
 | `sql_jobs.rs` | Durable job rows, hosted job helpers, and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
@@ -27,6 +28,19 @@ every backend-local engine.
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
 
 ## Durable Tables
+
+Sync sequence IDs order allocation, not commits. Replay acquires a nonblocking
+exclusive session advisory lock against source writers, then pins a PostgreSQL
+snapshot and copies its bounded log batch. Byte preflight and payload cursors
+use that same snapshot. The fence is released before normalization, engine
+mutation or artifact publication, including on cancellation. An active writer
+causes `55P03` (`PG006`) without advancing replay; retry after it commits.
+Offline builds retain their separate coherent-source transaction locks.
+
+READ COMMITTED captures a new snapshot after fencing. REPEATABLE READ and
+SERIALIZABLE keep snapshot-local replay only: cached replay is discarded on
+entry and exit so imported snapshots cannot inherit newer overlay rows. Durable
+publication still requires READ COMMITTED and rejects uncommitted source rows.
 
 Bootstrap and sync schema helpers create:
 

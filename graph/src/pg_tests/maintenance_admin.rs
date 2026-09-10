@@ -1,4 +1,27 @@
 #[pg_test]
+fn sync_capture_cancellation_releases_session_fence() {
+    let canceled = pgrx::pg_sys::PgTryBuilder::new(|| {
+        crate::sync_capture::capture(|| {
+            pgrx::ereport!(ERROR, pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                "injected sync capture cancellation");
+            #[allow(unreachable_code)]
+            Ok(())
+        }).expect("capture setup failed");
+        false
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| true)
+    .execute();
+    assert!(canceled);
+    assert_eq!(Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid()
+         AND locktype = 'advisory' AND mode = 'ExclusiveLock'
+         AND classid = $1::oid AND objid = $2::oid AND objsubid = 2",
+        &[crate::sync::SYNC_WRITER_LOCK_CLASS.into(), crate::sync::SYNC_WRITER_LOCK_KEY.into()],
+    ).expect("inspect capture lock cleanup"), Some(0));
+    assert_eq!(Spi::get_one::<i32>("SELECT 1").expect("snapshot stack remains usable"), Some(1));
+}
+
+#[pg_test]
 fn missing_catalog_provenance_cannot_be_loaded_through_compaction() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id');
@@ -985,7 +1008,7 @@ fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
     Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
-    Spi::run("SET graph.sync_mode = 'manual'").expect("set sync_mode failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
     clear_graph_catalog_for_test();
     Spi::run("DROP TABLE IF EXISTS public.graph_test_mmap_sync_pgtest CASCADE")
         .expect("drop mmap sync table failed");
@@ -1048,25 +1071,6 @@ fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
              VALUES ('child', 'root', 'Child')",
     )
     .expect("insert child source row failed");
-    Spi::run(
-        "INSERT INTO graph._sync_log (
-                op,
-                table_oid,
-                table_name,
-                new_pk,
-                properties,
-                new_row
-             )
-             VALUES (
-                'I',
-                'public.graph_test_mmap_sync_pgtest'::regclass,
-                'public.graph_test_mmap_sync_pgtest',
-                'child',
-                '{\"name\":\"Child\",\"parent_id\":\"root\"}'::jsonb,
-                '{\"id\":\"child\",\"name\":\"Child\",\"parent_id\":\"root\"}'::jsonb
-             )",
-    )
-    .expect("insert child sync log failed");
     let inserts = Spi::get_one::<i64>("SELECT inserts_applied FROM graph.apply_sync()")
         .expect("apply mmap insert sync failed")
         .unwrap_or(0);
@@ -1098,15 +1102,6 @@ fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
 
     Spi::run("TRUNCATE public.graph_test_mmap_sync_pgtest")
         .expect("truncate mmap sync source table failed");
-    Spi::run(
-        "INSERT INTO graph._sync_log (op, table_oid, table_name)
-             VALUES (
-                'T',
-                'public.graph_test_mmap_sync_pgtest'::regclass,
-                'public.graph_test_mmap_sync_pgtest'
-             )",
-    )
-    .expect("insert truncate sync log failed");
     Spi::run("SELECT * FROM graph.apply_sync()").expect("apply mmap truncate sync failed");
     let remaining = Spi::get_one::<i64>(
         "SELECT (

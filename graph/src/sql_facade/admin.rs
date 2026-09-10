@@ -2825,6 +2825,12 @@ fn test_publication_error_after_arming() -> bool {
     crate::projection::publication::test_publication_error_after_arming()
 }
 
+#[cfg(all(not(test), feature = "development"))]
+#[pg_extern(schema = "graph", name = "_test_sync_capture_cancel_during_fetch")]
+fn test_sync_capture_cancel_during_fetch() {
+    crate::sync_capture::cancel_during_fetch().unwrap_or_else(|error| error.report());
+}
+
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL row ABI"

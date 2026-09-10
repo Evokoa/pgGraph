@@ -1264,6 +1264,11 @@ impl ProjectionGenerationHeartbeat {
 
 #[cfg(not(test))]
 pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
+    if super::publication::uses_fixed_snapshot() {
+        // The native snapshot horizon protects this generation. Updating a
+        // newer heartbeat row from an imported snapshot would serialize-fail.
+        return Ok(());
+    }
     validate_status(&manifest.validation_status)?;
     let caller_oid = crate::catalog::current_role_oid()?;
     let result = with_pending_generation_heartbeat(
