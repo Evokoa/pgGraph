@@ -25,8 +25,8 @@ buffer pool, and not a separate graph database that owns your data.
 | Keep source tables authoritative | pgGraph can rebuild from PostgreSQL data, but query speed depends on a derived artifact being fresh enough for the workload. |
 | Use SQL functions as the public API | Applications stay inside PostgreSQL; `graph.gql()` exposes the bounded documented GQL profile rather than claiming full language conformance. |
 | Precompute CSR adjacency | Traversal avoids repeatedly discovering edges through joins, but builds and maintenance become explicit operational steps. |
-| Keep engines backend-local | This matches PostgreSQL's process model and avoids shared mutable Rust state, but each backend still owns its mapped snapshot, bounded decoded metadata, and mutable overlays. |
-| Copy artifacts into read-only anonymous mappings | Typed views get stable immutable bytes even if the source inode changes, at the cost of one artifact-sized private snapshot per loading backend. |
+| Keep engines backend-local | This matches PostgreSQL's process model and avoids shared mutable Rust state, but each backend still owns its mapping handles, bounded decoded metadata, and mutable overlays. |
+| Load artifacts into immutable snapshots | Linux backends can share sealed snapshot pages; unavailable sharing falls back to a private anonymous snapshot. Each backend still validates its artifact and accounts for the full logical base size. |
 | Enforce circuit breakers | Traversal is bounded for database safety, but pgGraph is not trying to run unbounded graph analytics in OLTP query paths. |
 
 ## Why mmap?
@@ -39,13 +39,13 @@ argues that mmap is not a suitable replacement for a traditional DBMS buffer
 pool. That warning is relevant, and pgGraph should be evaluated against it.
 </Callout>
 
-pgGraph uses anonymous read-only mappings for immutable, rebuildable graph
-artifact snapshots, not as a mutable database storage engine or PostgreSQL
-buffer-pool replacement.
+pgGraph uses read-only mappings of immutable, rebuildable graph artifact
+snapshots. Linux can share sealed snapshots across backends; other platforms
+and unavailable sharing use private anonymous snapshots.
 
 When `graph.persist_on_build = true`, pgGraph writes a `.pggraph` artifact from
-registered PostgreSQL tables. Later backend processes copy and validate that
-artifact in an anonymous read-only mapping:
+registered PostgreSQL tables. Later backend processes load and validate an
+immutable snapshot containing:
 
 - node active bits, table OIDs, primary-key offsets, and primary-key bytes;
 - forward and inbound CSR offsets, targets, edge-label IDs, optional weights,
@@ -56,8 +56,14 @@ artifact in an anonymous read-only mapping:
 
 The snapshot keeps fixed-width data compact and prevents another process from
 invalidating typed Rust views by writing or truncating the source inode. The
-tradeoff is that each loading backend owns one artifact-sized snapshot instead
-of sharing file-backed pages across backends.
+Linux sharing path copies bytes into a sealed memory file and advertises a
+validated handle for other backends to adopt. Seals prohibit writes, shrinking,
+and growth. Cache hints do not authorize a graph or replace artifact validation.
+When sharing is unavailable, loading falls back to a private anonymous copy.
+
+Backend metadata and sync overlays remain private. Logical memory accounting
+charges the full base to each backend even when physical pages are shared; the
+shared-byte diagnostics do not measure cluster-wide physical memory use.
 
 The boundary matters:
 
@@ -111,9 +117,9 @@ pgGraph is young. These are the areas where critique is especially useful:
 
 - Whether read-only mmap remains the right artifact-loading strategy at larger
   graph sizes and higher backend counts.
-- Whether anonymous per-backend snapshots remain preferable to a different
-  shared representation now that both CSR directions and graph-sized metadata
-  use mmap-friendly sections.
+- Whether conditional Linux snapshot sharing provides enough memory savings
+  at high backend counts, and whether the private fallback remains practical
+  on other platforms and under resource pressure.
 - Whether planner integration should become deeper than conservative function
   `COST` and `ROWS` hints. Possible directions include custom scan nodes that
   let the PostgreSQL planner push predicates into graph traversal, path-key

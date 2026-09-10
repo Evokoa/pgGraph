@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.2.0-16a34a?style=flat-square" alt="Version 1.2.0">
+    <img src="https://img.shields.io/badge/version-1.2.1_candidate-16a34a?style=flat-square" alt="Version 1.2.1 candidate">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -75,6 +75,10 @@ lets you query it from SQL using functions in the `graph` schema.
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
 
+
+This checkout prepares the pgGraph `1.2.1` stability candidate.
+It is not yet tagged or published. Package commands below refer to `1.2.0`.
+Candidate upgrades require rebuilding each graph; see [release notes](docs/release-notes.mdx).
 
 ## Why pgGraph?
 

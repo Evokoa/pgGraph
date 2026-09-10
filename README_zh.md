@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.2.0-16a34a?style=flat-square" alt="Version 1.2.0">
+    <img src="https://img.shields.io/badge/version-1.2.1_candidate-16a34a?style=flat-square" alt="Version 1.2.1 candidate">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -75,6 +75,10 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 > [!TIP]
 > **寻找托管版本？** 我们已经在 [polygres.com](https://polygres.com) 上推出了 pgGraph 的托管版本，为 Postgres 提供完整的高性能 GraphRAG。
 
+
+当前代码正在准备 pgGraph `1.2.1` 稳定性候选版本，尚未创建 tag 或发布。
+以下安装包命令仍指向之前的 `1.2.0` 版本。升级到候选版本后，必须重建每个图，
+详见[发布说明](docs/release-notes.mdx)。
 
 ## 为什么选择 pgGraph？
 
