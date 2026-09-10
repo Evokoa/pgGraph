@@ -147,7 +147,7 @@ The system supports multiple isolated named graphs within the same database. Thi
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global source-table streams; replay, status, and query freshness filter `_sync_log` through the selected graph's registered table OIDs. |
 | Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |
 | Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` target a named graph or the selected/default graph. |
-| Reset | `graph.reset()` clears the backend-local engine and removes files for the selected graph's artifact root while preserving registrations; `graph.reset(true)` also clears that selected graph's registrations. |
+| Reset | `graph.reset()` clears the backend-local engine and transactionally removes the selected graph's publication while preserving registrations and rollback-visible files; `graph.reset(true)` also clears that selected graph's registrations. |
 
 Named-graph changes moved each of these components from implicit global state to explicit graph-scoped inputs while preserving the default-graph SQL workflow for backward compatibility.
 

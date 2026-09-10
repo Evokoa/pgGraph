@@ -920,56 +920,12 @@ thread_local! {
 
 /// Called when the extension is loaded into a backend.
 ///
-/// Registers GUC parameters and eagerly pre-warms the OS page cache for the
-/// `.pggraph` file (if it exists). This does NOT load the graph into the engine —
-/// that happens lazily on the first query via `maybe_auto_load()`. What this
-/// does is call `madvise(MADV_WILLNEED)` to tell the kernel to prefetch the
-/// file pages into RAM, so the subsequent mmap in `load_graph_file()` won't
-/// block on disk I/O.
-///
-/// For best results, add to `postgresql.conf`:
-/// ```text
-/// shared_preload_libraries = 'graph'
-/// ```
-/// This runs `_PG_init()` at postmaster startup, giving later backend
-/// processes a warm page-cache path when the kernel keeps those pages resident.
+/// Registers configuration and transaction callbacks. Artifact selection is
+/// deferred until a database transaction can read the publication catalog.
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     config::register_gucs();
     projection::tx_delta::register_transaction_callbacks();
-
-    // Eagerly pre-warm the OS page cache for the .pggraph file.
-    let Ok(path) = persistence::graph_file_path_for(graph_policy::DEFAULT_GRAPH_ID_TEXT) else {
-        return;
-    };
-    if let Ok(Some(base_path)) = persistence::current_base_artifact_path(&path) {
-        match std::fs::File::open(&base_path) {
-            Ok(file) => {
-                // SAFETY: The file descriptor stays alive for the duration of
-                // this temporary mapping, and the mapping is only used for
-                // read-only page-cache advice.
-                if let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) } {
-                    // madvise(MADV_WILLNEED) — ask the kernel to page in the
-                    // entire file. This is non-blocking: the kernel will
-                    // asynchronously read pages from disk into the page cache.
-                    #[cfg(unix)]
-                    {
-                        mmap.advise(memmap2::Advice::WillNeed).ok();
-                    }
-                    pgrx::log!(
-                        "graph: pre-warmed page cache for {} ({:.1} MB)",
-                        base_path.display(),
-                        mmap.len() as f64 / 1_048_576.0
-                    );
-                    // mmap is dropped here — that's fine. The kernel keeps the
-                    // pages in the page cache regardless.
-                }
-            }
-            Err(_) => {
-                // Not critical — auto-load will handle it later
-            }
-        }
-    }
 
     pgrx::log!("graph: extension loaded (v{})", env!("CARGO_PKG_VERSION"));
 }

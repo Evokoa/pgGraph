@@ -3043,31 +3043,6 @@ pub fn projection_manifest_root_for(graph_id: &str) -> GraphResult<PathBuf> {
     Ok(projection_manifest_root(&graph_file_path_for(graph_id)?))
 }
 
-/// Remove all derived artifact files for one graph id.
-///
-/// The target root is derived from a validated graph UUID and the configured
-/// data directory. No caller-provided path is accepted.
-pub fn remove_graph_artifacts_for(graph_id: &str) -> GraphResult<()> {
-    let graph_id = GraphId::parse(graph_id)
-        .map_err(|err| GraphError::Internal(format!("invalid graph artifact id: {err}")))?;
-    let root = graph_root_path_for_uncreated(graph_id.as_str())?;
-    if root.file_name().and_then(|name| name.to_str()) != Some(graph_id.as_str()) {
-        return Err(GraphError::Internal(format!(
-            "refusing to remove graph artifact root outside graph id directory: {}",
-            root.display()
-        )));
-    }
-    if root.exists() {
-        fs::remove_dir_all(&root).map_err(|err| {
-            GraphError::Internal(format!(
-                "remove graph artifact directory {}: {err}",
-                root.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
 pub fn projection_manifest_root(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
@@ -3083,7 +3058,14 @@ pub(crate) fn current_base_artifact_path(path: &Path) -> GraphResult<Option<Path
     if let Some(manifest) = ProjectionManifestStore::new(&root).load_latest_current()? {
         return Ok(Some(root.join(manifest.base_artifact_path)));
     }
-    Ok(path.is_file().then(|| path.to_path_buf()))
+    #[cfg(test)]
+    {
+        Ok(path.is_file().then(|| path.to_path_buf()))
+    }
+    #[cfg(not(test))]
+    {
+        Ok(None)
+    }
 }
 
 /// Return whether a complete persisted base is available for loading.
@@ -3327,31 +3309,6 @@ mod tests {
         assert!(
             matches!(result, Err(GraphError::Internal(message)) if message.contains("graph id"))
         );
-    }
-
-    #[cfg(not(feature = "pg_test"))]
-    #[test]
-    fn remove_graph_artifacts_for_missing_graph_does_not_create_root() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _restore = EnvRestore::capture("PGDATA");
-        let pgdata = std::env::temp_dir().join(format!(
-            "graph-pgdata-remove-missing-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("t")
-        ));
-        let _ = std::fs::remove_dir_all(&pgdata);
-        std::env::set_var("PGDATA", &pgdata);
-
-        let graph_id = "00000000-0000-0000-0000-0000000000cc";
-
-        remove_graph_artifacts_for(graph_id).unwrap();
-
-        assert!(!pgdata
-            .join("graph")
-            .join("database-1")
-            .join(graph_id)
-            .exists());
-        let _ = std::fs::remove_dir_all(&pgdata);
     }
 
     #[test]

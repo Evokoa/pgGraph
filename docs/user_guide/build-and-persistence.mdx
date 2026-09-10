@@ -355,28 +355,38 @@ Rebuild with `graph.build()` when:
 
 ## Reset
 
+Builds and other durable generation publishers require READ COMMITTED.
+REPEATABLE READ and SERIALIZABLE readers select their snapshot-visible
+generation, but cannot publish a new durable sync watermark.
+
 ```sql
 SELECT graph.reset();
 -- Or also clear the selected graph's registration mappings:
 SELECT graph.reset(true);
 ```
 
-`graph.reset()` clears the backend-local engine and removes persisted files for
-the selected graph's UUID directory while preserving its registration catalog
+`graph.reset()` clears the backend-local engine and transactionally removes the
+selected graph's published generation while preserving its registration catalog
 for a rebuild. `graph.reset(true)` additionally clears the selected graph's
 registered tables, edges, and filter columns. Both forms require graph-admin
 privileges; neither changes PostgreSQL source tables or registrations belonging
 to another graph.
 
-| Call | Projection and artifacts | Registrations | Source tables | Other graphs |
+| Call | Published projection | Registrations | Source tables | Other graphs |
 |---|---|---|---|---|
 | `graph.reset()` | Cleared for the selected graph | Preserved | Unchanged | Unchanged |
 | `graph.reset(true)` | Cleared for the selected graph | Cleared for the selected graph | Unchanged | Unchanged |
 
 <Callout type="error">
-Both reset forms remove the selected graph's persisted artifact root. The source
-tables remain unchanged, but graph queries for that graph need a rebuild or a
-new persisted artifact before they can run again. After `graph.reset(true)`,
+Both reset forms retain immutable files for transactions that can still see the
+previous publication. New graph queries need a rebuild after reset commits.
+After `graph.reset(true)`,
 reapply the table, edge, and filter registrations before calling
 `graph.build()`.
 </Callout>
+
+After a subsequent rebuild commits, `graph.projection_gc()` can reclaim obsolete
+files once PostgreSQL snapshots and graph reader pins release them. Dropped
+graphs retain their artifact directories; this release does not automatically
+reclaim directories for graphs that no longer exist. Disk usage must account
+for those retained files.

@@ -697,7 +697,11 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
 
 pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
     let graph = selected_or_default_graph_metadata()?;
-    let acquired = Spi::get_one::<bool>(&build_lock_query_for_graph(&graph.graph_id))
+    acquire_build_lock_for_graph(&graph.graph_id)
+}
+
+pub(crate) fn acquire_build_lock_for_graph(graph_id: &str) -> safety::GraphResult<()> {
+    let acquired = Spi::get_one::<bool>(&build_lock_query_for_graph(graph_id))
         .map_err(|err| {
             safety::GraphError::Internal(format!(
                 "could not acquire build/vacuum advisory lock: {}",
@@ -715,6 +719,7 @@ pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
 /// Acquire writer ownership and reconcile any candidate left by an earlier
 /// PostgreSQL error before a new publisher reserves its generation.
 pub(crate) fn acquire_build_lock_for_replacement() -> safety::GraphResult<()> {
+    crate::projection::publication::require_publication_snapshot()?;
     acquire_build_lock()?;
     let graph = selected_or_default_graph_metadata()?;
     crate::sql_facade::reconcile_interrupted_replacement(&graph)
@@ -725,6 +730,7 @@ pub(crate) fn acquire_build_lock_for_replacement() -> safety::GraphResult<()> {
 /// Repair must still run when ordinary serving validation reports a corrupt or
 /// incompatible active artifact. Other reconciliation failures remain fatal.
 pub(crate) fn acquire_build_lock_for_repair() -> safety::GraphResult<()> {
+    crate::projection::publication::require_publication_snapshot()?;
     acquire_build_lock()?;
     let graph = selected_or_default_graph_metadata()?;
     match crate::sql_facade::reconcile_interrupted_replacement(&graph) {

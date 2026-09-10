@@ -104,6 +104,20 @@ registration before calling `graph.build()`. See
 for the recovery sequence.
 </Callout>
 
+The 1.2.0-to-1.2.1 update adds transactional publication metadata. After installing
+the matching package, update each database and rebuild each graph:
+
+```sql
+ALTER EXTENSION graph UPDATE TO '1.2.1';
+SELECT * FROM graph.build();
+```
+
+Existing function objects and grants are preserved. The new publication catalog
+is private derived state and is excluded from logical dumps. Restored databases
+must rebuild their graphs. Files from an earlier version are not automatically
+adopted as a committed generation. Reset and drop retain files needed for
+rollback and older snapshots; see [Reset](/user_guide/build-and-persistence#reset).
+
 The historical 1.0.0-to-1.1.0 update uses:
 
 ```sql

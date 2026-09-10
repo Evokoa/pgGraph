@@ -22,6 +22,7 @@ every backend-local engine.
 | `projection/ingest.rs` | Core committed-row to L0 segment publication logic |
 | `projection/layered.rs` | Base CSR plus durable-segment plus transaction-delta layered read source |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
+| `projection/publication.rs` | Transaction-visible generation authority, privilege mediators, and PostgreSQL snapshot retention |
 | `projection/normalize.rs` | Deterministic committed-mutation normalization and ingest buffer limits |
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
 

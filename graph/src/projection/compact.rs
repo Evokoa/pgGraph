@@ -424,7 +424,8 @@ pub(crate) fn compact_generation(
     let generation_id = previous
         .generation_id
         .checked_add(1)
-        .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))?;
+        .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))?
+        .max(super::recovery::next_rebuild_generation_id(root)?);
     let manifest_publication_bytes = compaction_manifest_publication_upper_bound(
         previous,
         &edge_segments,

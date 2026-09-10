@@ -2546,7 +2546,7 @@ fn projection_repair_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
-fn projection_gc_sql_deletes_obsolete_files_after_retention() {
+fn projection_gc_sql_retains_files_until_publication_commits() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
     reset_and_create_fixtures();
@@ -2623,13 +2623,10 @@ fn projection_gc_sql_deletes_obsolete_files_after_retention() {
     store.publish(&current).expect("current manifest publishes");
 
     let deleted = Spi::get_one::<bool>(
-        "SELECT valid_generations_scanned = 2
-                AND retained_generations = ARRAY[9100002]::bigint[]
-                AND active_generations = ARRAY[]::bigint[]
-                AND obsolete_candidates = 1
-                AND protected_candidates = 0
-                AND deleted_files = 2
-                AND deleted_bytes > 3
+        "SELECT 9100001 = ANY(retained_generations)
+                AND 9100002 = ANY(retained_generations)
+                AND deleted_files = 0
+                AND deleted_bytes = 0
          FROM graph.projection_gc()",
     )
     .expect("projection_gc SQL call failed")
@@ -2639,12 +2636,13 @@ fn projection_gc_sql_deletes_obsolete_files_after_retention() {
         .unwrap_or(-1);
 
     assert!(deleted);
-    assert!(!old_segment.exists());
+    assert!(old_segment.exists());
     assert!(current_segment.exists());
     assert_eq!(repeated_deleted, 0);
 
     for path in [
         &base_path,
+        &old_segment,
         &current_segment,
         &old_manifest_path,
         &current_manifest_path,

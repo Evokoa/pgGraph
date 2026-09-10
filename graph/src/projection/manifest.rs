@@ -702,11 +702,42 @@ impl ProjectionManifestStore {
     }
 
     pub(crate) fn current_generation_id(&self) -> GraphResult<Option<u64>> {
-        if let Some(pointer) = self.load_current_pointer()? {
-            return Ok(Some(pointer.generation_id));
+        #[cfg(not(test))]
+        {
+            let Some(published) = super::publication::current(&self.root)? else {
+                return Ok(None);
+            };
+            if manifest_checksum_for_path(&self.manifest_path(published.generation_id))?
+                != published.manifest_checksum
+            {
+                return Err(manifest_corrupt("published manifest checksum mismatch"));
+            }
+            Ok(Some(published.generation_id))
         }
-        self.latest_manifest_path()
-            .map(|latest| latest.map(|(generation_id, _)| generation_id))
+        #[cfg(test)]
+        {
+            if let Some(pointer) = self.load_current_pointer()? {
+                return Ok(Some(pointer.generation_id));
+            }
+            self.latest_manifest_path()
+                .map(|latest| latest.map(|(generation_id, _)| generation_id))
+        }
+    }
+
+    /// Inspect an explicitly authorized graph without changing graph selection.
+    pub(crate) fn published_metadata(
+        &self,
+        published: &super::publication::PublishedGeneration,
+    ) -> GraphResult<ProjectionManifest> {
+        let path = self.manifest_path(published.generation_id);
+        if manifest_checksum_for_path(&path)? != published.manifest_checksum {
+            return Err(manifest_corrupt("published manifest checksum mismatch"));
+        }
+        let manifest = self.load_manifest_file(&path)?;
+        if manifest.generation_id != published.generation_id {
+            return Err(manifest_corrupt("published manifest generation mismatch"));
+        }
+        Ok(manifest)
     }
 
     /// Read only the publication generation needed to recover damaged state.
@@ -717,27 +748,36 @@ impl ProjectionManifestStore {
     /// `projection_repair()` reach its corruption planner. Callers must not use
     /// this method to treat the referenced manifest as loadable.
     pub(crate) fn current_generation_id_for_recovery(&self) -> GraphResult<Option<u64>> {
-        let path = self.current_pointer_path();
-        let Some(raw) = read_bounded_optional_file(
-            &path,
-            MAX_CURRENT_POINTER_BYTES,
-            "read current pointer for recovery",
-        )?
-        else {
-            return self
-                .latest_manifest_path()
-                .map(|latest| latest.map(|(generation_id, _)| generation_id));
-        };
-        let pointer = serde_json::from_slice::<ProjectionCurrentPointer>(&raw).map_err(|err| {
-            manifest_corrupt(format!("current pointer recovery decoding failed: {err}"))
-        })?;
-        if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
-            return Err(manifest_corrupt(format!(
-                "current pointer is invalid: version={}, generation_id={}",
-                pointer.version, pointer.generation_id
-            )));
+        #[cfg(not(test))]
+        {
+            super::publication::current(&self.root)
+                .map(|published| published.map(|published| published.generation_id))
         }
-        Ok(Some(pointer.generation_id))
+        #[cfg(test)]
+        {
+            let path = self.current_pointer_path();
+            let Some(raw) = read_bounded_optional_file(
+                &path,
+                MAX_CURRENT_POINTER_BYTES,
+                "read current pointer for recovery",
+            )?
+            else {
+                return self
+                    .latest_manifest_path()
+                    .map(|latest| latest.map(|(generation_id, _)| generation_id));
+            };
+            let pointer =
+                serde_json::from_slice::<ProjectionCurrentPointer>(&raw).map_err(|err| {
+                    manifest_corrupt(format!("current pointer recovery decoding failed: {err}"))
+                })?;
+            if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
+                return Err(manifest_corrupt(format!(
+                    "current pointer is invalid: version={}, generation_id={}",
+                    pointer.version, pointer.generation_id
+                )));
+            }
+            Ok(Some(pointer.generation_id))
+        }
     }
 
     fn current_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
@@ -780,21 +820,32 @@ impl ProjectionManifestStore {
     }
 
     fn prepare_current_pointer(&self, expected_current: Option<u64>) -> GraphResult<()> {
-        let direct_current = self
-            .load_current_pointer()?
-            .map(|pointer| pointer.generation_id);
-        if direct_current.is_none() {
-            if let Some(generation_id) = expected_current {
-                self.write_current_pointer(generation_id)?;
+        #[cfg(not(test))]
+        {
+            if self.current_generation_id_for_recovery()? == expected_current {
+                Ok(())
+            } else {
+                Err(GraphError::BuildLocked)
             }
         }
-        let actual = self
-            .load_current_pointer()?
-            .map(|pointer| pointer.generation_id);
-        if actual == expected_current {
-            Ok(())
-        } else {
-            Err(GraphError::BuildLocked)
+        #[cfg(test)]
+        {
+            let direct_current = self
+                .load_current_pointer()?
+                .map(|pointer| pointer.generation_id);
+            if direct_current.is_none() {
+                if let Some(generation_id) = expected_current {
+                    self.write_current_pointer(generation_id)?;
+                }
+            }
+            let actual = self
+                .load_current_pointer()?
+                .map(|pointer| pointer.generation_id);
+            if actual == expected_current {
+                Ok(())
+            } else {
+                Err(GraphError::BuildLocked)
+            }
         }
     }
 
@@ -803,6 +854,9 @@ impl ProjectionManifestStore {
         generation_id: u64,
         expected_current: Option<u64>,
     ) -> GraphResult<()> {
+        #[cfg(not(test))]
+        let actual = self.current_generation_id_for_recovery()?;
+        #[cfg(test)]
         let actual = self
             .load_current_pointer()?
             .map(|pointer| pointer.generation_id);
@@ -920,7 +974,10 @@ impl ProjectionManifestStore {
         if publication.is_err() {
             let _ = fs::remove_file(&tmp_path);
         }
-        publication
+        publication?;
+        #[cfg(not(test))]
+        super::publication::publish(&self.root, generation_id, pointer.manifest_checksum)?;
+        Ok(())
     }
 
     fn latest_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {

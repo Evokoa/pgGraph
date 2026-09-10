@@ -310,6 +310,7 @@ pub(crate) fn drop_graph_metadata(
             reason: "default graph cannot be dropped".to_string(),
         });
     }
+    crate::sql_build::acquire_build_lock_for_graph(&existing.graph_id)?;
     if graph_has_registrations(&existing.graph_id)? {
         return Err(safety::GraphError::InvalidFilter {
             reason: format!(

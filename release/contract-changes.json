@@ -469,5 +469,14 @@
     "date": "2026-09-10",
     "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
     "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Add transaction-visible generation publication and snapshot-aware reclamation while preserving existing public query signatures.",
+    "changed_sections": [
+      "internal_sql_functions"
+    ],
+    "date": "2026-09-10",
+    "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
+    "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
   }
 ]

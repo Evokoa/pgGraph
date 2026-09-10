@@ -30,7 +30,7 @@ thread_local! {
     static REPLAY_ABORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn mark_backend_replay() {
+pub(crate) fn mark_backend_replay() {
     let depth = crate::projection::tx_delta::subtransaction_depth() as usize;
     REPLAYED_SUBTRANSACTIONS.with(|levels| {
         let mut levels = levels.borrow_mut();
@@ -835,14 +835,27 @@ fn ensure_engine_loaded_for_apply_sync(
         Some(state) => state.graph.clone(),
         None => selected_or_default_graph_metadata()?,
     };
+    let graph_path = crate::persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
+    let root = projection_manifest_root(&graph_path);
+    let published_generation = ProjectionManifestStore::new(&root).current_generation_id()?;
     if ENGINE.with(|e| e.borrow().built)
         && crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id)
+        && ENGINE.with(|e| {
+            e.borrow()
+                .projection_manifest
+                .as_ref()
+                .map(|m| m.generation_id)
+        }) == published_generation
+        && ENGINE.with(|e| {
+            let engine = e.borrow();
+            engine.projection_manifest.is_none()
+                || engine.projection_manifest_root.as_deref() == Some(root.as_path())
+        })
     {
         crate::runtime_state::touch_loaded_graph(&graph.graph_id);
         return Ok(());
     }
 
-    let graph_path = crate::persistence::graph_file_path_for(&graph.graph_id)?;
     if !persisted_graph_exists(&graph_path)? {
         return Err(safety::GraphError::NotBuilt);
     }
@@ -1095,6 +1108,7 @@ fn ingest_projection_until_internal(
             })?),
         )
         .map_err(crate::safety::resource_limit_error)?;
+    ensure_engine_loaded_for_apply_sync(query_sync.as_ref())?;
     if entries.is_empty() {
         return Ok(ProjectionIngestOutcome {
             stats: ProjectionIngestStats {
@@ -1104,7 +1118,6 @@ fn ingest_projection_until_internal(
             query_replay: query_sync.map(|state| state.replay),
         });
     }
-    ensure_engine_loaded_for_apply_sync(query_sync.as_ref())?;
     let observed_max_sync_id = match target_sync_id {
         Some(target_sync_id) => target_sync_id,
         None => max_sync_log_id()?,
@@ -1205,6 +1218,7 @@ fn ingest_projection_until_internal(
         })?;
     let (base_artifact_path, base_checksum, base_version) =
         sync_ingest_base_artifact_metadata(&current_base_path)?;
+    let next_reserved_generation = crate::projection::recovery::next_rebuild_generation_id(&root)?;
     let ingester = ProjectionIngester::new(root, base_artifact_path, base_checksum, base_version);
     let candidate_residency = planning_residency
         .checked_add(planning_engine_bytes)
@@ -1214,7 +1228,8 @@ fn ingest_projection_until_internal(
     crate::runtime_state::mark_replacement_in_progress(
         &graph.graph_id,
         previous.as_ref().map(|manifest| manifest.generation_id),
-        crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?,
+        crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?
+            .map(|generation| generation.max(next_reserved_generation)),
     );
     let has_unseen_edge_type = rows
         .iter()
@@ -4283,8 +4298,45 @@ pub(crate) fn prune_sync_log(floor: Option<i64>) -> safety::GraphResult<i64> {
     if floor <= 0 {
         return Ok(0);
     }
+    #[cfg(not(test))]
+    {
+        crate::sql_build::acquire_build_lock()?;
+        if crate::projection::publication::historical_generations_required(
+            &projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?),
+        )? {
+            return Ok(0);
+        }
+    }
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
     if applicable_table_oids.is_empty() {
+        return Ok(0);
+    }
+    let graph_id = crate::catalog::selected_or_default_graph_id_via_definer()?;
+    let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
+    // Sync rows are source-scoped, not graph-scoped. Until a per-source floor
+    // covers every consumer, retain them when another graph or root may lag.
+    let shared_consumer = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM (
+                 SELECT graph_id, table_oid FROM graph._registered_tables
+                 UNION ALL
+                 SELECT graph_id, from_table_oid FROM graph._registered_edges
+             ) consumers
+             WHERE consumers.graph_id <> $1::uuid
+               AND consumers.table_oid::integer = ANY($2::int4[])
+         ) OR EXISTS (
+             SELECT 1 FROM graph._projection_heads
+             WHERE graph_id = $1::uuid AND artifact_root <> $3
+         )",
+        &[
+            graph_id.into(),
+            applicable_table_oids.clone().into(),
+            root.to_string_lossy().as_ref().into(),
+        ],
+    )
+    .map_err(|error| safety::GraphError::Internal(format!("sync consumer lookup failed: {error}")))?
+    .unwrap_or(true);
+    if shared_consumer {
         return Ok(0);
     }
     // `floor` is an already-applied id (everyone counted in its computation

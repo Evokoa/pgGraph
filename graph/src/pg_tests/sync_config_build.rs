@@ -282,7 +282,7 @@ fn sync_health_reports_retention_diagnostics_columns() {
 }
 
 #[pg_test]
-fn maintenance_prunes_sync_log_when_this_backend_is_the_only_heartbeat() {
+fn maintenance_retains_sync_log_until_publication_commits() {
     setup_sync_log_retention_fixture();
 
     Spi::run(
@@ -302,9 +302,9 @@ fn maintenance_prunes_sync_log_when_this_backend_is_the_only_heartbeat() {
         .expect("sync log count query failed")
         .unwrap_or(-1);
 
-    assert!(
-        after_prune < before_prune,
-        "maintenance should prune applied rows when this backend is the only heartbeat: before={before_prune} after={after_prune}"
+    assert_eq!(
+        after_prune, before_prune,
+        "the surrounding test transaction can still roll back the publication"
     );
 }
 
@@ -356,7 +356,7 @@ fn maintenance_does_not_prune_past_a_lagging_backend_heartbeat() {
 }
 
 #[pg_test]
-fn expired_backend_heartbeat_does_not_block_pruning() {
+fn expired_backend_heartbeat_does_not_override_transaction_retention() {
     setup_sync_log_retention_fixture();
 
     Spi::run(
@@ -393,9 +393,9 @@ fn expired_backend_heartbeat_does_not_block_pruning() {
         .expect("sync log count query failed")
         .unwrap_or(-1);
 
-    assert!(
-        after_prune < before_prune,
-        "an expired heartbeat must not block pruning: before={before_prune} after={after_prune}"
+    assert_eq!(
+        after_prune, before_prune,
+        "expired graph heartbeats cannot authorize pruning before publication commits"
     );
 }
 
@@ -429,6 +429,14 @@ fn stale_replay_position_fails_closed_after_a_prune() {
     Spi::run("SELECT * FROM graph.maintenance(concurrently := false)")
         .expect("maintenance failed");
 
+    // This transaction cannot commit a prune. Install a completed-prune
+    // metadata fixture to exercise the stale-position diagnostic separately;
+    // generation_transactions.py verifies real reclamation across commits.
+    let completed_floor = crate::ENGINE.with(|engine| engine.borrow().applied_sync_id);
+    Spi::run_with_args(
+        "UPDATE graph._graphs SET sync_log_pruned_before_id = $1 WHERE graph_name = 'default'",
+        &[completed_floor.into()],
+    ).expect("install completed prune metadata failed");
     let pruned_before_id = Spi::get_one::<i64>(
         "SELECT sync_log_pruned_before_id FROM graph._graphs WHERE graph_name = 'default'",
     )
@@ -436,7 +444,7 @@ fn stale_replay_position_fails_closed_after_a_prune() {
     .unwrap_or(0);
     assert!(
         pruned_before_id > intermediate_applied_sync_id,
-        "maintenance must have pruned past the intermediate watermark: pruned_before_id={pruned_before_id} intermediate={intermediate_applied_sync_id}"
+        "completed prune metadata must exceed the intermediate watermark"
     );
 
     // Roll this backend's own applied_sync_id back to simulate resuming
@@ -901,15 +909,15 @@ fn replacement_faults_preserve_or_reconcile_the_published_generation() {
     assert_eq!(
         Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
             .expect("post-publication recovery status failed"),
-        Some(2),
-        "status must reconcile to generation B after publication"
+        Some(1),
+        "a failed statement must roll publication back to generation A"
     );
     let generation_b = Spi::get_one::<i64>(
         "SELECT manifest_generation FROM graph.projection_status()",
     )
     .expect("generation B query failed")
     .expect("generation B missing");
-    assert!(generation_b > generation_a);
+    assert_eq!(generation_b, generation_a);
     Spi::run("SET graph.low_memory_build = off").expect("restore low memory build failed");
     Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
 }

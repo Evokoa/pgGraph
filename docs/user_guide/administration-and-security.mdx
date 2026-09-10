@@ -287,24 +287,36 @@ when needed.
 
 Persisted projections publish as immutable generation manifests. pgGraph writes
 and fsyncs each candidate manifest, validates every active artifact reference,
-and then atomically replaces a checksummed current-generation pointer. Sync,
-compaction, repair, and rebuild publishers compare that pointer with the
+and then updates a private PostgreSQL publication row in the same transaction.
+The row selects the generation visible to each PostgreSQL snapshot; the
+filesystem pointer is advisory. Sync, compaction, repair, and rebuild publishers
+compare the transaction-visible generation with the
 generation they planned from; a competing publisher returns SQLSTATE `55P03`
 with diagnostic `PG006` instead of replacing newer state.
 
 Readers continue using the immutable generation already installed in their
-backend while a replacement is prepared. Backend generation heartbeats and
+backend while a replacement is prepared. Query startup adopts a newly visible
+generation, including for explicitly loaded cold graphs and resident graphs
+with automatic initial loading disabled. Backend generation heartbeats and
 `graph.projection_retention_generations` protect active and rollback
 generations. `graph.projection_gc()` follows the current generation's ancestry,
 removes unreferenced obsolete artifacts, and bounds old or abandoned manifest
 files without moving the serving pointer. The default retention of two keeps
 the current and previous valid generation when no older reader pin requires
-more.
+more. PostgreSQL's synchronized visibility horizon also protects transactions
+that have not queried the graph yet, including imported snapshots. Collection
+under REPEATABLE READ or SERIALIZABLE retains history. A later READ COMMITTED
+`graph.projection_gc()` pass can reclaim files and safely applied sync-log rows
+after the publishing transaction commits and older readers release their pins.
+Sync rows are retained when another graph shares a registered source or the
+selected graph has another published artifact root. This conservative policy
+prevents one consumer's progress from discarding another consumer's pending
+changes; shared-source deployments must account for the retained log volume.
 
 An interrupted or failed publication can leave an unreferenced staging file or
 generation manifest, but it cannot make that candidate current. The next GC
 pass removes abandoned manifests that are neither retained nor pinned. If the
-current pointer or its referenced manifest fails checksum validation, pgGraph
+published manifest fails checksum validation, pgGraph
 fails closed; rebuild or use `graph.projection_repair()` from authoritative
 PostgreSQL source tables.
 

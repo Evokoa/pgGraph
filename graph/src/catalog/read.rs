@@ -468,6 +468,16 @@ fn digest_optional_text(hash: &mut xxhash_rust::xxh3::Xxh3, value: Option<&str>)
     }
 }
 
+pub(crate) fn current_catalog_state_from_rows(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filter_columns: &[builder::RegisteredFilterColumn],
+) -> safety::GraphResult<(u64, Option<String>)> {
+    let fingerprint = catalog_fingerprint(tables, edges, filter_columns)?;
+    let drift_reason = registered_schema_drift_reason(tables, edges, filter_columns);
+    Ok((fingerprint, drift_reason))
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
@@ -496,14 +506,4 @@ mod fingerprint_tests {
             registration_fingerprint_v1(&[other, table], &[], &[])
         );
     }
-}
-
-pub(crate) fn current_catalog_state_from_rows(
-    tables: &[builder::RegisteredTable],
-    edges: &[builder::RegisteredEdge],
-    filter_columns: &[builder::RegisteredFilterColumn],
-) -> safety::GraphResult<(u64, Option<String>)> {
-    let fingerprint = catalog_fingerprint(tables, edges, filter_columns)?;
-    let drift_reason = registered_schema_drift_reason(tables, edges, filter_columns);
-    Ok((fingerprint, drift_reason))
 }

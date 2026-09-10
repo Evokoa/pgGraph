@@ -260,6 +260,62 @@ fn record_projection_heartbeat_for_current_role() -> bool {
     })
 }
 
+// Publication metadata is needed by readers and by builders without query access.
+fn require_publication_access(
+    graph: &catalog::GraphMetadata,
+    caller: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<()> {
+    match catalog::require_graph_privilege_for_role(graph, catalog::GraphPrivilege::Read, caller) {
+        Err(safety::GraphError::AclDenied { .. }) => {
+            catalog::require_graph_privilege_for_role(graph, catalog::GraphPrivilege::Build, caller)
+        }
+        result => result,
+    }
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_published_generation_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn published_generation_for_current_role() -> Option<pgrx::JsonB> {
+    with_panic_boundary("_published_generation_for_current_role()", || {
+        let caller = catalog::current_role_oid().unwrap_or_else(|error| error.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller)
+            .unwrap_or_else(|error| error.report());
+        require_publication_access(&graph, caller).unwrap_or_else(|error| error.report());
+        crate::projection::publication::read_current_direct(&graph.graph_id)
+            .unwrap_or_else(|error| error.report())
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_publish_generation_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn publish_generation_for_current_role() -> bool {
+    with_panic_boundary("_publish_generation_for_current_role()", || {
+        let caller = catalog::current_role_oid().unwrap_or_else(|error| error.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller)
+            .unwrap_or_else(|error| error.report());
+        require_publication_access(&graph, caller).unwrap_or_else(|error| error.report());
+        let pending =
+            crate::projection::publication::take_pending().unwrap_or_else(|error| error.report());
+        if pending.caller_oid != caller || pending.graph_id != graph.graph_id {
+            safety::GraphError::AclDenied {
+                table: "internal publication mediator".into(),
+            }
+            .report();
+        }
+        crate::projection::publication::publish_direct(&pending)
+            .unwrap_or_else(|error| error.report());
+        true
+    })
+}
+
 #[pg_extern(
     schema = "graph",
     name = "_active_generation_count_for_current_role",
@@ -430,13 +486,7 @@ fn drop_graph(
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let metadata = catalog::drop_graph_metadata(graph_name, tenant, namespace)
             .unwrap_or_else(|err| err.report());
-        persistence::remove_graph_artifacts_for(&metadata.graph_id).unwrap_or_else(|err| {
-            safety::GraphError::Internal(format!(
-                "graph '{}' was dropped but artifact cleanup failed: {}",
-                metadata.graph_name, err
-            ))
-            .report()
-        });
+        crate::sql_sync::mark_backend_replay();
         graph_metadata_iterator(vec![metadata])
     })
 }
@@ -1655,7 +1705,10 @@ fn projection_compact(
         crate::runtime_state::mark_replacement_in_progress(
             &graph.graph_id,
             Some(previous.generation_id),
-            previous.generation_id.checked_add(1),
+            Some(
+                crate::projection::recovery::next_rebuild_generation_id(&root)
+                    .unwrap_or_else(|err| err.report()),
+            ),
         );
         // `compact_generation` polls PostgreSQL interrupts. Keep no RefCell
         // guard alive across that boundary: a PostgreSQL ERROR may bypass Rust
@@ -1720,12 +1773,14 @@ fn projection_gc() -> TableIterator<
 > {
     with_panic_boundary("projection_gc()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock().unwrap_or_else(|err| err.report());
         crate::projection::manifest::expire_stale_generation_heartbeats()
             .unwrap_or_else(|err| err.report());
         let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
         let root = crate::persistence::projection_manifest_root(&artifact);
         let summary = crate::projection::gc::collect_projection_garbage(&root)
             .unwrap_or_else(|err| err.report());
+        crate::sql_sync::prune_sync_log_if_safe().unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             saturating_i32(summary.valid_generations_scanned),
             u64_vec_to_i64(summary.retained_generations),
@@ -1778,8 +1833,10 @@ fn projection_repair() -> TableIterator<
             crate::runtime_state::mark_replacement_in_progress(
                 &graph.graph_id,
                 plan.generation_id,
-                plan.generation_id
-                    .and_then(|generation| generation.checked_add(1)),
+                Some(
+                    crate::projection::recovery::next_rebuild_generation_id(&root)
+                        .unwrap_or_else(|err| err.report()),
+                ),
             );
         }
 
@@ -2760,6 +2817,12 @@ fn test_pending_sync_row_probe_error_after_arming() -> bool {
 )]
 fn test_projection_heartbeat_error_after_arming() -> bool {
     crate::projection::manifest::test_generation_heartbeat_error_after_arming()
+}
+
+#[cfg(all(not(test), feature = "development"))]
+#[pg_extern(schema = "graph", name = "_test_publication_error_after_arming")]
+fn test_publication_error_after_arming() -> bool {
+    crate::projection::publication::test_publication_error_after_arming()
 }
 
 #[allow(

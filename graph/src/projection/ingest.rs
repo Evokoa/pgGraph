@@ -335,7 +335,8 @@ impl ProjectionIngester {
         }
         validate_ingestion_limits(committed_rows.iter().copied(), limits)?;
 
-        let generation_id = next_generation_id(previous.as_ref(), &committed_rows)?;
+        let generation_id = next_generation_id(previous.as_ref(), &committed_rows)?
+            .max(super::recovery::next_rebuild_generation_id(&self.root)?);
         let (resolved_rows, edge_type_dictionary, edge_type_dictionary_changed) = if let Some(
             base_labels,
         ) =
