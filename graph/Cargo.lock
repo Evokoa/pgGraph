@@ -707,6 +707,7 @@ dependencies = [
  "bitvec",
  "crc32fast",
  "criterion",
+ "libc",
  "memmap2",
  "pgrx",
  "pgrx-tests",

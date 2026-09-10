@@ -2831,6 +2831,13 @@ fn test_sync_capture_cancel_during_fetch() {
     crate::sync_capture::cancel_during_fetch().unwrap_or_else(|error| error.report());
 }
 
+#[cfg(all(target_os = "linux", not(test), feature = "development"))]
+#[pg_extern(schema = "graph", name = "_test_arm_snapshot_cancel")]
+fn test_arm_snapshot_cancel(registry: bool) {
+    require_graph_admin_result().unwrap_or_else(|error| error.report());
+    crate::persistence::arm_snapshot_test_cancel(registry);
+}
+
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL row ABI"

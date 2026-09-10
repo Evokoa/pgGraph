@@ -314,11 +314,19 @@ fn remove_staged_base(path: &std::path::Path) {
         match std::fs::remove_file(&staged) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => pgrx::warning!(
-                "graph: could not remove failed staged artifact {}: {}",
-                staged.display(),
-                error
-            ),
+            Err(error) => {
+                #[cfg(not(test))]
+                pgrx::warning!(
+                    "graph: could not remove failed staged artifact {}: {}",
+                    staged.display(),
+                    error
+                );
+                #[cfg(test)]
+                eprintln!(
+                    "could not remove failed staged artifact {}: {error}",
+                    staged.display()
+                );
+            }
         }
     }
 }

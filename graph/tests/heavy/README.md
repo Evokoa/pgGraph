@@ -8,6 +8,13 @@ SQLSTATEs, ACL/RLS role boundaries, crash recovery, backup/restore, package
 validation, Docker, pg_upgrade, memory evidence, playground query stability, or
 mixed concurrency.
 
+`shared_snapshot.py` checks Linux sealed-base sharing across live backends,
+creator exit, attempted descriptor truncation, and source truncation. Use
+`--container NAME` when PostgreSQL runs in Docker. With a development build,
+`--cancellation` also checks repeated copy/registry cancellation, descriptor
+cleanup, and subsequent shared access. It creates fresh databases and retains
+their fixture artifacts, including the deliberately truncated test source.
+
 `gql_isolation_matrix.sh` is the two-session backend-local mapped-write
 visibility gate. It applies node and relationship `CREATE`, `SET`, `REMOVE`,
 relationship `DELETE`, `DETACH DELETE`, and `MERGE` under READ COMMITTED,

@@ -2,8 +2,9 @@
 //!
 //! The `.pggraph` file is the on-disk representation of the graph engine.
 //! It is written atomically (write to `<path>.tmp` then rename) and
-//! loaded into an immutable anonymous mapping for typed access to the base
-//! graph arrays.
+//! loaded into an immutable mapping for typed access to the base graph arrays.
+//! Manifest-backed Linux loads can share sealed snapshots; other loads use
+//! private anonymous snapshots.
 //!
 //! ## File Format
 //!
@@ -30,9 +31,9 @@
 //!
 //! When loaded via `load_graph_file()`:
 //! - **NodeStore** (`is_active`, `table_oids`, primary-key offsets/bytes):
-//!   backed by a backend-local immutable mapping
+//!   backed by an immutable mapping
 //! - **Forward and inbound EdgeStore** arrays are backed by the same
-//!   backend-local immutable mapping
+//!   immutable mapping
 //! - **ResolutionIndex**: mapped, zero-copy within the backend, binary search
 //! - the bounded edge type registry is decoded into backend-local metadata
 //! - relationship identity descriptors and key bytes remain mapped
@@ -42,12 +43,20 @@
 use std::fs;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 
-use memmap2::{Mmap, MmapMut};
+use memmap2::Mmap;
+
+mod snapshot_cache;
+
+#[cfg(all(target_os = "linux", not(test), feature = "development"))]
+pub(crate) fn arm_snapshot_test_cancel(registry: bool) {
+    snapshot_cache::arm_test_cancel(registry);
+}
 
 use crate::config;
 use crate::edge_store::{EdgeStore, EdgeTypeWidth, MmapEdgeArrayParts, MmapEdgeArrays};
@@ -141,12 +150,13 @@ pub(crate) struct ValidatedBaseSnapshot {
     path: PathBuf,
     source_stamp: Option<SnapshotSourceStamp>,
     mmap: Arc<Mmap>,
+    snapshot: snapshot_cache::Snapshot,
     layout: ValidatedGraphLayout,
     flags: u32,
     body_crc: u32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct SnapshotSourceStamp {
     device: u64,
     inode: u64,
@@ -177,6 +187,14 @@ fn snapshot_source_stamp(metadata: &fs::Metadata) -> Option<SnapshotSourceStamp>
 impl ValidatedBaseSnapshot {
     pub(crate) fn bytes(&self) -> usize {
         self.mmap.len()
+    }
+
+    pub(crate) fn shared_bytes(&self) -> usize {
+        if self.snapshot.is_shareable() {
+            self.bytes()
+        } else {
+            0
+        }
     }
 
     fn matches(&self, path: &Path, stamp: Option<&SnapshotSourceStamp>) -> bool {
@@ -2239,10 +2257,10 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 /// - Immutable filter values, text dictionaries, and relationship identities
 ///   stay mapped; only bounded filter and edge-label metadata is decoded.
 ///
-/// Each backend copies the artifact into an anonymous read-only mapping before
-/// creating typed views. This prevents same-inode writes or truncation by
-/// another process from invalidating Rust references. Derived metadata and
-/// mutable overlays remain per-backend allocations.
+/// Manifest-backed Linux loads can share a sealed memfd copy. Other loads use
+/// private anonymous read-only memory. Both prevent source-inode writes or
+/// truncation from invalidating Rust references. Derived metadata and mutable
+/// overlays remain per-backend allocations.
 pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     load_graph_file_internal(path, None, crate::resource::ByteCount::ZERO, None)
 }
@@ -2273,7 +2291,7 @@ pub(crate) fn load_graph_file_reusing_base(
     path: &Path,
     candidate: Option<&ProjectionManifest>,
     resident: crate::resource::ByteCount,
-    base: Option<&Arc<ValidatedBaseSnapshot>>,
+    base: Option<&Rc<ValidatedBaseSnapshot>>,
 ) -> GraphResult<Engine> {
     load_graph_file_internal(path, candidate, resident, base)
 }
@@ -2282,7 +2300,39 @@ fn load_graph_file_internal(
     path: &Path,
     projection_candidate: Option<&ProjectionManifest>,
     resident: crate::resource::ByteCount,
-    reusable: Option<&Arc<ValidatedBaseSnapshot>>,
+    reusable: Option<&Rc<ValidatedBaseSnapshot>>,
+) -> GraphResult<Engine> {
+    let mut shared_hit = false;
+    let result = load_graph_file_attempt(
+        path,
+        projection_candidate,
+        resident,
+        reusable,
+        true,
+        &mut shared_hit,
+    );
+    if result.is_err() && shared_hit {
+        // Discovery hints cannot make an otherwise valid source unreadable.
+        load_graph_file_attempt(
+            path,
+            projection_candidate,
+            resident,
+            reusable,
+            false,
+            &mut false,
+        )
+    } else {
+        result
+    }
+}
+
+fn load_graph_file_attempt(
+    path: &Path,
+    projection_candidate: Option<&ProjectionManifest>,
+    resident: crate::resource::ByteCount,
+    reusable: Option<&Rc<ValidatedBaseSnapshot>>,
+    allow_shared_cache: bool,
+    shared_hit: &mut bool,
 ) -> GraphResult<Engine> {
     ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
     let manifest_root = projection_manifest_root(path);
@@ -2331,18 +2381,30 @@ fn load_graph_file_internal(
         )
         .map_err(crate::safety::resource_limit_error)?;
     let base = if let Some(base) = reusable {
-        Arc::clone(base)
+        Rc::clone(base)
     } else {
-        let mut snapshot = MmapMut::map_anon(file_len)
-            .map_err(|e| GraphError::Internal(format!("anonymous mmap failed: {}", e)))?;
-        file.read_exact(&mut snapshot).map_err(|e| {
-            GraphError::Internal(format!("Cannot snapshot {}: {}", path.display(), e))
+        let cache_key = source_stamp.as_ref().and_then(|stamp| {
+            fs::canonicalize(path)
+                .ok()
+                .and_then(|canonical| serde_json::to_string(&(canonical, stamp)).ok())
+        });
+        let snapshot = if let Some(key) =
+            cache_key.filter(|_| allow_shared_cache && pinned_manifest.is_some())
+        {
+            snapshot_cache::load_snapshot(
+                &mut file,
+                &manifest_root.join(".snapshot-cache"),
+                &key,
+                file_len,
+            )
+        } else {
+            snapshot_cache::copy_private_snapshot(&mut file, file_len)
+        }
+        .map_err(|error| {
+            GraphError::Internal(format!("Cannot snapshot {}: {error}", path.display(),))
         })?;
-        let mmap = Arc::new(
-            snapshot
-                .make_read_only()
-                .map_err(|e| GraphError::Internal(format!("read-only mmap failed: {}", e)))?,
-        );
+        *shared_hit = snapshot.is_shared_hit();
+        let mmap = Arc::clone(snapshot.mmap());
 
         // Validate header
         if &mmap[0..4] != MAGIC {
@@ -2438,10 +2500,11 @@ fn load_graph_file_internal(
             },
         )?;
         drop(resolution_validation);
-        Arc::new(ValidatedBaseSnapshot {
+        Rc::new(ValidatedBaseSnapshot {
             path: path.to_path_buf(),
             source_stamp,
             mmap,
+            snapshot,
             layout,
             flags,
             body_crc: computed_crc,
@@ -2453,8 +2516,8 @@ fn load_graph_file_internal(
     let flags = base.flags;
     let node_count = layout.node_count;
     let computed_crc = base.body_crc;
-    // Mapped value/key bytes are already covered by the full anonymous
-    // snapshot reservation. This additional lease covers bounded descriptors,
+    // Mapped value/key bytes are covered by the logical snapshot reservation.
+    // This additional lease covers bounded descriptors,
     // copied names/labels, empty per-column delta containers, and temporary
     // uniqueness validation indexes.
     let filter_metadata_bytes = FilterIndex::mapped_load_metadata_upper_bound(
@@ -2674,6 +2737,17 @@ fn load_graph_file_internal(
         }
     }
 
+    let storage_mode = base.snapshot.mode().as_str();
+    #[cfg(not(test))]
+    pgrx::debug1!("graph snapshot storage mode: {storage_mode}");
+    #[cfg(test)]
+    let _ = storage_mode;
+    if let Err(error) = base.snapshot.advertise() {
+        #[cfg(not(test))]
+        pgrx::debug1!("graph snapshot cache advertisement unavailable: {error}");
+        #[cfg(test)]
+        let _ = error;
+    }
     engine.base_snapshot = Some(base);
     Ok(engine)
 }
@@ -3599,7 +3673,7 @@ mod tests {
             serving.base_snapshot.as_ref(),
         )
         .unwrap();
-        assert!(Arc::ptr_eq(
+        assert!(Rc::ptr_eq(
             serving.base_snapshot.as_ref().unwrap(),
             planning.base_snapshot.as_ref().unwrap()
         ));
@@ -3624,6 +3698,80 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_hint_for_another_valid_graph_retries_private_source() {
+        let path = temp_graph_path("shared-hint-valid-source");
+        write_graph_file(&graph_with_relationship(), &path).unwrap();
+        let mut wrong = Engine::new();
+        for key in ["C", "D"] {
+            let id = wrong.node_store.add_node(10, key.to_owned());
+            wrong.resolution_insert(10, key, id);
+        }
+        let type_id = wrong.register_edge_type("related_to").unwrap();
+        wrong.edge_store = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id,
+                weight: Some(7),
+                schema_reversed: false,
+            }],
+            true,
+        );
+        wrong.built = true;
+        let wrong_path = temp_graph_path("shared-hint-wrong-source");
+        write_graph_file(&wrong, &wrong_path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(metadata.len(), fs::metadata(&wrong_path).unwrap().len());
+        let key = serde_json::to_string(&(
+            fs::canonicalize(&path).unwrap(),
+            snapshot_source_stamp(&metadata).unwrap(),
+        ))
+        .unwrap();
+        let _poisoned = snapshot_cache::advertise_test_snapshot(
+            &mut fs::File::open(&wrong_path).unwrap(),
+            &projection_manifest_root(&path).join(".snapshot-cache"),
+            &key,
+            metadata.len() as usize,
+        )
+        .unwrap();
+        let candidate = ProjectionManifest::base_only(
+            2,
+            path.file_name().unwrap().to_string_lossy(),
+            checksum_graph_artifact(&path),
+            VERSION,
+            0,
+            2,
+        );
+        let mut hit = false;
+        assert!(load_graph_file_attempt(
+            &path,
+            Some(&candidate),
+            crate::resource::ByteCount::ZERO,
+            None,
+            true,
+            &mut hit,
+        )
+        .is_err());
+        assert!(hit, "fixture did not exercise a poisoned shared hit");
+        let loaded = load_graph_file_reusing_base(
+            &path,
+            Some(&candidate),
+            crate::resource::ByteCount::ZERO,
+            None,
+        )
+        .unwrap();
+        assert_eq!(loaded.resolve(10, "A"), Some(0));
+        assert_eq!(loaded.resolve(10, "C"), None);
+        assert_eq!(loaded.base_snapshot.as_ref().unwrap().shared_bytes(), 0);
+
+        let standalone = load_graph_file(&path).unwrap();
+        assert_eq!(standalone.resolve(10, "A"), Some(0));
+        assert_eq!(standalone.base_snapshot.as_ref().unwrap().shared_bytes(), 0);
+    }
+
     #[test]
     fn reusable_base_revalidates_modified_inode_and_different_root() {
         let path = temp_graph_path("reuse-modified-source");
@@ -3638,7 +3786,7 @@ mod tests {
             serving.base_snapshot.as_ref(),
         )
         .unwrap();
-        assert!(!Arc::ptr_eq(
+        assert!(!Rc::ptr_eq(
             serving.base_snapshot.as_ref().unwrap(),
             separate.base_snapshot.as_ref().unwrap()
         ));
@@ -3681,7 +3829,7 @@ mod tests {
         let shared =
             load_graph_file_reusing_base(&path, None, resident, serving.base_snapshot.as_ref())
                 .unwrap();
-        assert!(Arc::ptr_eq(
+        assert!(Rc::ptr_eq(
             serving.base_snapshot.as_ref().unwrap(),
             shared.base_snapshot.as_ref().unwrap()
         ));
@@ -3700,7 +3848,7 @@ mod tests {
             shared.base_snapshot.as_ref(),
         )
         .unwrap();
-        assert!(Arc::ptr_eq(
+        assert!(Rc::ptr_eq(
             serving.base_snapshot.as_ref().unwrap(),
             validated_candidate.base_snapshot.as_ref().unwrap()
         ));

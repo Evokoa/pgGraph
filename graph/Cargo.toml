@@ -93,3 +93,6 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.186"

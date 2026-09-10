@@ -1202,7 +1202,7 @@ fn ingest_projection_until_internal(
     let shares_base = reusable_base
         .as_ref()
         .zip(planning_engine.base_snapshot.as_ref())
-        .is_some_and(|(serving, planning)| std::sync::Arc::ptr_eq(serving, planning));
+        .is_some_and(|(serving, planning)| std::rc::Rc::ptr_eq(serving, planning));
     let unique_planning_bytes = crate::resource::ByteCount::from_bytes(
         planning_engine_bytes
             .as_u64()

@@ -134,7 +134,7 @@ pub struct Engine {
     /// Mapped node and edge stores retain their own `Arc` clones.
     pub(crate) _mmap: Option<Arc<memmap2::Mmap>>,
     /// Validated base ownership reused by clean ingestion planning/candidate loads.
-    pub(crate) base_snapshot: Option<Arc<crate::persistence::ValidatedBaseSnapshot>>,
+    pub(crate) base_snapshot: Option<std::rc::Rc<crate::persistence::ValidatedBaseSnapshot>>,
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
@@ -2780,7 +2780,7 @@ impl Engine {
         self.estimated_memory_used_bytes() as f64 / 1_048_576.0
     }
 
-    /// Return the conservative backend-private engine residency in bytes.
+    /// Return conservative logical engine residency, including shared base bytes.
     pub(crate) fn estimated_memory_used_bytes(&self) -> usize {
         self.estimated_heap_bytes()
             .saturating_add(self.estimated_mmap_bytes())
@@ -2788,12 +2788,13 @@ impl Engine {
     }
 
     pub fn memory_profile(&self, concurrent_backends: i32, memory_limit_mb: i32) -> MemoryProfile {
+        let shared_bytes = self
+            .base_snapshot
+            .as_ref()
+            .map_or(0, |base| base.shared_bytes());
         let private_bytes = self
             .estimated_heap_bytes()
-            .saturating_add(self.estimated_mmap_bytes());
-        // The public columns remain for 1.x compatibility. Artifact snapshots
-        // are backend-local now, so no mapped bytes are reported as shared.
-        let shared_bytes = 0;
+            .saturating_add(self.estimated_mmap_bytes().saturating_sub(shared_bytes));
         let backend_count = concurrent_backends.max(1) as usize;
         let instance_private_bytes = private_bytes.saturating_mul(backend_count);
         let instance_total_bytes = instance_private_bytes.saturating_add(shared_bytes);

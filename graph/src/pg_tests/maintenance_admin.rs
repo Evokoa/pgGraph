@@ -16,7 +16,7 @@ fn durable_ingestion_reuses_validated_base_for_new_labels() {
         SELECT * FROM graph.ingest_projection();")
         .expect("ingest new relationship label");
     let after = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
-    assert!(std::sync::Arc::ptr_eq(&before, &after));
+    assert!(std::rc::Rc::ptr_eq(&before, &after));
     assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.edge_types()
         WHERE label = 'reuse-new-label'").unwrap(), Some(1));
     Spi::run("INSERT INTO graph_test_friendships_pgtest(id,user_id,friend_id)
@@ -24,7 +24,7 @@ fn durable_ingestion_reuses_validated_base_for_new_labels() {
         SELECT * FROM graph.ingest_projection();")
         .expect("ingest into an existing cumulative dictionary");
     let second = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
-    assert!(std::sync::Arc::ptr_eq(&before, &second));
+    assert!(std::rc::Rc::ptr_eq(&before, &second));
     let query = "SELECT string_agg(row #>> '{r,id}', ',' ORDER BY row #>> '{r,id}')
         FROM (VALUES ('reuse-new-label'), ('reuse-second-label')) AS labels(label),
         LATERAL graph.gql(format(

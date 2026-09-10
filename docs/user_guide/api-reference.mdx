@@ -376,11 +376,13 @@ RETURNS TABLE (
 )
 ```
 
-Reports sizing estimates for the current backend's active engine. The immutable
-artifact snapshot and backend-private heap are multiplied by
-`concurrent_backends`, with a minimum of one. The `*_shared_mb` columns remain
-for 1.x compatibility and currently return zero. This is an operator sizing
-aid, not a live connection counter or cluster-wide hard cap.
+Reports sizing estimates for the current backend's active engine. Private heap
+and private fallback snapshots are multiplied by `concurrent_backends`, with a
+minimum of one. The shared columns report Linux sealed base bytes, counted once
+in the estimate. This assumes all backends share one base; concurrent cold
+loads, different generations or different roots can require additional copies.
+Zero shared bytes means no sealed base is loaded. This is a sizing estimate,
+not a live connection counter or cluster-wide hard cap.
 
 ## Named Graph Metadata
 

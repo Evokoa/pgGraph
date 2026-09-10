@@ -46,6 +46,7 @@ for i in $(seq 1 "$BACKENDS"); do
     psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<SQL
 SELECT pg_backend_pid();
 $GRAPH_QUERY
+SELECT 'pggraph_measurement_ready';
 SELECT pg_sleep($SLEEP_SECONDS);
 SQL
   ) >"$out_file" 2>"$err_file" &
@@ -58,7 +59,7 @@ while (( SECONDS < deadline )); do
   BACKEND_PIDS=()
   for i in $(seq 1 "$BACKENDS"); do
     out_file="$WORKDIR/backend_${i}.out"
-    if [[ -s "$out_file" ]]; then
+    if [[ -s "$out_file" ]] && grep -qx 'pggraph_measurement_ready' "$out_file"; then
       pid="$(head -n 1 "$out_file" | tr -dc '0-9' || true)"
       if [[ -n "$pid" && -r "/proc/$pid/smaps_rollup" ]]; then
         BACKEND_PIDS+=("$pid")
@@ -71,8 +72,8 @@ while (( SECONDS < deadline )); do
   sleep 0.25
 done
 
-if (( ${#BACKEND_PIDS[@]} == 0 )); then
-  echo "No backend PIDs were captured." >&2
+if (( ${#BACKEND_PIDS[@]} != BACKENDS )); then
+  echo "Only ${#BACKEND_PIDS[@]} of $BACKENDS backends completed the graph query." >&2
   for err in "$WORKDIR"/*.err; do
     [[ -s "$err" ]] && cat "$err" >&2
   done
@@ -117,4 +118,5 @@ echo
 echo "Interpretation:"
 echo "- RSS includes private pages and double-counts any shared mappings in each backend."
 echo "- PSS apportions shared libraries and mappings, so summed PSS is the multi-backend capacity measure."
-echo "- Current graph artifacts are loaded into private anonymous snapshots; do not infer file-page sharing from this output."
+echo "- Linux can share sealed graph snapshots; fallback copies and metadata remain private."
+echo "- Use /proc/<pid>/maps inode identities to distinguish graph sharing from shared libraries."

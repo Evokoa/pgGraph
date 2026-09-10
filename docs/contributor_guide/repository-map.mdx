@@ -54,7 +54,7 @@ beside it in the crate tree.
 | `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
 | `catalog/validate.rs` | Source table, key, edge, and filter-column validation |
 | `catalog/write.rs` | Catalog inserts and updates for registered graph metadata |
-| `persistence.rs` | v6/v7 `.pggraph` loader, adaptive v7 writer, CRCs, 26-section validation, and mmap setup |
+| `persistence.rs` | v6/v7 `.pggraph` loader, adaptive v7 writer, CRCs, 26-section validation, and immutable mmap setup; `persistence/snapshot_cache.rs` owns sealed Linux copies and private fallback |
 | `tenant_store.rs` | Owned/mapped tenant dictionaries, dense tokens, and sparse membership removals |
 | `projection/` | Clean CSR and overlay-aware projection read helpers |
 | `bfs.rs` | BFS and DFS traversal hot loops |
