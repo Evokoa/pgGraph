@@ -133,6 +133,8 @@ pub struct Engine {
     /// Backend-local immutable snapshot used by resolution and accounting.
     /// Mapped node and edge stores retain their own `Arc` clones.
     pub(crate) _mmap: Option<Arc<memmap2::Mmap>>,
+    /// Validated base ownership reused by clean ingestion planning/candidate loads.
+    pub(crate) base_snapshot: Option<Arc<crate::persistence::ValidatedBaseSnapshot>>,
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
@@ -961,6 +963,7 @@ impl Engine {
             resolution_store: ResolutionStore::Builder(ResolutionIndexBuilder::new()),
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
+            base_snapshot: None,
             edge_buffer: Vec::new(),
             edge_buffer_revision: 0,
             edge_buffer_missing_relationship_identity_edge_types: HashSet::new(),

@@ -95,8 +95,44 @@ pub(crate) struct ProjectionIngestResult {
     pub(crate) manifest: Option<ProjectionManifest>,
     pub(crate) rows_ingested: usize,
     pub(crate) segments_published: usize,
-    /// Cumulative identity dictionary installed by this publication.
-    pub(crate) relationship_identities: Option<Vec<Option<RelationshipIdentity>>>,
+}
+
+#[derive(Clone, Copy)]
+enum IdentitySource<'a> {
+    Slice(&'a [Option<RelationshipIdentity>]),
+    ValidatedStore(&'a crate::relationship_identity_store::RelationshipIdentityStore),
+}
+
+impl<'a> IdentitySource<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Slice(values) => values.len(),
+            Self::ValidatedStore(store) => store.len(),
+        }
+    }
+
+    fn iter(
+        self,
+    ) -> impl Iterator<Item = Option<crate::relationship_identity_store::RelationshipIdentityRef<'a>>>
+    {
+        (0..self.len()).map(move |index| match self {
+            Self::Slice(values) => values[index].as_ref().map(Into::into),
+            Self::ValidatedStore(store) => store.get(index as u32),
+        })
+    }
+
+    fn to_dictionary(self) -> GraphResult<RelationshipIdentityDictionary> {
+        let mut identities = Vec::new();
+        identities.try_reserve_exact(self.len()).map_err(|error| {
+            GraphError::Internal(format!(
+                "identity allocation failed after reservation: {error}"
+            ))
+        })?;
+        for identity in self.iter() {
+            identities.push(identity.map(|value| value.try_to_owned()).transpose()?);
+        }
+        RelationshipIdentityDictionary::try_from_identities(identities)
+    }
 }
 
 /// Ingestion publication lock.
@@ -216,7 +252,7 @@ impl ProjectionIngester {
         self.ingest_committed_rows_locked(
             rows,
             limits,
-            base_relationship_identities,
+            IdentitySource::Slice(base_relationship_identities),
             None,
             None,
             validate_candidate,
@@ -248,7 +284,7 @@ impl ProjectionIngester {
         self.ingest_committed_rows_locked(
             rows,
             limits,
-            base_relationship_identities,
+            IdentitySource::Slice(base_relationship_identities),
             None,
             Some(governor),
             validate_candidate,
@@ -256,6 +292,7 @@ impl ProjectionIngester {
     }
 
     /// Publish rows while deterministically extending the cumulative edge-type dictionary.
+    #[cfg(test)]
     pub(crate) fn ingest_committed_rows_with_dictionaries_governed<F, T>(
         &self,
         rows: &[ProjectionSyncRow],
@@ -272,8 +309,32 @@ impl ProjectionIngester {
         self.ingest_committed_rows_locked(
             rows,
             limits,
-            base_relationship_identities,
+            IdentitySource::Slice(base_relationship_identities),
             Some(base_edge_type_labels),
+            Some(governor),
+            validate_candidate,
+        )
+    }
+
+    /// Ingest from a clean planning engine whose current identities were validated.
+    pub(crate) fn ingest_committed_rows_with_store_governed<F, T>(
+        &self,
+        rows: &[ProjectionSyncRow],
+        limits: MutationBufferLimits,
+        identities: &crate::relationship_identity_store::RelationshipIdentityStore,
+        labels: Option<&[String]>,
+        governor: &ResourceGovernor,
+        validate_candidate: F,
+    ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
+    where
+        F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
+    {
+        let _guard = self.lock.try_enter()?;
+        self.ingest_committed_rows_locked(
+            rows,
+            limits,
+            IdentitySource::ValidatedStore(identities),
+            labels,
             Some(governor),
             validate_candidate,
         )
@@ -283,7 +344,7 @@ impl ProjectionIngester {
         &self,
         rows: &[ProjectionSyncRow],
         limits: MutationBufferLimits,
-        base_relationship_identities: &[Option<RelationshipIdentity>],
+        base_relationship_identities: IdentitySource<'_>,
         base_edge_type_labels: Option<&[String]>,
         governor: Option<&ResourceGovernor>,
         validate_candidate: F,
@@ -328,7 +389,6 @@ impl ProjectionIngester {
                     manifest: None,
                     rows_ingested: 0,
                     segments_published: 0,
-                    relationship_identities: None,
                 },
                 None,
             ));
@@ -611,7 +671,6 @@ impl ProjectionIngester {
                 rows_ingested: committed_rows.len(),
                 segments_published: new_segment_refs.len(),
                 manifest: Some(manifest),
-                relationship_identities: Some(identity_dictionary.identities().to_vec()),
             },
             Some(validated),
         ))
@@ -664,8 +723,14 @@ impl ProjectionIngester {
     fn load_identity_dictionary(
         &self,
         previous: Option<&ProjectionManifest>,
-        base_relationship_identities: &[Option<RelationshipIdentity>],
+        base_relationship_identities: IdentitySource<'_>,
     ) -> GraphResult<RelationshipIdentityDictionary> {
+        if matches!(
+            base_relationship_identities,
+            IdentitySource::ValidatedStore(_)
+        ) {
+            return base_relationship_identities.to_dictionary();
+        }
         if let Some(reference) =
             previous.and_then(|manifest| manifest.relationship_identities.as_ref())
         {
@@ -676,7 +741,7 @@ impl ProjectionIngester {
                 reference.entry_count,
             );
         }
-        RelationshipIdentityDictionary::try_from_identities(base_relationship_identities.to_vec())
+        base_relationship_identities.to_dictionary()
     }
 
     fn write_identity_dictionary(
@@ -1116,7 +1181,7 @@ const INGEST_IDENTITY_PEAK_COPIES: usize = 8;
 fn ingestion_memory_upper_bound(
     root: &Path,
     rows: &[ProjectionSyncRow],
-    base_relationship_identities: &[Option<RelationshipIdentity>],
+    base_relationship_identities: IdentitySource<'_>,
     base_edge_type_labels: &[String],
 ) -> GraphResult<ByteCount> {
     let row_dynamic = rows.iter().try_fold(0usize, |total, row| {
@@ -1160,10 +1225,10 @@ fn ingestion_memory_upper_bound(
         .ok_or_else(ingest_resource_size_overflow)?;
     let identity_strings = base_relationship_identities
         .iter()
-        .filter_map(Option::as_ref)
+        .flatten()
         .chain(
             rows.iter()
-                .filter_map(|row| row.relationship_identity.as_ref()),
+                .filter_map(|row| row.relationship_identity.as_ref().map(Into::into)),
         )
         .try_fold(0usize, |total, identity| {
             total
@@ -1831,6 +1896,55 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_identity_store_matches_slice_publication() {
+        let slice_dir = seeded_artifacts("identity-source-slice");
+        let store_dir = seeded_artifacts("identity-source-store");
+        let existing = RelationshipIdentity {
+            mapping_id: 7,
+            source_key: "existing".into(),
+        };
+        let appended = RelationshipIdentity {
+            mapping_id: 7,
+            source_key: "appended".into(),
+        };
+        let identities = vec![None, Some(existing.clone())];
+        let store = crate::relationship_identity_store::RelationshipIdentityStore::Owned(
+            identities.clone(),
+        );
+        let mut first = edge_row(1, 0, 1, None, MutationOperation::InsertEdge);
+        first.relationship_identity = Some(existing);
+        let mut second = edge_row(2, 0, 1, None, MutationOperation::InsertEdge);
+        second.relationship_identity = Some(appended);
+        let rows = [first, second];
+        let limits = MutationBufferLimits::new(10, 1_000_000);
+        let sliced = ingester(&slice_dir)
+            .ingest_committed_rows_with_identities(&rows, limits, &identities)
+            .unwrap();
+        let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_mib(64).unwrap()),
+        ));
+        let (borrowed, _) = ingester(&store_dir)
+            .ingest_committed_rows_with_store_governed(
+                &rows,
+                limits,
+                &store,
+                None,
+                &governor,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let read = |directory: &ProjectionArtifactDir, result: ProjectionIngestResult| {
+            let reference = result.manifest.unwrap().relationship_identities.unwrap();
+            read_identity_artifact(&directory.path().join(reference.path), &reference.checksum)
+                .unwrap()
+        };
+        assert_eq!(
+            read(&slice_dir, sliced).identities(),
+            read(&store_dir, borrowed).identities()
+        );
+    }
+
+    #[test]
     fn projection_ingest_budget_counts_persisted_text_bytes() {
         let mut row = edge_row(1, 0, 0, None, MutationOperation::UpsertNode);
         row.direction = TraversalDirection::Any;
@@ -2348,10 +2462,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(1), Some(2)]
         );
-        assert_eq!(
-            result.relationship_identities,
-            Some(dictionary.identities().to_vec())
-        );
+        assert_eq!(dictionary.identities().len(), 3);
     }
 
     #[test]

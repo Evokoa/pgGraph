@@ -7,8 +7,8 @@ use crate::catalog::{
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
     current_base_artifact_path, graph_artifact_metadata_for_path, graph_file_path, load_graph_file,
-    load_graph_file_with_projection_candidate_and_residency, load_graph_file_with_residency,
-    persisted_graph_exists, projection_manifest_root, read_sync_checkpoint,
+    load_graph_file_reusing_base, persisted_graph_exists, projection_manifest_root,
+    read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
 use crate::projection::manifest::{
@@ -1167,8 +1167,13 @@ fn ingest_projection_until_internal(
     let normalization_bytes = sync_normalization_memory_upper_bound(&entries, &context)?
         .checked_add(context_and_manifest)
         .ok_or_else(sync_normalization_size_overflow)?;
-    let duplicate_engine_peak = resident_bytes
-        .checked_add(resident_bytes)
+    let reusable_base = ENGINE.with(|engine| engine.borrow().base_snapshot.clone());
+    let shared_base_bytes = reusable_base.as_ref().map_or(0, |base| base.bytes() as u64);
+    let private_resident = crate::resource::ByteCount::from_bytes(
+        resident_bytes.as_u64().saturating_sub(shared_base_bytes),
+    );
+    let duplicate_engine_peak = private_resident
+        .checked_add(private_resident)
         .ok_or_else(sync_normalization_size_overflow)?;
     let governed_peak = normalization_bytes
         .checked_add(duplicate_engine_peak)
@@ -1181,11 +1186,12 @@ fn ingest_projection_until_internal(
         .ok_or_else(|| {
             safety::GraphError::Internal("sync planning residency overflowed".to_string())
         })?;
-    let mut planning_engine = load_graph_file_with_residency(&graph_path, planning_residency)?;
-    // The current projection identity artifact writer still consumes a dense
-    // owned dictionary. Materialize only this planning engine; the serving
-    // engine keeps its mapped base.
-    planning_engine.relationship_identities.materialize()?;
+    let planning_engine = load_graph_file_reusing_base(
+        &graph_path,
+        None,
+        planning_residency,
+        reusable_base.as_ref(),
+    )?;
     let planning_engine_bytes =
         crate::resource::ByteCount::from_usize(planning_engine.estimated_memory_used_bytes())
             .ok_or_else(|| {
@@ -1193,8 +1199,17 @@ fn ingest_projection_until_internal(
                     "sync planning engine residency does not fit u64".to_string(),
                 )
             })?;
-    let validated_engine_peak = planning_engine_bytes
-        .checked_add(planning_engine_bytes)
+    let shares_base = reusable_base
+        .as_ref()
+        .zip(planning_engine.base_snapshot.as_ref())
+        .is_some_and(|(serving, planning)| std::sync::Arc::ptr_eq(serving, planning));
+    let unique_planning_bytes = crate::resource::ByteCount::from_bytes(
+        planning_engine_bytes
+            .as_u64()
+            .saturating_sub(if shares_base { shared_base_bytes } else { 0 }),
+    );
+    let validated_engine_peak = unique_planning_bytes
+        .checked_add(unique_planning_bytes)
         .and_then(|engines| normalization_bytes.checked_add(engines))
         .ok_or_else(sync_normalization_size_overflow)?;
     memory
@@ -1214,20 +1229,12 @@ fn ingest_projection_until_internal(
             ),
         });
     }
-    let relationship_identities = planning_engine
-        .relationship_identities
-        .as_owned_slice()
-        .ok_or_else(|| {
-            safety::GraphError::Internal(
-                "materialized relationship identity store was not owned".to_string(),
-            )
-        })?;
     let (base_artifact_path, base_checksum, base_version) =
         sync_ingest_base_artifact_metadata(&current_base_path)?;
     let next_reserved_generation = crate::projection::recovery::next_rebuild_generation_id(&root)?;
     let ingester = ProjectionIngester::new(root, base_artifact_path, base_checksum, base_version);
     let candidate_residency = planning_residency
-        .checked_add(planning_engine_bytes)
+        .checked_add(unique_planning_bytes)
         .ok_or_else(|| {
             safety::GraphError::Internal("sync candidate residency overflowed".to_string())
         })?;
@@ -1268,40 +1275,24 @@ fn ingest_projection_until_internal(
             crate::catalog::enforce_artifact_storage_quota(dictionary_peak)
         }))?;
     }
-    let (result, validated_engine) = if has_unseen_edge_type {
+    let (result, validated_engine) =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            ingester.ingest_committed_rows_with_dictionaries_governed(
+            ingester.ingest_committed_rows_with_store_governed(
                 &rows,
                 MutationBufferLimits::new(row_limit, byte_limit),
-                relationship_identities,
-                planning_engine.edge_type_registry.as_slice(),
+                &planning_engine.relationship_identities,
+                has_unseen_edge_type.then(|| planning_engine.edge_type_registry.as_slice()),
                 &governor,
                 |candidate| {
-                    load_graph_file_with_projection_candidate_and_residency(
+                    load_graph_file_reusing_base(
                         &current_base_path,
-                        candidate,
+                        Some(candidate),
                         candidate_residency,
+                        planning_engine.base_snapshot.as_ref(),
                     )
                 },
             )
-        }))?
-    } else {
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            ingester.ingest_committed_rows_with_identities_governed(
-                &rows,
-                MutationBufferLimits::new(row_limit, byte_limit),
-                relationship_identities,
-                &governor,
-                |candidate| {
-                    load_graph_file_with_projection_candidate_and_residency(
-                        &current_base_path,
-                        candidate,
-                        candidate_residency,
-                    )
-                },
-            )
-        }))?
-    };
+        }))?;
     let stats = projection_ingest_stats(result, previous_watermark, &entries);
     if stats.sync_watermark > previous_watermark {
         let mut validated_engine = validated_engine.ok_or_else(|| {

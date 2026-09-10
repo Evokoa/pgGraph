@@ -166,6 +166,21 @@ another clone for resolution lookup and memory accounting. Safe store access
 therefore cannot outlive its mapping, and source-inode writes or truncation
 cannot change the snapshot.
 
+During ingestion, the serving engine, clean planning engine, and candidate
+validator can share this validated immutable base allocation. On Unix, reuse
+requires the same artifact path, device, inode, length, modification time, and
+change time. A changed source or an unavailable identity stamp takes the full
+copy-and-validation path. Manifest checksums, catalog provenance, cumulative
+dictionary prefixes, and generation layers are still checked for each load.
+Mutable serving overlays are never reused as planning state.
+
+The ingestion memory budget counts the shared base once and reserves separate
+space for private metadata and candidate layers. Identity publication borrows
+the validated planning store instead of first materializing another complete
+identity vector. These changes reduce temporary copies within one backend;
+separate PostgreSQL backends still hold separate anonymous base snapshots, and
+metadata reconstruction and validation can still scan graph-sized data.
+
 ```text
 Engine
   _mmap shares ownership for resolution and accounting

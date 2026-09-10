@@ -1,4 +1,44 @@
 #[pg_test]
+fn durable_ingestion_reuses_validated_base_for_new_labels() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id');
+        SELECT graph.add_edge('graph_test_friendships_pgtest'::regclass,
+            'user_id', 'graph_test_users_pgtest'::regclass, 'friend_id',
+            'fallback', false, label_column := 'id');
+        SET graph.persist_on_build = on;
+        SET graph.mutable_enabled = on;
+        SET graph.sync_mode = 'trigger';
+        SELECT * FROM graph.build(mode := 'mutable_overlay');")
+        .expect("build reusable base fixture");
+    let before = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
+    Spi::run("INSERT INTO graph_test_friendships_pgtest(id,user_id,friend_id)
+        VALUES ('reuse-new-label','u1','u2');
+        SELECT * FROM graph.ingest_projection();")
+        .expect("ingest new relationship label");
+    let after = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&before, &after));
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.edge_types()
+        WHERE label = 'reuse-new-label'").unwrap(), Some(1));
+    Spi::run("INSERT INTO graph_test_friendships_pgtest(id,user_id,friend_id)
+        VALUES ('reuse-second-label','u1','u2');
+        SELECT * FROM graph.ingest_projection();")
+        .expect("ingest into an existing cumulative dictionary");
+    let second = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&before, &second));
+    let query = "SELECT string_agg(row #>> '{r,id}', ',' ORDER BY row #>> '{r,id}')
+        FROM (VALUES ('reuse-new-label'), ('reuse-second-label')) AS labels(label),
+        LATERAL graph.gql(format(
+          'MATCH (u:graph_test_users_pgtest)-[r]->(v:graph_test_users_pgtest)
+           WHERE r.id = %L RETURN u, r, v', labels.label), hydrate := true)";
+    assert_eq!(Spi::get_one::<String>(query).unwrap().as_deref(),
+        Some("reuse-new-label,reuse-second-label"));
+    Spi::run("SELECT graph.unload_graph('default'); SET graph.auto_load = on;")
+        .expect("reload cumulative identities");
+    assert_eq!(Spi::get_one::<String>(query).unwrap().as_deref(),
+        Some("reuse-new-label,reuse-second-label"));
+}
+
+#[pg_test]
 fn sync_capture_cancellation_releases_session_fence() {
     let canceled = pgrx::pg_sys::PgTryBuilder::new(|| {
         crate::sync_capture::capture(|| {

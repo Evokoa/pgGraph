@@ -22,6 +22,9 @@ pub(crate) struct RelationshipIdentityRef<'a> {
 }
 
 impl RelationshipIdentityRef<'_> {
+    pub(crate) fn try_to_owned(self) -> GraphResult<RelationshipIdentity> {
+        try_clone_identity(self)
+    }
     /// Clone this view into the existing owned identity representation.
     pub(crate) fn to_owned(self) -> RelationshipIdentity {
         RelationshipIdentity {
@@ -232,14 +235,6 @@ impl RelationshipIdentityStore {
         }
     }
 
-    /// Borrow the dense owned slots after an explicit materialization.
-    pub(crate) fn as_owned_slice(&self) -> Option<&[Option<RelationshipIdentity>]> {
-        match self {
-            Self::Owned(identities) => Some(identities),
-            Self::Mapped(_) | Self::Layered { .. } => None,
-        }
-    }
-
     /// Borrow one nonzero relationship identity.
     pub(crate) fn get(&self, id: RelationshipId) -> Option<RelationshipIdentityRef<'_>> {
         let index = id as usize;
@@ -342,6 +337,7 @@ impl RelationshipIdentityStore {
     ///
     /// Returns [`GraphError::Oom`] if the destination or a source-key clone
     /// cannot be allocated.
+    #[cfg(test)]
     pub(crate) fn materialize(&mut self) -> GraphResult<()> {
         if matches!(self, Self::Owned(_)) {
             return Ok(());
