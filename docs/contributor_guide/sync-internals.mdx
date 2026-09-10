@@ -29,7 +29,7 @@ every backend-local engine.
 
 ## Durable Tables
 
-Sync sequence IDs order allocation, not commits. Replay acquires a nonblocking
+Sync sequence IDs order allocation, not commits. Replay acquires a non-blocking
 exclusive session advisory lock against source writers, then pins a PostgreSQL
 snapshot and copies its bounded log batch. Byte preflight and payload cursors
 use that same snapshot. The fence is released before normalization, engine

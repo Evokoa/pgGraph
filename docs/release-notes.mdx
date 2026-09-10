@@ -42,8 +42,8 @@ publication. PostgreSQL 14 through 18 remain the supported target matrix.
   instead of internal-bug diagnostics.
 - Artifacts are isolated by database and validated against registered catalog
   identities. Default graphs cannot adopt another database's files.
-- Graph generations publish through PostgreSQL transactions. Rollback,
-  savepoints, reset, and drop preserve the generation visible to older
+- Graph generations publish through PostgreSQL transactions. Transaction and
+  savepoint rollback, reset, and drop preserve the generation visible to older
   snapshots. Sync capture respects commit ordering and releases its writer
   fence before the surrounding query transaction ends.
 - Build and reload reject ambiguous or mismatched endpoint identities,

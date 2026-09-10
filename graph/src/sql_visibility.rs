@@ -164,6 +164,7 @@ impl Drop for BfsVisibilityResolutionDropProbe {
 /// Convert PostgreSQL's non-local ERROR transfer into an ordinary Rust unwind
 /// before returning to a caller that owns traversal state. This preserves the
 /// original PostgreSQL error while ensuring the caller's Rust frames run Drop.
+#[cfg(not(test))]
 pub(crate) fn postgres_error_as_rust_unwind<T>(
     operation: impl FnOnce() -> T + std::panic::UnwindSafe,
 ) -> T {
@@ -176,6 +177,16 @@ pub(crate) fn postgres_error_as_rust_unwind<T>(
         Ok(value) => value,
         Err(error) => std::panic::resume_unwind(error),
     }
+}
+
+/// Standalone unit tests have no PostgreSQL backend or non-local ERROR transfer.
+/// Backend builds, including SQL tests with the `pg_test` feature, use the
+/// PostgreSQL error boundary above.
+#[cfg(test)]
+pub(crate) fn postgres_error_as_rust_unwind<T>(
+    operation: impl FnOnce() -> T + std::panic::UnwindSafe,
+) -> T {
+    operation()
 }
 
 #[derive(Default)]
@@ -2333,6 +2344,28 @@ fn test_arm_missing_bfs_candidate_relationship_identity() -> bool {
 mod lazy_probe_tests {
     use super::*;
     use crate::builder::PrimaryKeySpec;
+
+    #[test]
+    fn postgres_error_boundary_without_backend_preserves_values_and_rust_unwind() {
+        let value = postgres_error_as_rust_unwind(|| String::from("owned result"));
+        assert_eq!(value, "owned result");
+
+        struct DropProbe<'a>(&'a Cell<bool>);
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let dropped = Cell::new(false);
+        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _owner = DropProbe(&dropped);
+            postgres_error_as_rust_unwind(|| panic!("ordinary Rust panic"));
+        }))
+        .expect_err("the wrapper must preserve Rust unwinding");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"ordinary Rust panic"));
+        assert!(dropped.get(), "the caller's owned state must be dropped");
+    }
 
     fn plan(columns: Vec<(&str, &str)>) -> NodeProbePlan {
         NodeProbePlan {

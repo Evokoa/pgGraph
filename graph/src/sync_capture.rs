@@ -14,14 +14,22 @@ use crate::safety::{GraphError, GraphResult};
 
 /// The callback must copy every result into Rust-owned values before returning.
 pub(crate) fn capture<R>(operation: impl FnOnce() -> GraphResult<R>) -> GraphResult<R> {
+    // PostgreSQL stores both identifiers in byte-sized LOCKTAG fields. Validate
+    // the generated binding constants before acquiring any backend resources.
+    let locktag_type = u8::try_from(pg_sys::LockTagType::LOCKTAG_ADVISORY).map_err(|_| {
+        GraphError::Internal("PostgreSQL advisory lock tag does not fit in a byte".into())
+    })?;
+    let locktag_lockmethodid = u8::try_from(pg_sys::USER_LOCKMETHOD).map_err(|_| {
+        GraphError::Internal("PostgreSQL user lock method does not fit in a byte".into())
+    })?;
     let tag = pg_sys::LOCKTAG {
         // SAFETY: the current database OID is initialized before any SQL entrypoint.
         locktag_field1: unsafe { pg_sys::MyDatabaseId.to_u32() },
         locktag_field2: crate::sync::SYNC_WRITER_LOCK_CLASS as u32,
         locktag_field3: crate::sync::SYNC_WRITER_LOCK_KEY as u32,
         locktag_field4: 2,
-        locktag_type: pg_sys::LockTagType::LOCKTAG_ADVISORY as u8,
-        locktag_lockmethodid: pg_sys::USER_LOCKMETHOD as u8,
+        locktag_type,
+        locktag_lockmethodid,
     };
     let held = Cell::new(false);
     let pushed = Cell::new(false);
