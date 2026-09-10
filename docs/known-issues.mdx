@@ -40,9 +40,9 @@ spend work proportional to the visible source set and may reach
 
 The eager route is a correctness-preserving fallback, not an authorization
 bypass. Use bounded targeted queries where possible, keep PostgreSQL source-key
-indexes current, and set an explicit `statement_timeout`. Completion of the
-retained 1M/10M comparison and the remaining targeted-path evidence is tracked
-in the [selective-RLS roadmap section](/roadmap#post-1-2-focus-complete-selective-rls-scale-evidence).
+indexes current, and set an explicit `statement_timeout`. Treat this as a
+current performance limitation unless later release notes publish broader
+scale evidence.
 
 ### Tenant scope requires the session-setting path under enforcement
 
@@ -90,8 +90,7 @@ changes become durable projection segments after sync without a full graph
 rebuild. Applications with the default pending-sync query freshness may let the
 next topology read catch up instead of calling `graph.apply_sync()` explicitly.
 
-A bounded, set-based graph mutation API is the proposed
-[post-1.1 roadmap direction](/roadmap#proposed-post-1-1-focus-bounded-batched-mutations).
+A bounded, set-based graph mutation API is not currently available.
 
 ### GQL and openCypher support are bounded profiles
 
@@ -101,8 +100,8 @@ profile and does not claim full openCypher support. Unsupported constructs fail
 with a stable SQLSTATE and actionable guidance rather than being interpreted
 with approximate semantics.
 
-SQL/PGQ `GRAPH_TABLE` is not part of the PostgreSQL 14–18 contract. PostgreSQL
-19 integration remains on the [Roadmap](./roadmap).
+SQL/PGQ `GRAPH_TABLE` and PostgreSQL 19 integration are not part of the current
+PostgreSQL 14–18 contract.
 
 ## Resource Scope
 

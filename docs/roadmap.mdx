@@ -1,246 +1,37 @@
 # Roadmap
 
 <Callout type="info">
-This roadmap describes future direction, not dated release commitments. Future
-features will continue to use PostgreSQL tables as the source of truth.
+This page gives a concise view of direction. It is not an implementation plan,
+release checklist, or API commitment.
 </Callout>
 
 ## Current Baseline
 
-pgGraph supports PostgreSQL 14 through 18 with a stable documented SQL API and
-a defined subset of GQL reads and writes. The current engine provides:
+pgGraph supports PostgreSQL 14 through 18 and keeps registered PostgreSQL rows
+authoritative. The current code provides bounded graph registration,
+projections, traversal, paths, selected analytics, supported GQL and Cypher
+profiles, mutable synchronization, persisted rebuildable artifacts, resource
+governance, and caller-scoped security behavior.
 
-- manual and discovered table/relationship registration, named graphs, grants,
-  quotas, and tenant scoping;
-- bounded search, traversal, paths, workflows, filters, aggregation, and
-  connected-component analytics;
-- supported GQL writes that update mapped PostgreSQL tables first, preserving
-  constraints, triggers, ACLs, RLS, MVCC, and row identity;
-- trigger-log synchronization and scheduled maintenance with compaction,
-  repair, and cleanup;
-- atomic, validated persisted indexes with crash recovery and retention of the
-  last valid index;
-- enforced byte, row, work, disk, file, and elapsed-time policies with stable
-  resource diagnostics;
-- published SQL and GQL feature profiles, packaged playground examples, and
-  verified support for PostgreSQL 14 through 18.
+Exact current surfaces are documented in the
+[SQL Profile](/user_guide/sql-profile),
+[GQL Profile](/user_guide/gql-profile),
+[Known Issues](/known-issues), and
+[Release Notes](/release-notes).
 
-The exact supported surfaces are documented in the
-[SQL 1.0 profile](/user_guide/sql-profile),
-[GQL 1.0 profile](/user_guide/gql-profile), and
-[Versioning And Compatibility](/user_guide/versioning-and-compatibility).
+## Direction
 
-## 1.1 Security And Reliability Baseline
+Future releases may improve these broad areas:
 
-The 1.1 release adds caller-scoped source-table RLS across every
-topology-producing surface, cancellation-safe generation replacement,
-authorized operational telemetry, deduplicated query-start catalog work, a
-portable and deterministic playground, and relationship-typed shortest-path
-overloads. Those are shipped baseline behavior, not future roadmap items.
+- selective-visibility scale evidence and adaptive execution. Adaptive execution
+  must reuse known verdicts when completing an eager scope and may never restart
+  policy work from zero;
+- bounded path, traversal, query-language, and analytics coverage;
+- set-based ingestion ergonomics over authoritative PostgreSQL tables;
+- synchronization, persistence, recovery, and resource governance;
+- reusable topology primitives for optional external consumers;
+- PostgreSQL-version, packaging, conformance, and performance coverage.
 
-The 1.0 SQL and GQL profiles remain the named compatibility profiles because
-1.1 extends rather than replaces them. Future work must preserve the 1.1 RLS,
-publication, caller-identity, and PostgreSQL source-of-truth guarantees.
-
-## Post-1.2 Focus: Complete Selective-RLS Scale Evidence
-
-pgGraph 1.2 includes the bounded visibility coordinator, lazy direct-identity
-resolution, lazy bounded BFS/DFS and path execution, deterministic
-targeted-lazy/global-eager strategy selection, and fixed relationship-identity
-completeness summaries. Whole-graph analytics and other global work continue
-to use the eager visibility oracle by design.
-
-The remaining work is release-evidence closure rather than a change to the RLS
-security contract:
-
-| Delivery slice | Status | Remaining exit gate |
-|---|---|---|
-| P4.7 targeted traversal/path closure | In progress | Retain final differential evidence and public links for DFS, reverse traversal, bidirectional and weighted paths, overlays, and eligible GQL/Cypher expansions. |
-| P5.3 strategy and scale closure | In progress | Retain complete `p5-selective-rls-1m` and `p5-selective-rls-10m` runs, publish the relationship-identity completeness summary and deterministic targeted-lazy/global-eager selection evidence, and measure remaining GQL read-result rechecks. |
-
-Any future adaptive selector must reuse known verdicts when completing an eager
-scope and may never restart policy work from zero. Until the retained 1M/10M
-matrix is complete, the user-visible performance limitation remains documented
-in [Known Issues](./known-issues#some-rls-workloads-still-use-eager-visibility-preparation).
-
-## 1.0 Production Baseline
-
-The 1.0 release established these ongoing release requirements:
-
-| Area | Release outcome |
-|---|---|
-| Documentation | Public quickstart, migration, operations, API, compatibility, and limitations guidance, checked for drift. |
-| Packaging | Verified source and PGXN packages for PostgreSQL 14–18, with matching checksums, SBOMs, provenance, and license checks. |
-| Release gates | Repeatable release checks with retained logs. |
-| Operations | Verified procedures for installation, alpha-to-1.0 migration, rebuild, rollback, backup and restore, crash recovery, cancellation, resource limits, and cleanup. |
-| Release evidence | Reviewed evidence tied to the exact release commit before tagging or publication. |
-
-Future 1.x work does not weaken these outcomes. New query syntax, analytics
-breadth, and architecture expansion remain post-1.0 directions.
-
-## Proposed Post-1.1 Focus: Bounded Batched Mutations
-
-This proposed post-1.1 delivery track is a set-based batch-write surface for
-ingestion adapters. The 1.0 projection can already apply committed source
-changes incrementally; this work removes the need for adapters to call
-`graph.gql()` once per node or relationship.
-
-The contract-review target is `gql_batch(query, param_sets, hydrate)` in the
-`graph` schema.
-One static mapped write is parsed and bound once, while a JSONB array of
-parameter objects becomes a typed input relation that preserves input order.
-PostgreSQL then performs set-based DML per mapping group and operation phase. A
-Rust loop that still issues one SPI statement per input row does not satisfy
-the delivery track.
-
-The former internal P10-P14 work queue is now tracked here:
-
-| Slice | Status | Scope |
-|---|---|---|
-| P10 batch contract core | Planned | Validate and type bounded ordered input once, reject duplicate identities deterministically, and prove that execution does not issue one DML statement per input row. |
-| P11 node batches | Planned | Implement set-based node `CREATE`/`MERGE` with PostgreSQL authority, preserved input order, atomicity, savepoint behavior, partitions, and idempotent replay. |
-| P12 relationship batches | Planned | Implement set-based relationship `CREATE`/`MERGE`, exact endpoint and relationship identity, open labels, parallel edges, and same-transaction node-to-edge ingestion. |
-| P13 remaining mutation verbs | Planned | Reuse the bounded input relation for `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE`, with sync, reload, compaction, cancellation, and concurrency coverage. |
-| P14 release closure | Planned | Complete public contracts, install/update paths, supported-feature documentation, benchmarks, fuzz/property coverage, and the PostgreSQL 14-18 package matrix on one reviewed commit. |
-
-| Delivery gate | Required outcome |
-|---|---|
-| Ingestion operations | Batched mapped node and relationship `CREATE`/`MERGE` ship first; relationship `MERGE` uses registered source identity, while `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE` reuse the same batch relation and resource contract. |
-| PostgreSQL authority | Constraints, triggers, ACLs, RLS, MVCC, partition routing, tenant scope, and registered source identity match the single-row write behavior. |
-| Atomicity and concurrency | A batch is all-or-nothing, savepoint-safe, bounded before DML, duplicate identities are deterministic, affected rows lock in stable order, and replayed `MERGE` batches are idempotent. |
-| Projection freshness | Transaction-local results and committed trigger sync become visible without a per-batch full rebuild; durable mutable-overlay segments, reload, and compaction are covered. |
-| Resource governance | Batch input rows and bytes, transaction deltas, returned rows, memory, work, cancellation, and elapsed time are bounded with stable diagnostics. |
-| Performance evidence | Source DML statement count scales with mapping groups and operation phases rather than rows, with a published comparison against repeated `graph.gql()` calls. |
-| Release evidence | Parser/binder, SQL integration, ACL/RLS, transaction, concurrency, sync/reload, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
-
-The detailed design, delivery slices, and acceptance criteria are in
-[Batched Graph Mutations](/contributor_guide/batched-graph-mutations).
-This work does not make pgGraph an embedding/vector index; vector maintenance
-remains outside the pgGraph graph-projection boundary. For vector and embedding
-indexing, search, and hybrid retrieval inside PostgreSQL, see
-[pgContext](https://github.com/evokoa/pgcontext).
-
-## Post-1.1 Track: Open-Vocabulary Relationship Types
-
-This post-1.1 delivery track addresses ingestion systems whose
-relationship types come from data rather than a closed application dictionary.
-For example, an LLM may emit `works_at`, `founded`, `acquired_by`, or
-`co_authored_with` as free-form structured output. These values must remain
-filterable during traversal instead of becoming opaque relationship properties.
-
-### Current Physical Boundary
-
-The runtime uses a checked logical `EdgeTypeId(u32)`. New immutable CSR bases
-use the v7 adaptive one-, two-, or four-byte encoding, while v6 bases remain
-read compatible. Mutable segments now use the same adaptive widths and retain
-v5/v6 read compatibility. Committed durable sync can publish a widened
-cumulative dictionary and matching segments as one validated generation.
-`label_column` interns every distinct nonempty source value into this registry.
-A build that exceeds the public count, label, or dictionary-byte policy fails
-with SQLSTATE `54000` and diagnostic `PG004`. Committed incremental sync accepts
-valid unseen labels. Transaction-local mapped relationship writes use
-provisional labels that preserve exact spelling and obey savepoint rollback.
-
-All type-aware topology paths use the same registry. This includes
-`graph.traverse(edge_types := ...)`, GQL relationship-type matching, path
-reconstruction, projection deltas, and persisted CSR data. General
-relationship-property expressions remain outside the supported GQL profile,
-but eligible fixed one-hop equality on a registered relationship label column,
-such as `WHERE r.relationship_name = $type`, lowers to the same exact compact
-type filter. A static fallback label without `label_column` remains type-blind
-to the source column's exact value.
-
-### Delivery Outcome
-
-The delivered contract is a resource-governed open vocabulary, not a literally unbounded
-allocation. Source relationship strings remain authoritative in PostgreSQL,
-while pgGraph assigns checked compact IDs for exact topology filtering.
-
-The 1.2 contract is:
-
-- keep one checked logical `EdgeTypeId` across traversal, paths, overlays,
-  sync, compaction, and query execution, with raw IDs confined to named storage
-  adapters;
-- use the width-adaptive `u8`/`u16`/`u32` representation selected in P6:
-  one-byte sections through 254 user labels, two-byte sections through 65,534,
-  then four-byte sections, while logical IDs remain `u32`;
-- intern each distinct source string once and compare `EdgeTypeId` values in the
-  traversal hot loop;
-- preserve exact filtering through `graph.traverse(edge_types := ...)` and GQL
-  relationship-type patterns for every projected label;
-- bind eligible fixed one-hop predicates on a registered relationship label
-  column, such as `WHERE r.relationship_name = $type`, to the same exact type
-  filter instead of hydrating and comparing every relationship row after
-  expansion; fallback-value, wildcard, and ambiguous mapping shapes remain
-  fail-closed;
-- let incremental sync add a new valid relationship label without requiring a
-  full rebuild for each new vocabulary value;
-- keep PostgreSQL constraints, triggers, ACLs, RLS, MVCC, source-row identity,
-  and source label values authoritative.
-
-No physical representation is truly unlimited. The public contract states
-explicit count, byte, label-length, build, sync, and query budgets. Exceeding a
-configured resource budget will return a typed diagnostic instead of wrapping
-an ID, exhausting a backend, or silently grouping unrelated types.
-
-| Delivery gate | Required outcome |
-|---|---|
-| Capacity contract | One production `EdgeTypeId` wrapper owns checked conversion, reserved values, and the documented maximum. Unit and boundary tests cover the selected widths and overflow behavior. |
-| Exact query semantics | SQL traversal and supported GQL patterns return the same reachability for exact dynamic types. A relationship-label property predicate lowers to the exact type filter when its mapping is eligible. |
-| Build and sync | Bounded dictionary construction handles high-cardinality labels, and committed inserts or label changes converge through sync without losing source spelling or relationship identity. |
-| Artifact migration | A versioned artifact stores the selected label width and dictionary. Upgrade documentation requires a safe rebuild where in-place compatibility is not possible, and rollback retains the last valid generation. |
-| Resource governance | Label count, dictionary bytes, individual label length, build spill, sync growth, query work, and output remain under explicit policies with stable diagnostics. |
-| Performance evidence | Benchmarks compare the 1.0 `u8` CSR, candidate widened representations, and indexed PostgreSQL recursion across label cardinality, selectivity, degree, and depth. Results report latency, throughput, RSS/PSS, and artifact size. |
-| Regression gate | Exact-type CSR traversal must remain within an approved regression threshold for representative hot workloads before a wider representation becomes the default. |
-| Release evidence | Parser/binder, traversal, artifact, sync/reload, compaction, transaction, ACL/RLS, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
-
-### Supported 1.2 Guidance
-
-Applications should choose the current path by required semantics:
-
-| Need | Recommended path |
-|---|---|
-| Exact relationship types are known at rebuild time | Register the authoritative source type column as `label_column`; v7 selects one, two, or four bytes and exact `edge_types`/GQL filters remain available. |
-| A durable mutable projection needs more than 254 labels | Use `mutable_overlay` with trigger-backed committed sync. The cumulative dictionary and adaptive segments publish atomically, and mapped transaction-local writes can introduce provisional labels safely. |
-| Incremental ingestion introduces unseen labels | Apply committed sync under the graph writer lock. Valid labels are interned without a full rebuild; count, per-label, dictionary, memory, and artifact limits remain enforced. |
-| Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
-| Exact free-form type is required at every hop | Register the source relationship type as `label_column`, then use `edge_types` in traversal/path APIs or explicit relationship types in GQL/Cypher. Filtering resolves text once and compares compact IDs during expansion. |
-| The vocabulary exceeds a documented resource limit | Partition the graph by a meaningful tenant/domain boundary, or use bounded recursive SQL with `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse index. Do not hash unrelated types into a traversal label when exact reachability matters. |
-| Exact fixed or explicitly bounded GQL patterns justify a topology change | Represent each relationship row as a node with `relationship_name` as a node property and connect it to source and target nodes with static relationship types. This doubles graph hops and is not equivalent to general variable-depth relationship-type traversal. |
-
-Hash or coarse buckets followed by result filtering are not exact for multi-hop
-queries. Traversal may reach a node through a different same-bucket type, and a
-later filter cannot undo that reachability. Buckets are appropriate only when
-the bucket itself has useful graph meaning or the caller accepts candidate-set
-semantics.
-
-## Post-1.2 Direction
-
-The 1.2 line includes adaptive rebuilt bases and mutable segments, atomic
-cumulative-dictionary publication for committed unseen labels,
-transaction-local/savepoint label state, bounded inventory and filters, and
-the supported exact GQL/Cypher query forms.
-
-| Area | Direction |
-|---|---|
-| Batched writes | Add bounded, set-based mapped mutations for ingestion adapters without weakening PostgreSQL source-of-truth, security, transaction, or resource contracts. |
-| Relationship query coverage | Extend relationship-property syntax only in bounded vertical slices that preserve exact compact-type semantics and PostgreSQL source authority. |
-| ISO GQL | Add applicable ISO/IEC 39075:2024 features in vertical slices, each with parser, binder, executor, conformance, ACL/RLS, transaction, resource, and documentation evidence. |
-| Costed streaming runtime | Develop canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, and spillable blocking work. |
-| PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |
-| Compatibility frontends | Keep openCypher bounded unless a separately measured and maintained compatibility surface is justified. |
-| Selective residency and caching | Investigate plan caching, selective projection residency, and workload-aware artifact placement within explicit PostgreSQL resource budgets. |
-| Synchronization | Evaluate optional WAL-driven synchronization only if it preserves PostgreSQL as the source of truth and provides safe recovery, privileges, ordering, and bounded retention. |
-| Analytics | Move broader whole-graph algorithms into quota-controlled execution with cancellation, progress, and reproducible scorecards. |
-| Semantic guidance | Explore pgVector-assisted candidate ranking without placing embedding work in the traversal hot path or making embeddings authoritative. |
-| Refactoring | Revisit module or core-crate extraction only when dependency and ownership evidence shows a concrete reliability or maintainability benefit. |
-| Distributed execution | Remain research-driven until a PostgreSQL-consistent ownership, transaction, recovery, and operations model is demonstrated. |
-
-## Decision Rules
-
-- Current user-visible limitations belong in [Known Issues](./known-issues).
-- Shipped behavior and migrations belong in [Release Notes](./release-notes).
-- Public SQL, GQL, configuration, diagnostics, artifacts, and scripts follow the
-  documented 1.x compatibility and deprecation policy.
-- Features graduate from this roadmap only with production implementation,
-  tests, public documentation, and release-gate ownership.
+These directions do not promise a particular API, order, version, or date. A
+capability is shipped only when implementation, tests, public profiles,
+limitations, and release notes agree.

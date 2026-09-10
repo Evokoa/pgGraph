@@ -56,11 +56,12 @@ also has a combined compatibility test.
 
 # Local Planning And Task Files
 
-Do not commit local plans, handoffs, progress notes, TODO files, or scratch task
-lists to this public repository. Keep them outside a standalone clone or in the
-external planning workspace configured by the contributor. Public roadmaps,
-architecture documents, API contracts, and release policies under `docs/`
-remain tracked product documentation.
+Do not commit plans, detailed future scope, implementation sequences, acceptance
+gates, benchmark workbooks, handoffs, progress notes, TODO files, or scratch
+task lists to this public repository. Keep them outside a standalone clone or in
+the external planning workspace configured by the contributor. Documentation
+under `docs/` must describe behavior present in the current code, except for one
+concise high-level roadmap.
 
 # pgGraph Source-Of-Truth Principle
 
