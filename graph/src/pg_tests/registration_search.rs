@@ -192,6 +192,29 @@ fn memory_profile_counts_persisted_snapshot_per_backend() {
     .unwrap_or(0);
     assert_eq!(loaded_count, 1);
 
+    let (base_bytes, shared_bytes, heap_bytes) = crate::ENGINE.with(|e| {
+        let engine = e.borrow();
+        let base = engine
+            .base_snapshot
+            .as_ref()
+            .expect("persisted load must retain validated base ownership");
+        assert_eq!(
+            engine._mmap.as_ref().expect("mapped base missing").len(),
+            base.bytes()
+        );
+        (
+            base.bytes(),
+            base.shared_bytes(),
+            engine.estimated_heap_bytes(),
+        )
+    });
+    assert!(base_bytes > 0);
+    // The loaded capability reports its actual sealed/private backing. Linux
+    // may legitimately fall back to private bytes when sharing is unavailable.
+    assert!(shared_bytes == 0 || shared_bytes == base_bytes);
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(shared_bytes, 0);
+
     let (private_mb, shared_mb, instance_private_mb, instance_shared_mb, instance_total_mb) =
         Spi::connect(|client| {
             let rows = client
@@ -218,9 +241,17 @@ fn memory_profile_counts_persisted_snapshot_per_backend() {
         .expect("memory_profile row read failed");
 
     assert!(private_mb > 0.0);
-    assert_eq!(shared_mb, 0.0);
+    const MIB: f64 = 1_048_576.0;
+    assert_eq!(shared_mb, shared_bytes as f64 / MIB);
+    let expected_private_bytes = if shared_bytes == 0 {
+        heap_bytes + base_bytes
+    } else {
+        heap_bytes
+    };
+    assert_eq!(private_mb, expected_private_bytes as f64 / MIB);
+    assert_eq!(private_mb + shared_mb, (heap_bytes + base_bytes) as f64 / MIB);
     assert_eq!(shared_mb, instance_shared_mb);
-    assert!(instance_private_mb >= private_mb * 4.0);
+    assert_eq!(instance_private_mb, private_mb * 4.0);
     assert!((instance_total_mb - (instance_private_mb + instance_shared_mb)).abs() < 0.000001);
 
     let clamped_backends = Spi::get_one::<i32>(
