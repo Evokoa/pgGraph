@@ -10,6 +10,12 @@
 
 use std::ffi::c_void;
 
+// PG17 declares MyDatabaseId as Oid (u32) and XactIsoLevel as C int.
+#[no_mangle]
+pub static mut MyDatabaseId: u32 = 0;
+#[no_mangle]
+pub static mut XactIsoLevel: std::ffi::c_int = 0;
+
 macro_rules! pg_stub_fn {
     ($($name:ident),+ $(,)?) => {
         $(
@@ -71,6 +77,8 @@ pg_stub_fn!(
     BackgroundWorkerInitializeConnectionByOid,
     BackgroundWorkerUnblockSignals,
     BlessTupleDesc,
+    CommandCounterIncrement,
+    CommitTransactionCommand,
     CopyErrorData,
     CreateTupleDescCopyConstr,
     DecrTupleDescRefCount,
@@ -78,6 +86,7 @@ pg_stub_fn!(
     DefineCustomIntVariable,
     DefineCustomRealVariable,
     DefineCustomStringVariable,
+    ExceptionalCondition,
     FlushErrorState,
     FreeErrorData,
     GUC_check_errcode,
@@ -89,16 +98,22 @@ pg_stub_fn!(
     GetCurrentTimestamp,
     GetCurrentTransactionId,
     GetCurrentTransactionIdIfAny,
+    GetCurrentTransactionNestLevel,
     GetCurrentTransactionStartTimestamp,
     GetDatabaseEncoding,
     GetMemoryChunkContext,
+    GetOldestNonRemovableTransactionId,
+    GetOuterUserId,
     GetSQLCurrentTimestamp,
     GetSQLLocalTimestamp,
+    GetTransactionSnapshot,
     GetUserId,
     HeapTupleHeaderGetDatum,
     IsBinaryCoercible,
     LWLockRelease,
     LookupFuncName,
+    LockAcquire,
+    LockRelease,
     MemoryContextAlloc,
     MemoryContextAllocExtended,
     MemoryContextAllocZero,
@@ -109,6 +124,8 @@ pg_stub_fn!(
     MemoryContextStrdup,
     OpernameGetOprid,
     ProcessInterrupts,
+    PopActiveSnapshot,
+    PushActiveSnapshot,
     RegisterBackgroundWorker,
     RegisterDynamicBackgroundWorker,
     RegisterSubXactCallback,
@@ -142,8 +159,11 @@ pg_stub_fn!(
     SearchSysCache,
     SearchSysCache1,
     SetLatch,
+    SetCurrentStatementStartTimestamp,
+    StartTransactionCommand,
     SysCacheGetAttr,
     TerminateBackgroundWorker,
+    TransactionIdPrecedesOrEquals,
     UnregisterSubXactCallback,
     WaitForBackgroundWorkerShutdown,
     WaitForBackgroundWorkerStartup,
@@ -312,3 +332,27 @@ pg_stub_fn!(
     timetz_zone,
     to_regclass,
 );
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn backend_function_stub_aborts_instead_of_returning() {
+        const CHILD: &str = "PGGRAPH_FUZZ_STUB_ABORT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::GetTransactionSnapshot();
+            panic!("PostgreSQL stub returned instead of aborting");
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::backend_function_stub_aborts_instead_of_returning",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("start abort probe");
+        // SIGABRT is 6 on the supported Linux and macOS fuzz hosts.
+        assert_eq!(status.signal(), Some(6));
+    }
+}
