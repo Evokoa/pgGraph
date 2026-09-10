@@ -53,7 +53,7 @@
     {
       "id": "sync_maintenance_jobs",
       "function_patterns": [
-        "^(add_sync_policy|alter_sync_policy|drop_sync_policy|enable_sync|apply_sync|sync_health|sync_policy_status|run_sync_policy|maintenance|maintenance_graph|maintenance_status|maintenance_status_for_graph|run_scheduled_maintenance|ingest_projection|jobs|job_runs|job_stats|alter_job|remove_job|run_job|run_due_jobs|run_due_jobs_async)$"
+        "^(add_sync_policy|alter_sync_policy|drop_sync_policy|enable_sync|apply_sync|sync_health|sync_retention|sync_policy_status|run_sync_policy|maintenance|maintenance_graph|maintenance_status|maintenance_status_for_graph|run_scheduled_maintenance|ingest_projection|jobs|job_runs|job_stats|alter_job|remove_job|run_job|run_due_jobs|run_due_jobs_async)$"
       ],
       "tests": {
         "positive": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "trigger_sync_adds_edge_overlay_after_explicit_apply_sync"}],

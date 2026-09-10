@@ -2270,6 +2270,15 @@ CREATE TABLE IF NOT EXISTS graph._sync_log (
 CREATE INDEX IF NOT EXISTS idx_sync_log_id ON graph._sync_log (id);
 CREATE INDEX IF NOT EXISTS idx_sync_log_created ON graph._sync_log (created_at);
 
+-- PostgreSQL MVCC determines which immutable generation a reader may serve.
+CREATE TABLE IF NOT EXISTS graph._projection_heads (
+    graph_id UUID NOT NULL REFERENCES graph._graphs(graph_id) ON DELETE CASCADE,
+    artifact_root TEXT NOT NULL,
+    generation_id BIGINT NOT NULL CHECK (generation_id > 0),
+    manifest_checksum TEXT NOT NULL,
+    PRIMARY KEY (graph_id, artifact_root)
+);
+
 CREATE TABLE IF NOT EXISTS graph._projection_generations (
     graph_id          UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
     generation_id     BIGINT NOT NULL CHECK (generation_id > 0),
@@ -2418,6 +2427,7 @@ REVOKE ALL ON TABLE graph._job_runs               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_policies          FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._projection_generations FROM PUBLIC;
+REVOKE ALL ON TABLE graph._projection_heads       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_watermarks        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
 REVOKE ALL ON SEQUENCE graph._sync_log_id_seq     FROM PUBLIC;
@@ -4068,4 +4078,40 @@ SECURITY DEFINER
 SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'vacuum_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2120
+-- graph::sql_facade::admin::sync_retention
+CREATE  FUNCTION graph."sync_retention"() RETURNS TABLE (
+	"eligible_prune_floor" bigint,  /* Option < i64 > */
+	"prune_blocker" TEXT,  /* Option < String > */
+	"retained_graph_rows" bigint,  /* i64 */
+	"database_sync_log_bytes" bigint,  /* i64 */
+	"active_sync_watermark_backends" INT  /* i32 */
+)
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'sync_retention_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:276
+-- graph::sql_facade::admin::_published_generation_for_current_role
+CREATE  FUNCTION graph."_published_generation_for_current_role"() RETURNS jsonb /* Option < pgrx :: JsonB > */
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'published_generation_for_current_role_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:293
+-- graph::sql_facade::admin::_publish_generation_for_current_role
+CREATE  FUNCTION graph."_publish_generation_for_current_role"() RETURNS bool /* bool */
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'publish_generation_for_current_role_wrapper';
 /* </end connected objects> */

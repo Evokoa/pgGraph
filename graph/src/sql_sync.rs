@@ -4226,10 +4226,8 @@ pub(crate) fn expire_stale_sync_watermarks_direct() -> safety::GraphResult<()> {
 /// selected graph.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SyncWatermarkDiagnostics {
-    /// Safe floor to prune `graph._sync_log` below, or `None` when no
-    /// evidence (durable projection watermark or an active backend
-    /// heartbeat) makes any floor safe yet.
-    pub(crate) retention_floor: Option<i64>,
+    /// Advisory eligibility, rechecked under the writer fence before deletion.
+    pub(crate) eligibility: SyncPruneEligibility,
     /// `true` when a floor exists and the log has grown far enough past it
     /// that pruning would meaningfully shrink `graph._sync_log`.
     pub(crate) prune_recommended: bool,
@@ -4237,6 +4235,141 @@ pub(crate) struct SyncWatermarkDiagnostics {
     /// this graph, so operators can see whether a lagging backend is
     /// blocking pruning.
     pub(crate) active_backends: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncPruneBlocker {
+    NoPositiveWatermark,
+    NoRegisteredSources,
+    SharedSource,
+    AlternateArtifactRoot,
+    #[cfg_attr(
+        test,
+        allow(
+            dead_code,
+            reason = "native PostgreSQL horizon is checked in backend builds"
+        )
+    )]
+    GenerationVisibility,
+}
+
+impl SyncPruneBlocker {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NoPositiveWatermark => "no_positive_watermark",
+            Self::NoRegisteredSources => "no_registered_sources",
+            Self::SharedSource => "shared_source",
+            Self::AlternateArtifactRoot => "alternate_artifact_root",
+            Self::GenerationVisibility => "generation_visibility",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncPruneEligibility {
+    Eligible(i64),
+    Blocked(SyncPruneBlocker),
+}
+
+impl SyncPruneEligibility {
+    pub(crate) fn floor(self) -> Option<i64> {
+        match self {
+            Self::Eligible(floor) => Some(floor),
+            Self::Blocked(_) => None,
+        }
+    }
+
+    pub(crate) fn blocker(self) -> Option<SyncPruneBlocker> {
+        match self {
+            Self::Eligible(_) => None,
+            Self::Blocked(blocker) => Some(blocker),
+        }
+    }
+}
+
+/// Reporting is advisory and takes no writer fence. Deletion calls this again
+/// under the publisher transaction lock, which also protects graph registration.
+fn sync_prune_eligibility(
+    floor: Option<i64>,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<SyncPruneEligibility> {
+    use SyncPruneBlocker as Blocker;
+    use SyncPruneEligibility::{Blocked, Eligible};
+
+    if applicable_table_oids.is_empty() {
+        return Ok(Blocked(Blocker::NoRegisteredSources));
+    }
+    let graph_id = crate::catalog::selected_or_default_graph_id_via_definer()?;
+    let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
+    // Rows belong to sources. A floor for one consumer cannot authorize
+    // deletion when another graph or artifact root may still need those rows.
+    let consumers = Spi::connect(|client| {
+        let result = client.select(
+            "SELECT EXISTS (
+                 SELECT 1 FROM (
+                     SELECT graph_id, table_oid FROM graph._registered_tables
+                     UNION ALL
+                     SELECT graph_id, from_table_oid FROM graph._registered_edges
+                 ) consumers
+                 WHERE consumers.graph_id <> $1::uuid
+                   AND consumers.table_oid::integer = ANY($2::int4[])
+             ), EXISTS (
+                 SELECT 1 FROM graph._projection_heads
+                 WHERE graph_id = $1::uuid AND artifact_root <> $3
+             )",
+            None,
+            &[
+                graph_id.into(),
+                applicable_table_oids.to_vec().into(),
+                root.to_string_lossy().as_ref().into(),
+            ],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<bool>(1)?.unwrap_or(true),
+            row.get::<bool>(2)?.unwrap_or(true),
+        ))
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("sync consumer lookup failed: {error}"))
+    })?;
+    if consumers.0 {
+        return Ok(Blocked(Blocker::SharedSource));
+    }
+    if consumers.1 {
+        return Ok(Blocked(Blocker::AlternateArtifactRoot));
+    }
+    #[cfg(not(test))]
+    if crate::projection::publication::historical_generations_required(&root)? {
+        // Includes absent or uncommitted publication, fixed snapshots and the
+        // native horizon for active snapshots, prepared xacts and replication.
+        return Ok(Blocked(Blocker::GenerationVisibility));
+    }
+    Ok(match floor.filter(|floor| *floor > 0) {
+        Some(floor) => Eligible(floor),
+        None => Blocked(Blocker::NoPositiveWatermark),
+    })
+}
+
+/// Exact selected-source volume is opt-in administrative work, never part of
+/// ordinary graph queries or the lightweight sync-health recommendation path.
+pub(crate) fn sync_retained_volume() -> safety::GraphResult<(i64, i64)> {
+    let table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    Spi::connect(|client| {
+        let result = client.select(
+            "SELECT (SELECT count(*) FROM graph._sync_log
+                      WHERE table_oid::oid::integer = ANY($1::int4[])),
+                    pg_catalog.pg_total_relation_size('graph._sync_log'::regclass)",
+            None,
+            &[table_oids.into()],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+        ))
+    })
+    .map_err(|error| safety::GraphError::Internal(format!("sync retention volume failed: {error}")))
 }
 
 /// Pure bootstrap-safety-rule decision: the safe prune floor is the minimum
@@ -4295,11 +4428,13 @@ pub(crate) fn sync_watermark_diagnostics(
         safety::GraphError::Internal(format!("sync watermark diagnostics query failed: {err}"))
     })?;
 
-    let retention_floor = compute_sync_log_retention_floor(durable_watermark, heartbeat_floor);
-    let prune_recommended = is_sync_log_prune_recommended(retention_floor, max_sync_log_id);
+    let floor = compute_sync_log_retention_floor(durable_watermark, heartbeat_floor);
+    let eligibility =
+        sync_prune_eligibility(floor, &SyncReplayContext::load()?.applicable_table_oids())?;
+    let prune_recommended = is_sync_log_prune_recommended(eligibility.floor(), max_sync_log_id);
 
     Ok(SyncWatermarkDiagnostics {
-        retention_floor,
+        eligibility,
         prune_recommended,
         active_backends,
     })
@@ -4324,44 +4459,12 @@ pub(crate) fn prune_sync_log(floor: Option<i64>) -> safety::GraphResult<i64> {
         return Ok(0);
     }
     #[cfg(not(test))]
-    {
-        crate::sql_build::acquire_build_lock()?;
-        if crate::projection::publication::historical_generations_required(
-            &projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?),
-        )? {
-            return Ok(0);
-        }
-    }
+    crate::sql_build::acquire_build_lock()?;
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
-    if applicable_table_oids.is_empty() {
-        return Ok(0);
-    }
-    let graph_id = crate::catalog::selected_or_default_graph_id_via_definer()?;
-    let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
-    // Sync rows are source-scoped, not graph-scoped. Until a per-source floor
-    // covers every consumer, retain them when another graph or root may lag.
-    let shared_consumer = Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (
-             SELECT 1 FROM (
-                 SELECT graph_id, table_oid FROM graph._registered_tables
-                 UNION ALL
-                 SELECT graph_id, from_table_oid FROM graph._registered_edges
-             ) consumers
-             WHERE consumers.graph_id <> $1::uuid
-               AND consumers.table_oid::integer = ANY($2::int4[])
-         ) OR EXISTS (
-             SELECT 1 FROM graph._projection_heads
-             WHERE graph_id = $1::uuid AND artifact_root <> $3
-         )",
-        &[
-            graph_id.into(),
-            applicable_table_oids.clone().into(),
-            root.to_string_lossy().as_ref().into(),
-        ],
-    )
-    .map_err(|error| safety::GraphError::Internal(format!("sync consumer lookup failed: {error}")))?
-    .unwrap_or(true);
-    if shared_consumer {
+    if sync_prune_eligibility(Some(floor), &applicable_table_oids)?
+        .floor()
+        .is_none()
+    {
         return Ok(0);
     }
     // `floor` is an already-applied id (everyone counted in its computation
@@ -4436,11 +4539,13 @@ pub(crate) fn ensure_sync_replay_not_pruned(applied_sync_id: i64) -> safety::Gra
 
 /// Resolves the durable projection watermark (when one exists), computes the
 /// safe sync-log retention floor, and prunes `graph._sync_log` below it.
-/// Returns the number of rows removed. Intended for `graph.maintenance()`
-/// and `graph.run_scheduled_maintenance()`, which already fold accumulated
-/// sync/overlay state into a clean base; this is not called from
+/// Returns the number of rows removed. Used by maintenance rebuilds and
+/// `graph.projection_gc()` after committed publication permits reclamation;
+/// this is not called from
 /// `graph.apply_sync()`, which is the interactive, non-destructive path.
 pub(crate) fn prune_sync_log_if_safe() -> safety::GraphResult<i64> {
+    #[cfg(not(test))]
+    crate::sql_build::acquire_build_lock()?;
     expire_stale_sync_watermarks()?;
     let artifact = crate::persistence::graph_file_path_uncreated()?;
     let root = crate::persistence::projection_manifest_root(&artifact);
@@ -4452,7 +4557,7 @@ pub(crate) fn prune_sync_log_if_safe() -> safety::GraphResult<i64> {
     )?;
     let diagnostics =
         sync_watermark_diagnostics(projection.manifest_watermark, max_sync_log_id()?)?;
-    prune_sync_log(diagnostics.retention_floor)
+    prune_sync_log(diagnostics.eligibility.floor())
 }
 
 pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> {

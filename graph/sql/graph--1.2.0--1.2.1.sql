@@ -24,3 +24,16 @@ AS 'MODULE_PATHNAME', 'publish_generation_for_current_role_wrapper';
 
 GRANT EXECUTE ON FUNCTION graph._published_generation_for_current_role() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION graph._publish_generation_for_current_role() TO PUBLIC;
+
+CREATE FUNCTION graph.sync_retention()
+RETURNS TABLE (
+    eligible_prune_floor bigint,
+    prune_blocker text,
+    retained_graph_rows bigint,
+    database_sync_log_bytes bigint,
+    active_sync_watermark_backends integer
+)
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'sync_retention_wrapper';

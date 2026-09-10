@@ -36,7 +36,7 @@ SELECT graph.add_table(
 SELECT graph.enable_sync();
 SQL
 
-violations="$(psql "$DBNAME" -qAt <<'SQL'
+violations="$(psql "$DBNAME" -X -v ON_ERROR_STOP=1 -qAt <<'SQL'
 WITH exported AS (
     SELECT p.oid,
            p.proname,
@@ -63,6 +63,8 @@ allowed_security_definer AS (
         ('_max_sync_log_id_for_current_role', ''),
         ('_max_sync_log_id_for_query_state', ''),
         ('_pending_sync_rows_for_current_role', ''),
+        ('_publish_generation_for_current_role', ''),
+        ('_published_generation_for_current_role', ''),
         ('_record_sync_watermark_for_current_role', ''),
         ('_record_projection_heartbeat_for_current_role', ''),
         ('_require_selected_graph_privilege_for_current_role', 'privilege text'),
@@ -103,6 +105,7 @@ allowed_security_definer AS (
         ('set_current_graph', 'graph_name text, tenant text, namespace text'),
         ('set_graph_residency', 'graph_name text, residency text, tenant text, namespace text'),
         ('sync_policy_status', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
+        ('sync_retention', ''),
         ('unload_graph', 'graph_name text, tenant text, namespace text'),
         ('vacuum', ''),
         ('vacuum_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
@@ -170,7 +173,8 @@ violations AS (
     FROM exported
     WHERE proname IN (
         'add_table', 'add_edge', 'reset', 'build', 'vacuum', 'maintenance',
-        'apply_sync', 'enable_sync', 'disable_sync', 'enable', 'disable', 'gql'
+        'apply_sync', 'enable_sync', 'disable_sync', 'enable', 'disable', 'gql',
+        '_publish_generation_for_current_role'
     )
       AND provolatile <> 'v'
 )

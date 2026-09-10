@@ -199,17 +199,18 @@ FROM graph.sync_health();
 | `durable_compaction_recommended` | Durable segment fanout exceeds the configured compaction threshold |
 | `durable_gc_recommended` | Manifest-declared obsolete projection files can be evaluated by GC |
 | `durable_repair_recommended` | Active projection artifacts need targeted repair or full rebuild |
-| `sync_log_retention_floor` | Computed safe floor to prune `graph._sync_log` below, or `NULL` when no active backend heartbeat or durable projection watermark makes a floor safe yet |
+| `sync_log_retention_floor` | Eligible inclusive floor for pruning `graph._sync_log`, or `NULL` when watermarks, source consumers, or generation visibility prevent pruning |
 | `sync_log_prune_recommended` | `true` when a floor exists and `graph._sync_log` has grown far enough past it that pruning would meaningfully shrink it |
 | `active_sync_watermark_backends` | Count of currently active (unexpired) sync-watermark heartbeats for this graph; a lagging or crashed-without-cleanup backend holding an unexpired heartbeat is the usual reason pruning is blocked |
 
 ## Sync-Log Retention
 
 `graph._sync_log` durable rows accumulate as trigger-captured changes are
-written. `graph.maintenance()` and `graph.run_scheduled_maintenance()` prune
-applied rows below a safe floor as part of the existing rebuild; nothing
-prunes the log outside of maintenance, and `graph.apply_sync()` never deletes
-rows.
+written. Maintenance and `graph.projection_gc()` attempt to prune applied rows
+through an inclusive safe floor. A newly published generation is protected
+until publication commits and PostgreSQL's visibility horizon permits
+reclamation, so a maintenance rebuild can retain rows for a later GC call.
+`graph.apply_sync()` never deletes rows.
 
 Backend-local `applied_sync_id` (the replay progress `csr_readonly` mode
 tracks) is otherwise invisible to other backends, so pruning cannot safely
@@ -230,6 +231,34 @@ queried since, or every backend that ever touched it has gone idle past its
 heartbeat TTL — no floor is considered safe and pruning is skipped for that
 pass. The log grows a little longer on an idle graph rather than the
 alternative of guessing a floor is safe.
+
+Pruning also stops when registered sources have another graph consumer, when
+the selected graph has another published artifact root, or when generation
+visibility requires retaining history. These safeguards apply to both the
+health recommendation and deletion, which rechecks them under the writer lock.
+Health is advisory; a later transaction can change eligibility.
+
+Administrators can inspect the reason and retained volume explicitly:
+
+```sql
+SELECT * FROM graph.sync_retention();
+```
+
+`prune_blocker` is `NULL` when an inclusive `eligible_prune_floor` is available.
+Otherwise it reports `no_registered_sources`, `shared_source`,
+`alternate_artifact_root`, `generation_visibility`, or `no_positive_watermark`
+(the first applicable reason in that order). `generation_visibility` includes
+missing or uncommitted publication, fixed transaction snapshots, and the native
+PostgreSQL horizon protecting active snapshots, prepared transactions, and
+replication. Shared consumers are retained conservatively; this release does
+not compute a common reclamation floor across graphs or artifact roots.
+
+`retained_graph_rows` counts sync-log rows for the selected graph's registered
+sources, including rows shared with other graphs. `database_sync_log_bytes` is
+the entire database's sync-log relation size, including indexes and TOAST; it
+is not a graph-specific byte count. This explicit diagnostic scans matching
+log rows and can be expensive on a large retained log. `sync_health()` does not
+perform this volume count.
 
 <Callout type="info">
 A backend that goes long-lived and idle without calling `graph.status()`,

@@ -247,6 +247,80 @@ fn setup_sync_log_retention_fixture() {
 }
 
 #[pg_test]
+fn sync_retention_reports_generation_protection_and_scoped_volume() {
+    setup_sync_log_retention_fixture();
+    Spi::run("INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('retained', 'Retained')")
+        .expect("create retained sync row failed");
+    // A row for an unrelated source must not inflate the selected graph count.
+    Spi::run("INSERT INTO graph._sync_log (op, table_oid, table_name, pk) VALUES ('I', 'graph_test_friendships_pgtest'::regclass, 'graph_test_friendships_pgtest', 'unrelated')")
+        .expect("create unrelated diagnostic row failed");
+    let row = Spi::get_one::<pgrx::JsonB>("SELECT to_jsonb(r) FROM graph.sync_retention() r")
+        .expect("retention diagnostics failed")
+        .expect("retention row missing");
+    assert!(row.0["eligible_prune_floor"].is_null());
+    assert_eq!(row.0["prune_blocker"], "generation_visibility");
+    assert_eq!(row.0["retained_graph_rows"], 1);
+    assert!(row.0["database_sync_log_bytes"].as_i64().unwrap_or_default() > 0);
+    assert_eq!(
+        Spi::get_one::<bool>("SELECT sync_log_retention_floor IS NULL AND NOT sync_log_prune_recommended FROM graph.sync_health()")
+            .expect("sync health failed"),
+        Some(true)
+    );
+}
+
+#[pg_test]
+fn sync_retention_reports_shared_sources_before_generation_protection() {
+    setup_sync_log_retention_fixture();
+    Spi::run("SELECT graph.create_graph('retention_consumer'); SELECT graph.add_table_to_graph('retention_consumer', 'graph_test_users_pgtest'::regclass, 'id')")
+        .expect("register shared source failed");
+    assert_eq!(
+        Spi::get_one::<String>("SELECT prune_blocker FROM graph.sync_retention()")
+            .expect("retention diagnostics failed")
+            .as_deref(),
+        Some("shared_source")
+    );
+    let diagnostics = crate::sql_sync::sync_watermark_diagnostics(Some(100), 100_000)
+        .expect("watermark diagnostics failed");
+    assert!(diagnostics.eligibility.floor().is_none());
+    assert!(!diagnostics.prune_recommended);
+}
+
+#[pg_test]
+fn sync_retention_reports_alternate_roots_before_generation_protection() {
+    setup_sync_log_retention_fixture();
+    Spi::run("INSERT INTO graph._projection_heads (graph_id, artifact_root, generation_id, manifest_checksum) SELECT graph_id, '/retention-diagnostic-alternate-root', 1, 'unused' FROM graph._graphs WHERE graph_name = 'default'")
+        .expect("register alternate root failed");
+    assert_eq!(
+        Spi::get_one::<String>("SELECT prune_blocker FROM graph.sync_retention()")
+            .expect("retention diagnostics failed")
+            .as_deref(),
+        Some("alternate_artifact_root")
+    );
+    let diagnostics = crate::sql_sync::sync_watermark_diagnostics(Some(100), 100_000)
+        .expect("watermark diagnostics failed");
+    assert!(diagnostics.eligibility.floor().is_none());
+    assert!(!diagnostics.prune_recommended);
+}
+
+#[pg_test]
+fn sync_retention_rejects_non_admin_before_reading_volume() {
+    reset_and_create_fixtures();
+    Spi::run("CREATE ROLE graph_retention_diagnostic_reader; GRANT USAGE ON SCHEMA graph TO graph_retention_diagnostic_reader")
+        .expect("create restricted role failed");
+    create_error_sqlstate_helper();
+    Spi::run("SET ROLE graph_retention_diagnostic_reader").expect("set role failed");
+    let state = sqlstate_for_prepared_helper("SELECT * FROM graph.sync_retention()");
+    Spi::run("RESET ROLE").expect("reset role failed");
+    assert_eq!(state.as_deref(), Some("42501"));
+    Spi::run("GRANT CREATE ON SCHEMA graph TO graph_retention_diagnostic_reader; SET ROLE graph_retention_diagnostic_reader")
+        .expect("grant graph administration failed");
+    let allowed = Spi::get_one::<bool>("SELECT retained_graph_rows = 0 AND prune_blocker = 'no_registered_sources' FROM graph.sync_retention()")
+        .expect("authorized graph administrator diagnostics failed");
+    Spi::run("RESET ROLE").expect("reset administrator role failed");
+    assert_eq!(allowed, Some(true));
+}
+
+#[pg_test]
 fn sync_health_reports_retention_diagnostics_columns() {
     setup_sync_log_retention_fixture();
 

@@ -2110,9 +2110,57 @@ fn sync_health() -> TableIterator<
             projection.compaction_recommended,
             projection.gc_recommended,
             projection.repair_recommended,
-            watermarks.retention_floor,
+            watermarks.eligibility.floor(),
             watermarks.prune_recommended,
             watermarks.active_backends,
+        )])
+    })
+}
+
+#[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, pg_temp)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn sync_retention() -> TableIterator<
+    'static,
+    (
+        name!(eligible_prune_floor, Option<i64>),
+        name!(prune_blocker, Option<String>),
+        name!(retained_graph_rows, i64),
+        name!(database_sync_log_bytes, i64),
+        name!(active_sync_watermark_backends, i32),
+    ),
+> {
+    with_panic_boundary("sync_retention()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let artifact =
+            crate::persistence::graph_file_path_uncreated().unwrap_or_else(|err| err.report());
+        let root = crate::persistence::projection_manifest_root(&artifact);
+        let max_id = max_sync_log_id().unwrap_or_else(|err| err.report());
+        let projection = crate::projection::status::collect_projection_metadata_status(
+            &root,
+            max_id,
+            crate::projection::manifest::active_generation_count()
+                .unwrap_or_else(|err| err.report()),
+            config::compaction_threshold(),
+        )
+        .unwrap_or_else(|err| err.report());
+        let diagnostics =
+            crate::sql_sync::sync_watermark_diagnostics(projection.manifest_watermark, max_id)
+                .unwrap_or_else(|err| err.report());
+        let (rows, bytes) =
+            crate::sql_sync::sync_retained_volume().unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            diagnostics.eligibility.floor(),
+            diagnostics
+                .eligibility
+                .blocker()
+                .map(|blocker| blocker.as_str().to_owned()),
+            rows,
+            bytes,
+            diagnostics.active_backends,
         )])
     })
 }

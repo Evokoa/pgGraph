@@ -37,6 +37,19 @@ DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM graph._projection_heads) THEN
     RAISE EXCEPTION 'upgrade must not adopt filesystem artifacts';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc
+    WHERE oid = 'graph.sync_retention()'::regprocedure
+      AND pg_catalog.pg_get_function_result(oid) =
+          'TABLE(eligible_prune_floor bigint, prune_blocker text, retained_graph_rows bigint, database_sync_log_bytes bigint, active_sync_watermark_backends integer)'
+      AND prosecdef
+      AND proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+  ) THEN
+    RAISE EXCEPTION 'upgraded sync_retention has an incorrect result shape or security boundary';
+  END IF;
+  IF (SELECT count(*) FROM graph.sync_retention()) <> 1 THEN
+    RAISE EXCEPTION 'upgraded sync_retention did not return one diagnostic row';
+  END IF;
 END $$;
 SELECT * FROM graph.build();
 DO $$ BEGIN

@@ -478,5 +478,17 @@
     "date": "2026-09-10",
     "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
     "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Add administrator sync_retention diagnostic without changing sync_health ABI",
+    "changed_sections": [
+      "public_sql_functions",
+      "sql_profile",
+      "sql_schema",
+      "sql_signatures"
+    ],
+    "date": "2026-09-10",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
   }
 ]

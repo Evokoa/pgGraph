@@ -88,6 +88,14 @@ END $$;
         session.execute(UNBUILT)
 
 
+def assert_retention_blocked(session, reason):
+    assert session.execute("SELECT prune_blocker FROM graph.sync_retention();") == reason
+    assert session.execute("""
+SELECT sync_log_retention_floor IS NULL AND NOT sync_log_prune_recommended
+FROM graph.sync_health();
+""") == "t"
+
+
 def old_snapshot_first_load():
     database = create_database("snapshot")
     with Session(database) as writer, Session(database) as reader:
@@ -98,6 +106,8 @@ def old_snapshot_first_load():
         writer.execute("SELECT * FROM graph.build();")
         writer.execute("SET graph.projection_retention_generations = 1;")
         writer.execute("SELECT * FROM graph.projection_gc();")
+        assert_retention_blocked(writer, "generation_visibility")
+        assert_retention_blocked(reader, "generation_visibility")
         assert reader.execute(QUERY) == "a,b"
         reader.execute("COMMIT;")
         assert reader.execute(QUERY) == "a"
@@ -116,6 +126,8 @@ def imported_snapshot_first_load():
         writer.execute("DELETE FROM e; SELECT * FROM graph.build();")
         writer.execute("SET graph.projection_retention_generations = 1;")
         assert writer.execute("SELECT deleted_files FROM graph.projection_gc();") == "0"
+        assert_retention_blocked(writer, "generation_visibility")
+        assert_retention_blocked(reader, "generation_visibility")
         assert reader.execute(QUERY) == "a,b"
         reader.execute("COMMIT;")
         assert reader.execute(QUERY) == "a"
@@ -157,6 +169,10 @@ def reclamation_after_commit():
         assert writer.execute("SELECT deleted_files FROM graph.projection_gc();") == "0"
         assert writer.execute("SELECT count(*) > 0 FROM graph._sync_log;") == "t"
         old.execute("COMMIT;")
+        assert writer.execute("""
+SELECT eligible_prune_floor > 0 AND prune_blocker IS NULL AND retained_graph_rows > 0
+FROM graph.sync_retention();
+""") == "t"
         assert int(writer.execute("SELECT deleted_files FROM graph.projection_gc();")) > 0
         assert writer.execute("SELECT count(*) FROM graph._sync_log;") == "0"
         assert writer.execute(QUERY) == "a,b,c"
@@ -227,6 +243,7 @@ SELECT * FROM graph.build();
 SELECT * FROM graph.projection_gc();
 """)
         reader.execute("SELECT graph.set_current_graph('other');")
+        assert_retention_blocked(writer, "shared_source")
         assert reader.execute(QUERY) == "a,b", "GC removed another graph's unapplied sync row"
 
 
@@ -239,6 +256,7 @@ def shared_root_retention():
         writer.execute("RESET graph.data_dir; INSERT INTO e(src, dst) VALUES ('a', 'b');")
         writer.execute("SELECT * FROM graph.build(); SELECT * FROM graph.projection_gc();")
         reader.execute("SET graph.data_dir = '" + alternate + "';")
+        assert_retention_blocked(writer, "alternate_artifact_root")
         assert reader.execute(QUERY) == "a,b", "GC removed another root's unapplied sync row"
 
 

@@ -767,6 +767,28 @@ whether a graph is cold, missing an artifact, blocked by quota, or already
 loaded. Only graphs for which the caller has read access are returned. Artifact
 and count fields describe physical state and are not RLS-filtered.
 
+### `graph.sync_retention()`
+
+```sql
+graph.sync_retention()
+RETURNS TABLE (
+  eligible_prune_floor bigint,
+  prune_blocker text,
+  retained_graph_rows bigint,
+  database_sync_log_bytes bigint,
+  active_sync_watermark_backends int
+)
+```
+
+Admin-only retention diagnostic for the selected graph. An available floor is
+inclusive and `prune_blocker` is `NULL`; otherwise the floor is `NULL` and the
+blocker identifies why pruning is suppressed. The result is advisory and does
+not acquire the writer lock or perform pruning. See
+[sync-log retention](./sync-and-maintenance#sync-log-retention) for blocker values.
+The exact row count covers the selected graph's registered sources and can scan
+a large log. Bytes cover the database-wide sync-log relation, indexes, and TOAST,
+including other graphs' rows. Heartbeats are counted without being refreshed.
+
 ### `graph.sync_health()`
 
 ```sql

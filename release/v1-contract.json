@@ -641,6 +641,7 @@
     "status",
     "sync_health",
     "sync_policy_status",
+    "sync_retention",
     "transfer_graph_ownership",
     "traverse",
     "traverse_search",
@@ -789,7 +790,7 @@
           }
         ],
         "function_patterns": [
-          "^(add_sync_policy|alter_sync_policy|drop_sync_policy|enable_sync|apply_sync|sync_health|sync_policy_status|run_sync_policy|maintenance|maintenance_graph|maintenance_status|maintenance_status_for_graph|run_scheduled_maintenance|ingest_projection|jobs|job_runs|job_stats|alter_job|remove_job|run_job|run_due_jobs|run_due_jobs_async)$"
+          "^(add_sync_policy|alter_sync_policy|drop_sync_policy|enable_sync|apply_sync|sync_health|sync_retention|sync_policy_status|run_sync_policy|maintenance|maintenance_graph|maintenance_status|maintenance_status_for_graph|run_scheduled_maintenance|ingest_projection|jobs|job_runs|job_stats|alter_job|remove_job|run_job|run_due_jobs|run_due_jobs_async)$"
         ],
         "id": "sync_maintenance_jobs",
         "tests": {
@@ -958,10 +959,10 @@
     "schema_version": 1
   },
   "sql_schema": {
-    "entity_block_count": 170,
-    "function_contract_count": 168,
-    "function_contracts_sha256": "0bc17fe3bde7b2a57404f5b8c721b11a2a4fe4dca96b78265a6c39d43a122395",
-    "normalized_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+    "entity_block_count": 173,
+    "function_contract_count": 171,
+    "function_contracts_sha256": "6f448b5f96b9461364444ff154387e34296dff849109416e4a125641c7be9411",
+    "normalized_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
   },
   "sql_signatures": [
     {
@@ -1547,6 +1548,10 @@
     {
       "declaration": "-- graph::sql_facade::admin::sync_policy_status CREATE FUNCTION graph.\"sync_policy_status\"( \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"enabled\" bool, \"schedule_interval_secs\" bigint, \"max_sync_lag_rows\" bigint, \"next_run_at\" timestamp with time zone, \"last_run_at\" timestamp with time zone, \"last_status\" TEXT, \"last_error\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
       "name": "sync_policy_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::sync_retention CREATE FUNCTION graph.\"sync_retention\"() RETURNS TABLE ( \"eligible_prune_floor\" bigint, \"prune_blocker\" TEXT, \"retained_graph_rows\" bigint, \"database_sync_log_bytes\" bigint, \"active_sync_watermark_backends\" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "sync_retention"
     },
     {
       "declaration": "-- graph::sql_facade::admin::transfer_graph_ownership CREATE FUNCTION graph.\"transfer_graph_ownership\"( \"graph_name\" TEXT, \"new_owner\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",

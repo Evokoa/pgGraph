@@ -497,9 +497,9 @@ folds:
 ## Sync-Log Retention
 
 `graph._sync_log` rows are never deleted outside of `sql_sync::prune_sync_log`
-and `sql_sync::prune_sync_log_if_safe`, called only from
-`sql_build::execute_maintenance_rebuild_with_progress` (both the foreground
-`graph.maintenance()` path and the background maintenance worker path).
+and `sql_sync::prune_sync_log_if_safe`, called from maintenance rebuilds and
+`graph.projection_gc()`. A newly published generation cannot authorize pruning
+until it commits and the native PostgreSQL visibility horizon passes it.
 `graph.apply_sync()` never deletes rows.
 
 Backend-local `applied_sync_id` (`csr_readonly` mode's replay progress) is
@@ -519,7 +519,13 @@ of the durable projection's own `sync_watermark` (for a persisted
 currently unexpired heartbeats. `compute_sync_log_retention_floor` (a pure
 function, unit- and proptest-covered independent of SPI) implements the
 bootstrap safety rule: `(None, None) => None`, never a default floor of `0`
-or any other guess. `sql_sync::prune_sync_log` deletes
+or any other guess. The shared typed eligibility evaluator additionally
+suppresses the floor for shared source consumers, alternate published artifact
+roots, or protected generation visibility. Health reporting evaluates this
+policy without locking; deletion rechecks it under the build transaction lock.
+`graph.sync_retention()` exposes the first blocker and opt-in retained-volume
+counts behind a fixed-search-path administrator privilege boundary.
+`sql_sync::prune_sync_log` deletes
 `graph._sync_log` rows with `id <= floor` (inclusive: a row exactly at the
 floor is, by construction, already applied by everyone counted in the
 computation) scoped to the selected graph's registered table oids via

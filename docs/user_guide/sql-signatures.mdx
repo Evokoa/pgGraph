@@ -885,6 +885,12 @@ The release contract gate regenerates and compares every declaration.
 -- graph::sql_facade::admin::sync_policy_status CREATE FUNCTION graph."sync_policy_status"( "graph_name" TEXT DEFAULT NULL, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL, "max_rows" INT DEFAULT 50 ) RETURNS TABLE ( "policy_id" TEXT, "job_id" TEXT, "graph_id" TEXT, "graph_name" TEXT, "enabled" bool, "schedule_interval_secs" bigint, "max_sync_lag_rows" bigint, "next_run_at" timestamp with time zone, "last_run_at" timestamp with time zone, "last_status" TEXT, "last_error" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
+### `graph.sync_retention`
+
+```sql
+-- graph::sql_facade::admin::sync_retention CREATE FUNCTION graph."sync_retention"() RETURNS TABLE ( "eligible_prune_floor" bigint, "prune_blocker" TEXT, "retained_graph_rows" bigint, "database_sync_log_bytes" bigint, "active_sync_watermark_backends" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
+```
+
 ### `graph.transfer_graph_ownership`
 
 ```sql
