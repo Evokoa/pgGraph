@@ -32,11 +32,11 @@ DB_READY=0
 RUN_STATUS="setup"
 ACTIVE_CASE=""
 
-[[ "$DBNAME" =~ ^pggraph_[A-Za-z0-9_]+$ ]] || {
-  echo "DBNAME must match ^pggraph_[A-Za-z0-9_]+$"; exit 2
+[[ "$DBNAME" =~ ^pggraph_[A-Za-z0-9_]+$ && ${#DBNAME} -le 63 ]] || {
+  echo "DBNAME must match ^pggraph_[A-Za-z0-9_]+$ and be at most 63 bytes"; exit 2
 }
-[[ "$ROLE_NAME" =~ ^pggraph_[A-Za-z0-9_]+$ ]] || {
-  echo "ROLE_NAME must match ^pggraph_[A-Za-z0-9_]+$"; exit 2
+[[ "$ROLE_NAME" =~ ^pggraph_[A-Za-z0-9_]+$ && ${#ROLE_NAME} -le 63 ]] || {
+  echo "ROLE_NAME must match ^pggraph_[A-Za-z0-9_]+$ and be at most 63 bytes"; exit 2
 }
 for value in "$NODE_COUNT" "$COMPOSITE_COUNT" "$SAMPLES" "$WARMUPS" "$QUERY_MEMORY_MB" "$STATEMENT_TIMEOUT_MS"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "counts and sample settings must be non-negative integers"; exit 2; }
@@ -130,8 +130,8 @@ if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
     --no-default-features
 fi
 
-dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
-createdb "$DBNAME"
+# Retain previous fixtures and refuse to replace an existing database.
+createdb -- "$DBNAME"
 DB_READY=1
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
@@ -141,6 +141,8 @@ psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
   -v warmups="$WARMUPS" \
   -v persist_on_build="$PERSIST_ON_BUILD" \
   -v role_name="$ROLE_NAME" <<'SQL'
+-- Refuse a preexisting role before creating or loading graph fixtures.
+CREATE ROLE :role_name LOGIN;
 CREATE EXTENSION graph;
 SELECT set_config('graph.persist_on_build', :'persist_on_build', false);
 SET graph.auto_load = on;
@@ -216,8 +218,6 @@ SELECT graph.add_edge(
 );
 SELECT * FROM graph.build();
 
-DROP ROLE IF EXISTS :role_name;
-CREATE ROLE :role_name LOGIN;
 GRANT USAGE ON SCHEMA graph TO :role_name;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graph TO :role_name;
 GRANT SELECT ON public.rls_bench_nodes, public.rls_bench_composite, public.rls_bench_edges TO :role_name;
@@ -843,129 +843,8 @@ END
 $p3_gate$;
 SQL
 elif [[ "$RUN_PROFILE" == "p5_release" ]]; then
-  psql -X -q -v ON_ERROR_STOP=1 -v samples="$SAMPLES" -d "$DBNAME" <<'SQL'
-DO $p5_gate$
-DECLARE
-    required_samples integer := :'samples';
-    paired_samples integer;
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM (VALUES
-            ('p5_gql_identity_one_hop_auto'),
-            ('p5_gql_identity_one_hop_eager_oracle'),
-            ('p5_gql_whole_source_auto'),
-            ('p5_no_rls_auto')
-        ) AS required(case_name)
-        LEFT JOIN public.rls_bench_samples AS sample USING (case_name)
-        GROUP BY required.case_name
-        HAVING count(sample.case_name) <> required_samples
-    ) THEN
-        RAISE EXCEPTION 'P5 release profile did not retain every required sample';
-    END IF;
-    SELECT count(*) INTO paired_samples
-    FROM public.rls_bench_samples AS automatic
-    JOIN public.rls_bench_samples AS oracle
-      ON oracle.case_name = 'p5_gql_identity_one_hop_eager_oracle'
-     AND automatic.sample = oracle.sample
-    WHERE automatic.case_name = 'p5_gql_identity_one_hop_auto';
-    IF paired_samples <> required_samples THEN
-        RAISE EXCEPTION 'P5 targeted auto/oracle samples are not paired';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples AS automatic
-        JOIN public.rls_bench_samples AS oracle
-          ON oracle.case_name = 'p5_gql_identity_one_hop_eager_oracle'
-         AND automatic.sample = oracle.sample
-        WHERE automatic.case_name = 'p5_gql_identity_one_hop_auto'
-          AND (automatic.result_rows, automatic.result_signature)
-              IS DISTINCT FROM (oracle.result_rows, oracle.result_signature)
-    ) THEN
-        RAISE EXCEPTION 'P5 targeted auto results differ from the eager PostgreSQL oracle';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples AS automatic
-        JOIN public.rls_bench_samples AS oracle
-          ON oracle.case_name = 'p5_gql_identity_one_hop_eager_oracle'
-         AND automatic.sample = oracle.sample
-        WHERE automatic.case_name = 'p5_gql_identity_one_hop_auto'
-          AND (automatic.source_rows > 64 OR automatic.source_rows >= oracle.source_rows)
-    ) THEN
-        RAISE EXCEPTION 'P5 targeted GQL source work is not bounded below the eager oracle';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name LIKE 'p5_%'
-        GROUP BY case_name
-        HAVING count(DISTINCT (result_rows, result_signature)) <> 1
-    ) THEN
-        RAISE EXCEPTION 'P5 exact result signature changed between samples';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name = 'p5_gql_identity_one_hop_auto'
-          AND (selected_strategy <> 'lazy'
-               OR selector_class <> 'targeted'
-               OR relationship_completeness_checks <= 0)
-    ) THEN
-        RAISE EXCEPTION 'P5 identity-seeded GQL did not select bounded lazy visibility';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name = 'p5_gql_whole_source_auto'
-          AND (selected_strategy <> 'eager'
-               OR selector_class <> 'global'
-               OR relationship_completeness_checks <= 0)
-    ) THEN
-        RAISE EXCEPTION 'P5 whole-source GQL did not retain the global eager oracle';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name = 'p5_no_rls_auto'
-          AND (selected_strategy <> 'eager'
-               OR selector_class <> 'targeted'
-               OR spi_calls <> 0
-               OR source_rows <> 0)
-    ) THEN
-        RAISE EXCEPTION 'P5 no-RLS auto route performed visibility SPI or source work';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name = 'p5_gql_identity_one_hop_auto'
-          AND (gql_read_recheck_calls <> 0 OR gql_read_recheck_rows <> 0)
-    ) THEN
-        RAISE EXCEPTION 'P5 bounded GQL route unexpectedly repeated eager read rechecks';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name IN (
-            'p5_gql_identity_one_hop_eager_oracle',
-            'p5_gql_whole_source_auto',
-            'p5_no_rls_auto'
-        )
-          AND (gql_read_recheck_calls <= 0 OR gql_read_recheck_rows <= 0)
-    ) THEN
-        RAISE EXCEPTION 'P5 eager GQL read-recheck telemetry was not recorded';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM public.rls_bench_samples
-        WHERE case_name LIKE 'p5_%'
-          AND (memory_peak_bytes <= 0 OR work_units <= 0)
-    ) THEN
-        RAISE EXCEPTION 'P5 resource telemetry contains invalid values';
-    END IF;
-END
-$p5_gate$;
-SQL
+  psql -X -q -v ON_ERROR_STOP=1 -v samples="$SAMPLES" -d "$DBNAME" \
+    -f "$SCRIPT_DIR/rls_large_table_gate.sql"
 fi
 
 RUN_STATUS="complete"

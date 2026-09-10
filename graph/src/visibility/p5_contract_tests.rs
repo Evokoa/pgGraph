@@ -219,6 +219,7 @@ fn any_future_adaptive_selector_reuses_known_verdicts_instead_of_restarting_poli
 #[test]
 fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
     let runner = repo_source("graph/tests/heavy/rls_large_table_baseline.sh");
+    let gate = repo_source("graph/tests/heavy/rls_large_table_gate.sql");
     for required in [
         "p5_release",
         "p5_gql_identity_one_hop_auto",
@@ -308,11 +309,12 @@ fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
         );
     }
     assert!(
-        runner.contains("selected_strategy <> 'lazy'")
-            && runner.contains("selected_strategy <> 'eager'")
-            && runner.contains("spi_calls <> 0")
-            && runner.contains("source_rows <> 0")
-            && runner.contains("relationship_completeness_checks"),
+        runner.contains("-f \"$SCRIPT_DIR/rls_large_table_gate.sql\"")
+            && gate.contains("selected_strategy <> 'lazy'")
+            && gate.contains("selected_strategy <> 'eager'")
+            && gate.contains("spi_calls <> 0")
+            && gate.contains("source_rows <> 0")
+            && gate.contains("relationship_completeness_checks"),
         "P5 runner must fail when selector, no-RLS, or completeness telemetry is semantically wrong"
     );
 }
