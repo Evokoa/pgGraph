@@ -111,7 +111,7 @@ SELECT graph.add_edge(
     'public.graph_lock_edges'::regclass,
     'from_id',
     'public.graph_lock_nodes'::regclass,
-    'id',
+    'to_id',
     'linked',
     false
 );
@@ -339,7 +339,11 @@ if [[ ! -f "$graph_path" ]]; then
 fi
 artifact_before="$(cksum "$graph_path")"
 traverse_before="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SELECT count(*) FROM graph.traverse('public.graph_lock_nodes'::regclass, 'a', 1, edge_types := ARRAY['linked'], direction := 'out', hydrate := false)")"
+  -c "SELECT string_agg(node_id, ',' ORDER BY depth) FROM graph.traverse('public.graph_lock_nodes'::regclass, 'a', 1, edge_types := ARRAY['linked'], direction := 'out', hydrate := false)")"
+if [[ "$traverse_before" != "a,b" ]]; then
+  echo "build-lock fixture lost its source chain: $traverse_before"
+  exit 1
+fi
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" >"$WORKDIR/artifact-lock-holder.log" 2>&1 <<'SQL' &
 SELECT pg_advisory_lock(1918928211, -272080206);
@@ -410,7 +414,7 @@ if [[ -e "$graph_tmp_path" ]]; then
   exit 1
 fi
 traverse_after="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SELECT count(*) FROM graph.traverse('public.graph_lock_nodes'::regclass, 'a', 1, edge_types := ARRAY['linked'], direction := 'out', hydrate := false)")"
+  -c "SELECT string_agg(node_id, ',' ORDER BY depth) FROM graph.traverse('public.graph_lock_nodes'::regclass, 'a', 1, edge_types := ARRAY['linked'], direction := 'out', hydrate := false)")"
 if [[ "$traverse_after" != "$traverse_before" ]]; then
   echo "graph query result changed after failed lock attempt"
   echo "before: $traverse_before"

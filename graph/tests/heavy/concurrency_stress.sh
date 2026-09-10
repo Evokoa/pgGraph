@@ -127,8 +127,20 @@ INSERT INTO public.graph_concurrency_edges (from_id, to_id)
 SELECT i::text, (i + 1)::text
 FROM generate_series(1, 1999) AS i;
 SELECT graph.add_table('public.graph_concurrency_nodes'::regclass, 'id', ARRAY['tenant', 'name']);
-SELECT graph.add_edge('public.graph_concurrency_edges'::regclass, 'from_id', 'public.graph_concurrency_nodes'::regclass, 'id', 'linked', true);
+SELECT graph.add_edge('public.graph_concurrency_edges'::regclass, 'from_id', 'public.graph_concurrency_nodes'::regclass, 'to_id', 'linked', true);
 SELECT * FROM graph.build();
+DO $$
+DECLARE
+    reached text[];
+BEGIN
+    SELECT array_agg(node_id ORDER BY depth) INTO reached
+    FROM graph.traverse('public.graph_concurrency_nodes'::regclass, '1', 4,
+                        edge_types := ARRAY['linked'], direction := 'out');
+    IF reached IS DISTINCT FROM ARRAY['1', '2', '3', '4', '5']::text[] THEN
+        RAISE EXCEPTION 'concurrency fixture lost its source chain: %', reached;
+    END IF;
+END
+$$;
 SELECT graph.enable_sync();
 SQL
 
@@ -146,18 +158,32 @@ SELECT count(*) >= 0
 FROM graph.traverse('public.graph_concurrency_nodes'::regclass, '1', 2, edge_types := ARRAY['linked'], direction := 'out', max_rows := 50);
 SQL
 
+worker_pids=()
+worker_logs=()
 for idx in $(seq 1 "$CLIENTS"); do
   pgbench -n -c 1 -j 1 -t "$ROUNDS" -f "$mutator" "$DBNAME" >"$WORKDIR/pgbench-$idx.log" 2>&1 &
+  worker_pids+=("$!")
+  worker_logs+=("$WORKDIR/pgbench-$idx.log")
 done
 
 psql "$DBNAME" -v ON_ERROR_STOP=1 -c "SELECT * FROM graph.build(concurrently := true);" >"$WORKDIR/concurrent-build.log" 2>&1 &
-build_pid=$!
+worker_pids+=("$!")
+worker_logs+=("$WORKDIR/concurrent-build.log")
 psql "$DBNAME" -v ON_ERROR_STOP=1 -c "SELECT * FROM graph.maintenance(concurrently := true);" >"$WORKDIR/concurrent-maintenance.log" 2>&1 &
-maintenance_pid=$!
+worker_pids+=("$!")
+worker_logs+=("$WORKDIR/concurrent-maintenance.log")
 
-wait "$build_pid" || { cat "$WORKDIR/concurrent-build.log"; exit 1; }
-wait "$maintenance_pid" || { cat "$WORKDIR/concurrent-maintenance.log"; exit 1; }
-wait
+workers_failed=0
+for idx in "${!worker_pids[@]}"; do
+  if ! wait "${worker_pids[$idx]}"; then
+    cat "${worker_logs[$idx]}" || true
+    workers_failed=1
+  fi
+done
+if (( workers_failed != 0 )); then
+  echo "concurrency workers failed"
+  exit 1
+fi
 
 if psql -X -A -t -c \
     "SELECT 1 FROM pg_roles WHERE rolname = '$PROBE_ROLE'" postgres | grep -qx 1; then
@@ -179,7 +205,7 @@ DECLARE
     jobs_terminal BOOLEAN;
     pending_jobs TEXT;
     unexpected_failures TEXT;
-    traversed BIGINT;
+    traversed TEXT[];
     attempt INTEGER;
 BEGIN
     SELECT count(*) > 0 INTO saw_build_job
@@ -271,10 +297,10 @@ BEGIN
             PERFORM pg_sleep(0.1);
         END;
     END LOOP;
-    SELECT count(*) INTO traversed
+    SELECT array_agg(node_id ORDER BY depth) INTO traversed
     FROM graph.traverse('public.graph_concurrency_nodes'::regclass, '1', 4, edge_types := ARRAY['linked'], direction := 'out', max_rows := 100);
-    IF traversed = 0 THEN
-        RAISE EXCEPTION 'post-stress traversal returned no rows';
+    IF traversed IS DISTINCT FROM ARRAY['1', '2', '3', '4', '5']::text[] THEN
+        RAISE EXCEPTION 'post-stress traversal lost the original source chain: %', traversed;
     END IF;
 END
 $$;

@@ -174,8 +174,10 @@ fi
   "SELECT * FROM graph.unload_graph('default', namespace := 'public')" >/dev/null
 graph_id="$("$PG_BIN/psql" -X -qAt -v ON_ERROR_STOP=1 -d "$DBNAME" \
   -c "SELECT graph_id FROM graph.current_graph()")"
+database_oid="$("$PG_BIN/psql" -X -qAt -v ON_ERROR_STOP=1 -d "$DBNAME" \
+  -c "SELECT oid FROM pg_database WHERE datname = current_database()")"
 artifact_path="$(python3 "$INSPECTOR" --resolve-only \
-  "$DATA_DIR/graph/$graph_id/main.pggraph")"
+  "$DATA_DIR/graph/database-$database_oid/$graph_id/main.pggraph")"
 cp "$artifact_path" "$WORKDIR/main.pggraph.valid"
 printf '\000' | dd of="$artifact_path" bs=1 seek=0 conv=notrunc status=none
 if "$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \

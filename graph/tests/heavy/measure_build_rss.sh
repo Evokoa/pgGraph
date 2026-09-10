@@ -37,7 +37,7 @@ cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --n
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
-psql "$DBNAME" <<SQL
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<SQL
 CREATE EXTENSION IF NOT EXISTS graph;
 SELECT graph.reset();
 CREATE TABLE public.graph_rss_nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -51,7 +51,7 @@ SELECT i::text, 'node-' || i::text FROM generate_series(1, $NODE_COUNT) AS i;
 INSERT INTO public.graph_rss_edges (from_id, to_id)
 SELECT i::text, (i + 1)::text FROM generate_series(1, $EDGE_COUNT) AS i;
 SELECT graph.add_table('public.graph_rss_nodes'::regclass, 'id', ARRAY['name']);
-SELECT graph.add_edge('public.graph_rss_edges'::regclass, 'from_id', 'public.graph_rss_nodes'::regclass, 'id', 'linked', false);
+SELECT graph.add_edge('public.graph_rss_edges'::regclass, 'from_id', 'public.graph_rss_nodes'::regclass, 'to_id', 'linked', false);
 SQL
 
 (
@@ -72,7 +72,7 @@ SQL
         echo "SELECT * FROM graph.build();"
       done
     fi
-  } | psql "$DBNAME"
+  } | psql -X -v ON_ERROR_STOP=1 "$DBNAME"
 ) >"$OUT_FILE" 2>&1 &
 psql_pid=$!
 
@@ -96,6 +96,25 @@ while kill -0 "$psql_pid" >/dev/null 2>&1; do
   sleep 0.25
 done
 wait "$psql_pid" || { cat "$OUT_FILE"; exit 1; }
+
+# Verify the persisted result outside the sampled build backend.
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<SQL
+DO \$\$
+DECLARE
+    expected text[];
+    reached text[];
+BEGIN
+    SELECT array_agg(i::text ORDER BY i) INTO expected
+    FROM generate_series(1, LEAST($EDGE_COUNT + 1, 4)) AS i;
+    SELECT array_agg(node_id ORDER BY depth) INTO reached
+    FROM graph.traverse('public.graph_rss_nodes'::regclass, '1', 3,
+                        edge_types := ARRAY['linked'], direction := 'out');
+    IF reached IS DISTINCT FROM expected THEN
+        RAISE EXCEPTION 'persisted RSS fixture lost its source chain: expected %, got %', expected, reached;
+    END IF;
+END
+\$\$;
+SQL
 
 peak_mb=$(( (peak_kb + 1023) / 1024 ))
 graph_file_mb="$(psql "$DBNAME" -Atc "SELECT round(pg_database_size(current_database()) / 1048576.0, 1)")"
