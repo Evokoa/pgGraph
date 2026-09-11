@@ -104,8 +104,10 @@ profile and does not claim full openCypher support. Unsupported constructs fail
 with a stable SQLSTATE and actionable guidance rather than being interpreted
 with approximate semantics.
 
-SQL/PGQ `GRAPH_TABLE` is not part of the PostgreSQL 14–18 contract. PostgreSQL
-19 integration remains on the [Roadmap](./roadmap).
+SQL/PGQ `GRAPH_TABLE` is not part of pgGraph's PostgreSQL 14–18 contract.
+PostgreSQL [removed SQL/PGQ from its PostgreSQL 19 release branch](https://github.com/postgres/postgres/commit/2b9e1aff4d3d933ae8ee377fef22c2af9c7797e8)
+on September 7, 2026. Future native integration has no committed target major;
+see the [Roadmap](./roadmap).
 
 ## Resource Scope
 

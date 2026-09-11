@@ -72,6 +72,14 @@ path, and relationship queries directly against ordinary PostgreSQL tables.
 Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
+> [!NOTE]
+> **PostgreSQL 19 and SQL/PGQ:** PostgreSQL removed SQL/PGQ from the
+> PostgreSQL 19 release branch on September 7, 2026. See the official
+> [revert commit](https://github.com/postgres/postgres/commit/2b9e1aff4d3d933ae8ee377fef22c2af9c7797e8)
+> and [release-management discussion](https://www.postgresql.org/message-id/CAAKRu_bEtjWYWhYxSo0o_t3DaZYRQd5PkC0abA0g9Mp4%2BovH0w%40mail.gmail.com).
+> pgGraph supports PostgreSQL 14–18 and does not depend on native SQL/PGQ.
+> Future native integration has no committed PostgreSQL target version.
+
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
 

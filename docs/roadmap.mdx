@@ -227,7 +227,7 @@ the supported exact GQL/Cypher query forms.
 | Relationship query coverage | Extend relationship-property syntax only in bounded vertical slices that preserve exact compact-type semantics and PostgreSQL source authority. |
 | ISO GQL | Add applicable ISO/IEC 39075:2024 features in vertical slices, each with parser, binder, executor, conformance, ACL/RLS, transaction, resource, and documentation evidence. |
 | Costed streaming runtime | Develop canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, and spillable blocking work. |
-| PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |
+| PostgreSQL compatibility and SQL/PGQ | Validate new PostgreSQL majors separately from native graph integration. Revisit native property-graph definitions and `GRAPH_TABLE` if SQL/PGQ returns upstream; no target major is committed. |
 | Compatibility frontends | Keep openCypher bounded unless a separately measured and maintained compatibility surface is justified. |
 | Selective residency and caching | Investigate plan caching, selective projection residency, and workload-aware artifact placement within explicit PostgreSQL resource budgets. |
 | Synchronization | Evaluate optional WAL-driven synchronization only if it preserves PostgreSQL as the source of truth and provides safe recovery, privileges, ordering, and bounded retention. |
@@ -237,6 +237,13 @@ the supported exact GQL/Cypher query forms.
 | Distributed execution | Remain research-driven until a PostgreSQL-consistent ownership, transaction, recovery, and operations model is demonstrated. |
 
 ## Decision Rules
+
+PostgreSQL removed SQL/PGQ from its PostgreSQL 19 release branch on September 7,
+2026. The official [revert commit](https://github.com/postgres/postgres/commit/2b9e1aff4d3d933ae8ee377fef22c2af9c7797e8)
+links the [release-management discussion](https://www.postgresql.org/message-id/CAAKRu_bEtjWYWhYxSo0o_t3DaZYRQd5PkC0abA0g9Mp4%2BovH0w%40mail.gmail.com)
+of unresolved catalog and dependency behavior. PostgreSQL 19 compatibility and
+future SQL/PGQ integration are independent directions; pgGraph does not depend
+on native SQL/PGQ.
 
 - Current user-visible limitations belong in [Known Issues](./known-issues).
 - Shipped behavior and migrations belong in [Release Notes](./release-notes).
