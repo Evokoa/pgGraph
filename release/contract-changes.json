@@ -490,5 +490,14 @@
     "date": "2026-09-10",
     "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
     "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Apply physical source identity before eager GQL expansion and preserve OPTIONAL residual predicates; SQL signatures are unchanged",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-11",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
   }
 ]
