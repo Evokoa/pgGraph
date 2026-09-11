@@ -1,0 +1,18 @@
+{
+  "runtime": {
+    "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+    "fsync": "on",
+    "listen_addresses": "",
+    "socket_transport": "Unix socket only",
+    "cpu_quota": 4,
+    "memory_limit_bytes": 4294967296
+  },
+  "source_and_library_unchanged": true,
+  "runner_inputs_unchanged": true,
+  "cluster_stopped": true,
+  "wrapper_exit_code": 0,
+  "verification_exit_code": 0,
+  "differential_cases": 46,
+  "backend_cleanup_cases": 2,
+  "selected_from_complete_run": true
+}

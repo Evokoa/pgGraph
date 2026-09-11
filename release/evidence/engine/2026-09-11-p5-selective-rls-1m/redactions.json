@@ -1,0 +1,23 @@
+{
+  "changes": [
+    {
+      "field": "invocation_cwd",
+      "original_value_sha256": "ffa2bddf25f6e6b81391068c2b9ae20fea8663baaa22c89919627761176cb8de",
+      "replacement": "<redacted-local-working-directory>"
+    },
+    {
+      "field": "repository_root",
+      "original_value_sha256": "e97ba2cedba53c79484691b104a426e99a23fa25ce3fc48c974d9467af52148b",
+      "replacement": "<redacted-local-checkout>"
+    },
+    {
+      "field": "platform",
+      "original_value_sha256": "67e498bc38315cbf0b834c19d648c3c95c9405d13082aeea3988247e32df8185",
+      "replacement": "Linux <redacted-hostname> 6.10.14-linuxkit #1 SMP Thu Aug 14 19:26:13 UTC 2025 aarch64 GNU/Linux"
+    }
+  ],
+  "file": "run-metadata.txt",
+  "original_sha256": "789c91931f0e5c41bc30ade5911bb410be635f8707b7497aa23b8a07f79f3949",
+  "other_files": "Measurement files copied verbatim; fixture database/role names unchanged.",
+  "selected_sha256": "e3b8a3f546f0efa1c7e6cd954f0297f3bf0f55dfd162f3429cd9ad4b7d0ae64d"
+}

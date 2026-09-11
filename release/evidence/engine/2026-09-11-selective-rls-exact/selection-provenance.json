@@ -1,0 +1,16 @@
+{
+  "measurement_files": "Copied verbatim from the completed run.",
+  "redactions": [
+    {
+      "file": "cluster-settings.json",
+      "field": "socket",
+      "original_value_sha256": "93dbc92e520065c20e132c491193d7b9faf9d4088f3155b96832167139728eaa",
+      "replacement": "Unix socket only"
+    }
+  ],
+  "omitted": [
+    "numbered SQL/output traces reproduced by reproduce.py",
+    "cluster data",
+    "local wrapper and absolute input paths"
+  ]
+}

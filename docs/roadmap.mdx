@@ -50,18 +50,13 @@ targeted-lazy/global-eager strategy selection, and fixed relationship-identity
 completeness summaries. Whole-graph analytics and other global work continue
 to use the eager visibility oracle by design.
 
-The remaining work is release-evidence closure rather than a change to the RLS
-security contract:
-
-| Delivery slice | Status | Remaining exit gate |
-|---|---|---|
-| P4.7 targeted traversal/path closure | In progress | Retain final differential evidence and public links for DFS, reverse traversal, bidirectional and weighted paths, overlays, and eligible GQL/Cypher expansions. |
-| P5.3 strategy and scale closure | In progress | Retain complete `p5-selective-rls-1m` and `p5-selective-rls-10m` runs, publish the relationship-identity completeness summary and deterministic targeted-lazy/global-eager selection evidence, and measure remaining GQL read-result rechecks. |
-
-Any future adaptive selector must reuse known verdicts when completing an eager
-scope and may never restart policy work from zero. Until the retained 1M/10M
-matrix is complete, the user-visible performance limitation remains documented
-in [Known Issues](./known-issues#some-rls-workloads-still-use-eager-visibility-preparation).
+The candidate retains [exact-result comparisons](../release/evidence/engine/2026-09-11-selective-rls-exact/README.md)
+and [1M measurements](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md).
+The separate 10M qualification remains incomplete. These local measurements
+cover their stated fixtures, not every workload or a latency SLA. See
+[Supported Features](./user_guide/supported_features#current-rls-boundary) for
+current behavior and [Known Issues](./known-issues#some-rls-workloads-still-use-eager-visibility-preparation)
+for the remaining performance limits.
 
 ## 1.0 Production Baseline
 

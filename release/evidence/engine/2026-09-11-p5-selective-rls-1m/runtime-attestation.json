@@ -1,0 +1,39 @@
+{
+  "build_command": "cargo pgrx install --release --no-default-features --features 'pg17 development' --pg-config /usr/lib/postgresql/17/bin/pg_config",
+  "build_features": [
+    "pg17",
+    "development"
+  ],
+  "build_profile": "release",
+  "commit": "5e9977151c3e2419a570e6fc78421ef6cf160df0",
+  "effective_governors": {
+    "memory_limit_mb": 2048,
+    "query_memory_mb": 1024,
+    "query_work_limit": 10000000,
+    "spill_disk_limit_mb": 4096
+  },
+  "library_sha256": "a92759fd50f1805bb0f1d15fd7dc5f444cdc53150d7cf1b51aea294384f14909",
+  "memory_peak_scope": "Per-query governor values are in samples.csv; cgroup lifetime peak is not a run-specific RSS peak.",
+  "oom_counters": {
+    "after": {
+      "oom": 1,
+      "oom_kill": 1
+    },
+    "before": {
+      "oom": 1,
+      "oom_kill": 1
+    },
+    "increase": 0
+  },
+  "runtime": {
+    "architecture": "aarch64",
+    "autovacuum": "on",
+    "cpu_quota": 4,
+    "fsync": "on",
+    "listen_addresses": "",
+    "memory_limit_bytes": 4294967296,
+    "os": "Linux",
+    "postgres_version": "17.11 (Debian 17.11-1.pgdg12+2)"
+  },
+  "settings_evidence": "Fresh initdb cluster and retained startup/workload commands; unchanged extension defaults for work, hard memory and spill limits. Autovacuum is the fresh cluster default. These values were not separately queried as effective GUCs in this run."
+}

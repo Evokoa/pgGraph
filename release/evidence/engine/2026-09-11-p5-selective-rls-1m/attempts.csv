@@ -1,0 +1,5 @@
+case_name,status,completed_samples,elapsed_seconds,log
+p5_no_rls_auto,complete,10,1,logs/p5_no_rls_auto.log
+p5_gql_identity_one_hop_eager_oracle,complete,10,43,logs/p5_gql_identity_one_hop_eager_oracle.log
+p5_gql_identity_one_hop_auto,complete,10,2,logs/p5_gql_identity_one_hop_auto.log
+p5_gql_whole_source_auto,complete,10,26,logs/p5_gql_whole_source_auto.log

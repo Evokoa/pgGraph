@@ -1,7 +1,8 @@
 # Known Issues
 
 pgGraph 1.2.1 is a stability candidate, not yet tagged or published. The
-remaining selective-RLS scale evidence is still outstanding.
+selective-RLS exact-result and 1M evidence is retained; the separate 10M
+qualification remains outstanding.
 
 This page lists known user-visible limitations in pgGraph 1.2. See
 [Release Notes](./release-notes) for resolved issues and
@@ -41,11 +42,19 @@ the eager PostgreSQL visibility oracle. Large policy-scoped graphs can therefore
 spend work proportional to the visible source set and may reach
 `statement_timeout` even when the final result is small.
 
-The eager route is a correctness-preserving fallback, not an authorization
-bypass. Use bounded targeted queries where possible, keep PostgreSQL source-key
-indexes current, and set an explicit `statement_timeout`. Completion of the
-retained 1M/10M comparison and the remaining targeted-path evidence is tracked
-in the [selective-RLS roadmap section](/roadmap#post-1-2-focus-complete-selective-rls-scale-evidence).
+The eager route preserves caller authorization. Use bounded targeted queries
+where possible, keep PostgreSQL source-key indexes current, and set an explicit
+`statement_timeout`. The candidate's retained
+[1M measurements](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md)
+and [exact-result comparisons](../release/evidence/engine/2026-09-11-selective-rls-exact/README.md)
+cover their stated fixtures and query shapes. The 10M profile remains
+unqualified. These measurements are not a latency SLA.
+
+Visibility metrics count returned policy rows rather than all PostgreSQL rows
+examined. GQL predicates, ordering and returned properties can require source
+hydration even with `hydrate := false`; zero repeated read rechecks does not
+mean zero source SQL. Governor memory measurements are not process RSS or a
+cluster-wide memory limit.
 
 ### Tenant scope requires the session-setting path under enforcement
 
