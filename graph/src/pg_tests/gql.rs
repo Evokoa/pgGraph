@@ -8017,6 +8017,113 @@ fn p46_captured_sqlstate(statement: &str) -> Option<String> {
 
 #[cfg(feature = "development")]
 #[pg_test]
+fn gql_optional_identity_seed_eager_auto_preserve_null_extension_and_predicates() {
+    build_p46_gql_rls_fixture(false);
+    create_error_sqlstate_helper();
+    Spi::run("SET ROLE graph_gql_p46_reader").expect("set OPTIONAL seed reader failed");
+    // u4 is not the first source. Its sole incoming relationship is hidden by
+    // the fixture's policy, so its visible OPTIONAL result must be null-extended.
+    let null_u4 = serde_json::json!([{"source": "u4", "r": null, "target": null}]);
+    let null_u2 = serde_json::json!([{"source": "u2", "r": null, "target": null}]);
+    let empty = serde_json::json!([]);
+    let cases = [
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'u4'})<-[r:friend]-(v:graph_test_users_pgtest)
+          RETURN u.id AS source,r,v.id AS target ORDER BY target", &null_u4, "{}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'u4'})<-[r:friend]-(v:graph_test_users_pgtest)
+          RETURN u.id AS source,r,v.id AS target ORDER BY target LIMIT 1", &null_u4, "{}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'u2'})<-[r:friend]-(v:graph_test_users_pgtest)
+          WHERE v.name = 'missing-name' RETURN u.id AS source,r,v.id AS target", &null_u2, "{}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'u4'})<-[r:friend]-(v:graph_test_users_pgtest)
+          WHERE u.name = 'missing-name' RETURN u.id AS source,r,v.id AS target", &null_u4, "{}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest)<-[r:friend]-(v:graph_test_users_pgtest)
+          WHERE id(u) = $seed RETURN u.id AS source,r,v.id AS target", &null_u4, "{\"seed\":\"u4\"}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'u3'})<-[r:friend]-(v:graph_test_users_pgtest)
+          RETURN u.id AS source,r,v.id AS target", &empty, "{}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'missing'})<-[r:friend]-(v:graph_test_users_pgtest)
+          RETURN u.id AS source,r,v.id AS target", &empty, "{}"),
+        ("OPTIONAL MATCH (u:graph_test_users_pgtest {id: $seed})<-[r:friend]-(v:graph_test_users_pgtest)
+          RETURN u.id AS source,r,v.id AS target", &empty, "{\"seed\":null}"),
+    ];
+    for (query, expected, params) in cases {
+        for strategy in ["eager", "auto"] {
+            Spi::run(&format!(
+                "SELECT graph._test_set_visibility_strategy('{strategy}')"
+            ))
+            .expect("set OPTIONAL seed strategy failed");
+            let rows = Spi::get_one::<pgrx::JsonB>(&format!(
+                "SELECT COALESCE(jsonb_agg(row ORDER BY ordinality), '[]'::jsonb)
+                 FROM graph.gql({}, params := {}::jsonb, hydrate := true) WITH ORDINALITY",
+                super::sql_literal(query),
+                super::sql_literal(params)
+            ))
+            .expect("OPTIONAL seed query failed")
+            .expect("OPTIONAL seed aggregate was NULL");
+            let metrics = p46_visibility_metrics();
+            assert_eq!(&rows.0, expected, "{strategy}: {query}");
+            assert_eq!(
+                metrics["selected_strategy"].as_str(),
+                Some(if strategy == "eager" { "eager" } else { "lazy" })
+            );
+        }
+    }
+    for strategy in ["eager", "auto"] {
+        Spi::run(&format!(
+            "SELECT graph._test_set_visibility_strategy('{strategy}')"
+        ))
+        .expect("set OPTIONAL parameter error strategy failed");
+        for (params, expected) in [("{}", "PG016"), ("{\"seed\":[]}", "PG017")] {
+            let statement = format!(
+                "SELECT * FROM graph.gql(
+                    'OPTIONAL MATCH (u:graph_test_users_pgtest {{id: $seed}})<-[r:friend]-(v:graph_test_users_pgtest)
+                     RETURN u.id AS source,r,v.id AS target', params := {}::jsonb)",
+                super::sql_literal(params)
+            );
+            assert_eq!(p46_captured_sqlstate(&statement).as_deref(), Some(expected));
+        }
+    }
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore OPTIONAL seed strategy failed");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_seed_eager_auto_ignore_unrelated_expansion_row_cap() {
+    build_p46_gql_rls_fixture(false);
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest(id, name, age)
+         SELECT 'aaa-unrelated-' || lpad(i::text, 5, '0'), 'unrelated', i
+         FROM generate_series(1, 10001) AS i;
+         INSERT INTO public.graph_test_friendships_pgtest(id, user_id, friend_id)
+         SELECT 'unrelated-edge-' || lpad(i::text, 5, '0'),
+                'aaa-unrelated-' || lpad(i::text, 5, '0'), 'u2'
+         FROM generate_series(1, 10001) AS i;
+         SELECT * FROM graph.build();
+         SET ROLE graph_gql_p46_reader",
+    )
+    .expect("build unrelated source row-cap fixture failed");
+    for strategy in ["eager", "auto"] {
+        Spi::run(&format!(
+            "SELECT graph._test_set_visibility_strategy('{strategy}')"
+        ))
+        .expect("set source row-cap strategy failed");
+        let rows = p46_graph_query_rows(
+            "gql",
+            "MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+             WHERE id(u) = 'u1' RETURN v.id AS id",
+        );
+        let metrics = p46_visibility_metrics();
+        assert_eq!(rows, serde_json::json!([{"id": "u2"}]));
+        assert_eq!(
+            metrics["selected_strategy"].as_str(),
+            Some(if strategy == "eager" { "eager" } else { "lazy" })
+        );
+    }
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore source row-cap strategy failed");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
 fn gql_identity_bounded_expansion_lazy_matches_eager_rls_optional_multipattern_order_and_caps() {
     build_p46_gql_rls_fixture(false);
     let queries = [

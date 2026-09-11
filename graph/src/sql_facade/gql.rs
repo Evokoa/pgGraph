@@ -425,6 +425,7 @@ fn execute_statement_governed(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
+                    params,
                     &context,
                 )
             })?;
@@ -1504,6 +1505,7 @@ fn execute_delete_edge(
             &engine.borrow(),
             &read_plan,
             tenant_scope,
+            params,
             context,
         )
     })?;

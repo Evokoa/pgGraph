@@ -101,13 +101,20 @@ pub(crate) fn execute_governed(
 ) -> GraphResult<Vec<GqlRow>> {
     let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
     let context = coordinator.context(governor);
-    execute_in_context(engine, plan, tenant, &context)
+    execute_in_context(
+        engine,
+        plan,
+        tenant,
+        &crate::query::value::QueryParams::new(),
+        &context,
+    )
 }
 
 pub(crate) fn execute_in_context(
     engine: &Engine,
     plan: &PhysicalPlan,
     tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
     context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
@@ -130,7 +137,7 @@ pub(crate) fn execute_in_context(
     )?
     .retain_until_governor_drop();
     let neighbors = GqlNeighbors::new(engine, context.visibility)?;
-    for source_idx in source_nodes(engine, plan.source_table_oid, tenant, context.visibility) {
+    for source_idx in read_source_nodes(engine, plan, tenant, params, context.visibility)? {
         consume_query_work(
             context.governor,
             crate::resource::ResourcePhase::QueryCandidates,
@@ -1229,6 +1236,39 @@ fn join_row_shape(plan: &PhysicalJoinPlan) -> GraphResult<(usize, usize)> {
     Ok((coordinates, relationships))
 }
 
+fn read_source_nodes<'a>(
+    engine: &'a Engine,
+    plan: &PhysicalPlan,
+    tenant: Option<&'a str>,
+    params: &crate::query::value::QueryParams,
+    visibility: &'a VisibilityScope,
+) -> GraphResult<Box<dyn Iterator<Item = u32> + 'a>> {
+    let Some(lookup) = plan.source_identity_lookup.as_ref() else {
+        return Ok(Box::new(source_nodes(
+            engine,
+            plan.source_table_oid,
+            tenant,
+            visibility,
+        )));
+    };
+    // Identity is a physical seed constraint. Applying it only to expanded
+    // rows lets unrelated sources consume the cap or survive OPTIONAL as
+    // null-extended rows after their predicate rejects every target.
+    let source = crate::query::value::identity_lookup_text(lookup, params)?.and_then(|node_id| {
+        engine.resolve(plan.source_table_oid, &node_id).or_else(|| {
+            crate::projection::tx_delta::resolve_added_node(
+                plan.source_table_oid,
+                &node_id,
+                tenant,
+                engine.tenanted_table_oids.contains(&plan.source_table_oid),
+            )
+        })
+    });
+    Ok(Box::new(source.into_iter().filter(move |&idx| {
+        visibility.allows_node(idx) && tenant_allows_node(engine, idx, tenant)
+    })))
+}
+
 fn source_nodes<'a>(
     engine: &'a Engine,
     table_oid: u32,
@@ -2298,7 +2338,14 @@ mod resource_accounting_tests {
             VisibilityScope::enforced_for_test(hidden_nodes, hidden_relationships, rls_edge_types);
         let context = QueryExecutionContext::new(&governor, &visibility);
 
-        let rows = execute_in_context(&engine, &plan, None, &context).expect("visible execution");
+        let rows = execute_in_context(
+            &engine,
+            &plan,
+            None,
+            &crate::query::value::QueryParams::new(),
+            &context,
+        )
+        .expect("visible execution");
         assert!(rows.is_empty());
     }
 }

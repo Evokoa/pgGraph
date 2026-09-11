@@ -1480,6 +1480,72 @@ fn binder_accepts_optional_relationship_match() {
 }
 
 #[test]
+fn optional_identity_seed_is_restricted_before_null_extension() {
+    let mut engine = engine_fixture();
+    engine.register_edge_type("friend").unwrap();
+    let plan = lower(bind_query(
+        "OPTIONAL MATCH (u:users {id: 'u2'})<-[r:friend]-(v:users)
+         RETURN u.id AS source, r, v.id AS target ORDER BY target",
+    ));
+    let rows = execute(&engine, &plan, None).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the physical identity lookup must restrict seeds"
+    );
+    assert_eq!(rows[0].source.node_id, "u2");
+    assert!(rows[0].target.is_none());
+    let projected =
+        project_rows(rows, &plan, &hydrated_fixture(), &QueryParams::new(), true).unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "u2", "r": null, "target": null})]
+    );
+}
+
+#[test]
+fn identity_seed_lookup_precedes_unrelated_expansion_row_cap() {
+    let mut engine = Engine::new();
+    let cap = super::physical_plan::MAX_GQL_RESULT_ROWS;
+    let mut sources = Vec::new();
+    for index in 0..=cap {
+        let key = format!("seed-{index}");
+        let node = engine.node_store.add_node(10, key.clone());
+        engine.resolution_insert(10, &key, node);
+        engine.insert_table_membership(10, node);
+        sources.push(node);
+    }
+    let target = engine.node_store.add_node(20, "c1".to_string());
+    engine.resolution_insert(20, "c1", target);
+    engine.insert_table_membership(20, target);
+    let rel_type = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        sources
+            .into_iter()
+            .map(|source| RawEdge {
+                source,
+                target,
+                type_id: rel_type,
+                weight: None,
+                schema_reversed: false,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+    let plan = lower(bind_query(&format!(
+        "MATCH (u:users)-[:works_at]->(c:companies)
+         WHERE id(u) = 'seed-{cap}' RETURN c"
+    )));
+    let rows = execute(&engine, &plan, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source.node_id, format!("seed-{cap}"));
+    assert_eq!(rows[0].target.as_ref().unwrap().node_id, "c1");
+}
+
+#[test]
 fn binder_accepts_node_only_optional_match() {
     let ast = crate::gql::parse_statement("OPTIONAL MATCH (u:users) RETURN u").unwrap();
     let plan = bind_statement(&ast, &fake_catalog()).unwrap();
@@ -5367,6 +5433,26 @@ fn executor_traverses_transaction_created_node_entry_points() {
             .target
             .as_ref()
             .is_some_and(|target| target.node_id == "c1")));
+    let identity_plan = lower(bind_query(
+        "MATCH (u:users {id: 'u3'})-[:works_at]->(c:companies)
+         RETURN u.id AS source, c.id AS target",
+    ));
+    let identity_rows = execute(&engine, &identity_plan, None).unwrap();
+    assert_eq!(identity_rows.len(), 1);
+    let mut hydrated = hydrated_fixture();
+    hydrated.insert((10, "u3".to_string()), serde_json::json!({"id": "u3"}));
+    let projected = project_rows(
+        identity_rows,
+        &identity_plan,
+        &hydrated,
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "u3", "target": "c1"})]
+    );
     crate::projection::tx_delta::clear_for_test();
 }
 
@@ -5389,14 +5475,27 @@ fn executor_allows_transaction_created_nodes_outside_traversal_scope() {
 fn executor_allows_unrelated_transaction_created_nodes_excluded_by_source_id() {
     crate::projection::tx_delta::clear_for_test();
     let physical = lower(bind_query(
-        "MATCH (u:users {id: 'u1'})-[:works_at]->(c:companies) RETURN u, c",
+        "MATCH (u:users {id: 'u1'})-[:works_at]->(c:companies)
+         RETURN u.id AS source, c.id AS target",
     ));
     let engine = engine_fixture();
     crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
 
     let rows = execute(&engine, &physical, None).unwrap();
 
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "u1", "target": "c1"})]
+    );
     crate::projection::tx_delta::clear_for_test();
 }
 
@@ -5413,7 +5512,16 @@ fn executor_allows_tx_nodes_excluded_by_contradictory_source_ids() {
 
     let rows = execute(&engine, &physical, None).unwrap();
 
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+    assert!(projected.is_empty());
     crate::projection::tx_delta::clear_for_test();
 }
 
