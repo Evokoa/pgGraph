@@ -1330,15 +1330,17 @@ fn gql_dynamic_hidden_and_absent_types_have_eager_lazy_parity() {
     let hidden_auto = query_count("colleague");
     let absent_auto = query_count("not_loaded");
     let optional_absent = || {
-        Spi::get_one::<i64>(
-            "SELECT count(*)::bigint FROM graph.gql(
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT COALESCE(jsonb_agg(row ORDER BY ordinality), '[]'::jsonb)
+             FROM graph.gql(
                 'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:not_loaded]->(v:graph_test_users_pgtest)
-                 WHERE id(u) = ''u1'' RETURN u, v',
+                 WHERE id(u) = ''u1'' RETURN u.id AS source, v.id AS target',
                 hydrate := false
-             )",
+             ) WITH ORDINALITY",
         )
         .expect("optional absent dynamic query failed")
-        .unwrap_or_default()
+        .expect("optional absent dynamic aggregate was NULL")
+        .0
     };
     let optional_absent_auto = optional_absent();
     Spi::run("SELECT graph._test_set_visibility_strategy('eager')")
@@ -1353,7 +1355,9 @@ fn gql_dynamic_hidden_and_absent_types_have_eager_lazy_parity() {
         (hidden_auto, absent_auto, hidden_eager, absent_eager),
         (0, 0, 0, 0)
     );
-    assert_eq!((optional_absent_auto, optional_absent_eager), (2, 2));
+    let expected = serde_json::json!([{"source": "u1", "target": null}]);
+    assert_eq!(optional_absent_auto, expected);
+    assert_eq!(optional_absent_eager, expected);
 }
 
 #[pg_test]
@@ -8071,7 +8075,7 @@ fn gql_optional_identity_seed_eager_auto_preserve_null_extension_and_predicates(
             "SELECT graph._test_set_visibility_strategy('{strategy}')"
         ))
         .expect("set OPTIONAL parameter error strategy failed");
-        for (params, expected) in [("{}", "PG016"), ("{\"seed\":[]}", "PG017")] {
+        for (params, expected) in [("{}", "22023"), ("{\"seed\":[]}", "22000")] {
             let statement = format!(
                 "SELECT * FROM graph.gql(
                     'OPTIONAL MATCH (u:graph_test_users_pgtest {{id: $seed}})<-[r:friend]-(v:graph_test_users_pgtest)
