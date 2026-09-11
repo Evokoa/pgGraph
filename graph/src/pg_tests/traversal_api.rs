@@ -914,6 +914,161 @@ fn traverse_accepts_dfs_out_and_returns_path_coordinates() {
 
 #[cfg(feature = "development")]
 #[pg_test]
+fn targeted_visibility_reports_actual_traversal_and_workflow_routes() {
+    build_workflow_rls_fixture();
+    let mut queries = Vec::new();
+    for strategy in ["bfs", "dfs"] {
+        queries.push(format!(
+            "graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 2,
+             direction := 'out', strategy := '{strategy}', hydrate := true)"
+        ));
+        queries.push(format!(
+            "graph.traverse(
+             ARRAY['graph_test_users_pgtest'::regclass::oid,
+                   'graph_test_users_pgtest'::regclass::oid],
+             ARRAY['u1', 'u2'], 2, direction := 'out',
+             strategy := '{strategy}', hydrate := true)"
+        ));
+        queries.push(format!(
+            "graph.traverse_search('name', 'Alice',
+             table_filter := 'graph_test_users_pgtest'::regclass,
+             search_mode := 'exact', search_max_rows := 2, max_depth := 2,
+             direction := 'out', strategy := '{strategy}', hydrate := true)"
+        ));
+    }
+    queries.extend([
+        "graph.expand('graph_test_users_pgtest'::regclass, 'u1',
+         max_depth := 2, direction := 'out', max_rows := 10)"
+            .to_string(),
+        "graph.find_related('name', 'Alice',
+         source_table := 'graph_test_users_pgtest'::regclass,
+         search_mode := 'exact', search_max_rows := 2, max_depth := 2,
+         direction := 'out', max_rows := 10, include_counts := true)"
+            .to_string(),
+        "graph.neighborhood('name', 'Alice',
+         source_table := 'graph_test_users_pgtest'::regclass,
+         search_mode := 'exact', search_max_rows := 2,
+         max_depth := 2, direction := 'out')"
+            .to_string(),
+    ]);
+    Spi::run("SET ROLE graph_workflow_rls_reader").expect("set telemetry reader failed");
+    for function in &queries {
+        let query = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(r) - 'ordinality'
+             ORDER BY ordinality), '[]'::jsonb) FROM {function} WITH ORDINALITY AS r"
+        );
+        let mut eager_rows = None;
+        for strategy in ["eager", "auto", "lazy"] {
+            Spi::run(&format!(
+                "SELECT graph._test_set_visibility_strategy('{strategy}')"
+            ))
+            .expect("reset telemetry strategy failed");
+            let reset = workflow_json("SELECT graph._test_visibility_metrics()");
+            assert_eq!(reset.0["selected_strategy"].as_str(), Some("auto"));
+            assert_eq!(reset.0["spi_calls"].as_u64(), Some(0));
+            assert_eq!(reset.0["source_rows"].as_u64(), Some(0));
+            let rows = workflow_json(&query);
+            let metrics = workflow_json("SELECT graph._test_visibility_metrics()");
+            assert!(rows.0.as_array().is_some_and(|rows| !rows.is_empty()));
+            let selected = if strategy == "eager" { "eager" } else { "lazy" };
+            assert_eq!(
+                metrics.0["selected_strategy"].as_str(),
+                Some(selected),
+                "{strategy}: {function}"
+            );
+            if strategy == "eager" {
+                assert!(metrics.0["source_rows"]
+                    .as_u64()
+                    .is_some_and(|rows| rows > 0));
+                eager_rows = Some(rows.0);
+            } else {
+                assert!(metrics.0["spi_calls"]
+                    .as_u64()
+                    .is_some_and(|calls| calls > 0));
+                assert_eq!(Some(rows.0), eager_rows, "{strategy}: {function}");
+            }
+        }
+    }
+    Spi::run(
+        "RESET ROLE;
+         ALTER TABLE public.graph_test_users_pgtest DISABLE ROW LEVEL SECURITY;
+         SET ROLE graph_workflow_rls_reader",
+    )
+    .expect("disable telemetry fixture RLS failed");
+    for function in &queries {
+        Spi::run("SELECT graph._test_set_visibility_strategy('auto')")
+            .expect("reset no-RLS telemetry failed");
+        let count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {function}"))
+            .expect("no-RLS telemetry query failed");
+        let metrics = workflow_json("SELECT graph._test_visibility_metrics()");
+        assert!(count.is_some_and(|rows| rows > 0));
+        assert_eq!(
+            metrics.0["selected_strategy"].as_str(),
+            Some("eager"),
+            "{function}"
+        );
+        assert_eq!(metrics.0["spi_calls"].as_u64(), Some(0), "{function}");
+        assert_eq!(metrics.0["source_rows"].as_u64(), Some(0), "{function}");
+    }
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore telemetry reader failed");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn targeted_visibility_reports_eager_transaction_node_fallback() {
+    build_mutable_path_graph();
+    insert_mutable_path_edge();
+    Spi::run(
+        "SELECT * FROM graph.gql(
+         'CREATE (u:graph_test_users_pgtest {
+            id: ''u3'', name: ''transaction-local'', age: 3
+          }) RETURN u', hydrate := false)",
+    )
+    .expect("create transaction-local telemetry node failed");
+    assert_eq!(
+        Spi::get_one::<i32>("SELECT tx_delta_added_nodes FROM graph.status()")
+            .expect("read transaction-local telemetry status failed"),
+        Some(1)
+    );
+    configure_mutable_path_reader();
+    for function in [
+        "graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 2,
+         direction := 'out', strategy := 'dfs', hydrate := false)",
+        "graph.find_related('name', 'Alice',
+         source_table := 'graph_test_users_pgtest'::regclass,
+         search_mode := 'exact', max_depth := 2,
+         direction := 'out', include_counts := true)",
+    ] {
+        let mut eager_rows = None;
+        for strategy in ["eager", "auto", "lazy"] {
+            Spi::run(&format!(
+                "SELECT graph._test_set_visibility_strategy('{strategy}')"
+            ))
+            .expect("reset transaction fallback telemetry failed");
+            let rows = workflow_json(&format!(
+                "SELECT COALESCE(jsonb_agg(to_jsonb(r) - 'ordinality'
+                 ORDER BY ordinality), '[]'::jsonb) FROM {function} WITH ORDINALITY AS r"
+            ));
+            let metrics = workflow_json("SELECT graph._test_visibility_metrics()");
+            assert!(rows.0.as_array().is_some_and(|rows| !rows.is_empty()));
+            assert_eq!(metrics.0["selected_strategy"].as_str(), Some("eager"));
+            assert!(metrics.0["source_rows"]
+                .as_u64()
+                .is_some_and(|rows| rows > 0));
+            if strategy == "eager" {
+                eager_rows = Some(rows.0);
+            } else {
+                assert_eq!(Some(rows.0), eager_rows, "{strategy}: {function}");
+            }
+        }
+    }
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore transaction telemetry reader failed");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
 fn dfs_lazy_matches_eager_rls_out_in_any_and_hidden_intermediate() {
     build_workflow_rls_fixture();
     Spi::run("SET ROLE graph_workflow_rls_reader").expect("set DFS reader failed");

@@ -83,6 +83,9 @@ impl StatementBfsVisibility {
         let eager = self.eager.as_ref().ok_or_else(|| {
             safety::GraphError::Internal("statement BFS eager fallback disappeared".into())
         })?;
+        // Once this statement has completed the eager scope, every later root
+        // and broad-count traversal reuses that same visibility authority.
+        crate::sql_visibility::record_selected_visibility_strategy(false);
         execute_traverse_candidates_in_context(
             request,
             &eager.context(governor),
@@ -285,9 +288,11 @@ fn execute_lazy_traversal_candidates(
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Option<Vec<TraverseCandidate>>> {
     if request.max_depth <= 0 {
+        crate::sql_visibility::record_selected_visibility_strategy(false);
         return Ok(None);
     }
     if !crate::sql_visibility::lazy_bfs_strategy_enabled(lazy) {
+        crate::sql_visibility::record_selected_visibility_strategy(false);
         return Ok(None);
     }
     let request_bytes = traversal_request_workspace_upper_bound(request)?;
@@ -349,8 +354,10 @@ fn execute_lazy_traversal_candidates(
         }
     })?;
     let Some((config, mut machine)) = prepared else {
+        crate::sql_visibility::record_selected_visibility_strategy(false);
         return Ok(None);
     };
+    crate::sql_visibility::record_selected_visibility_strategy(true);
 
     let root_table = tables
         .iter()
