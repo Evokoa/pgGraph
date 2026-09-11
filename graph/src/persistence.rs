@@ -2349,7 +2349,77 @@ fn load_graph_file_attempt(
         (None, Some(manifest)) => manifest_root.join(&manifest.base_artifact_path),
         _ => path.to_path_buf(),
     };
-    let path = artifact_path.as_path();
+    let projection = pinned_manifest.as_ref().map(|manifest| {
+        if projection_candidate.is_some() {
+            ResolvedProjection::Candidate(manifest)
+        } else {
+            ResolvedProjection::Published(manifest)
+        }
+    });
+    let (mut engine, base) = load_resolved_graph_artifact(
+        ResolvedArtifactLoad {
+            path: &artifact_path,
+            manifest_root: &manifest_root,
+            projection,
+            resident,
+            reusable,
+            allow_shared_cache,
+        },
+        shared_hit,
+    )?;
+
+    let storage_mode = base.snapshot.mode().as_str();
+    #[cfg(not(test))]
+    pgrx::debug1!("graph snapshot storage mode: {storage_mode}");
+    #[cfg(test)]
+    let _ = storage_mode;
+    if let Err(error) = base.snapshot.advertise() {
+        #[cfg(not(test))]
+        pgrx::debug1!("graph snapshot cache advertisement unavailable: {error}");
+        #[cfg(test)]
+        let _ = error;
+    }
+    engine.base_snapshot = Some(base);
+    Ok(engine)
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedProjection<'a> {
+    Published(&'a ProjectionManifest),
+    Candidate(&'a ProjectionManifest),
+}
+
+impl<'a> ResolvedProjection<'a> {
+    fn manifest(self) -> &'a ProjectionManifest {
+        match self {
+            Self::Published(manifest) | Self::Candidate(manifest) => manifest,
+        }
+    }
+}
+
+struct ResolvedArtifactLoad<'a> {
+    path: &'a Path,
+    manifest_root: &'a Path,
+    projection: Option<ResolvedProjection<'a>>,
+    resident: crate::resource::ByteCount,
+    reusable: Option<&'a Rc<ValidatedBaseSnapshot>>,
+    allow_shared_cache: bool,
+}
+
+/// Decode already resolved artifact bytes without selecting a publication.
+fn load_resolved_graph_artifact(
+    input: ResolvedArtifactLoad<'_>,
+    shared_hit: &mut bool,
+) -> GraphResult<(Engine, Rc<ValidatedBaseSnapshot>)> {
+    let ResolvedArtifactLoad {
+        path,
+        manifest_root,
+        projection,
+        resident,
+        reusable,
+        allow_shared_cache,
+    } = input;
+    let pinned_manifest = projection.map(ResolvedProjection::manifest);
 
     let mut file = fs::File::open(path)
         .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
@@ -2670,7 +2740,7 @@ fn load_graph_file_attempt(
     let manifest = pinned_manifest;
     let projection_workspace = manifest
         .as_ref()
-        .map(|manifest| projection_workspace_bytes(&manifest_root, manifest))
+        .map(|manifest| projection_workspace_bytes(manifest_root, manifest))
         .transpose()?;
     let _projection_memory = projection_workspace
         .map(|bytes| {
@@ -2730,24 +2800,32 @@ fn load_graph_file_attempt(
         if !manifest.segments.is_empty() {
             engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
         }
-        if projection_candidate.is_some() {
-            engine.install_projection_candidate(&manifest, manifest_root)?;
+        if matches!(projection, Some(ResolvedProjection::Candidate(_))) {
+            engine.install_projection_candidate(manifest, manifest_root)?;
         } else {
-            engine.install_projection_manifest(&manifest, manifest_root)?;
+            engine.install_projection_manifest(manifest, manifest_root)?;
         }
     }
 
-    let storage_mode = base.snapshot.mode().as_str();
-    #[cfg(not(test))]
-    pgrx::debug1!("graph snapshot storage mode: {storage_mode}");
-    #[cfg(test)]
-    let _ = storage_mode;
-    if let Err(error) = base.snapshot.advertise() {
-        #[cfg(not(test))]
-        pgrx::debug1!("graph snapshot cache advertisement unavailable: {error}");
-        #[cfg(test)]
-        let _ = error;
-    }
+    Ok((engine, base))
+}
+
+/// Decode a raw fuzz artifact through production format and CSR validation.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn load_raw_graph_artifact_for_fuzzing(path: &Path) -> GraphResult<Engine> {
+    ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
+    let root = projection_manifest_root(path);
+    let (mut engine, base) = load_resolved_graph_artifact(
+        ResolvedArtifactLoad {
+            path,
+            manifest_root: &root,
+            projection: None,
+            resident: crate::resource::ByteCount::ZERO,
+            reusable: None,
+            allow_shared_cache: false,
+        },
+        &mut false,
+    )?;
     engine.base_snapshot = Some(base);
     Ok(engine)
 }
@@ -5167,6 +5245,69 @@ mod tests {
         );
         engine.built = true;
         engine
+    }
+
+    #[test]
+    fn fuzz_loader_validates_raw_artifacts_without_publication_metadata() {
+        let engine = graph_with_relationship();
+        for version in [V6_VERSION, V7_VERSION] {
+            let path = temp_graph_path(&format!("fuzz-raw-v{version}"));
+            if version == V6_VERSION {
+                write_v6_graph_file_for_test(&engine, &path).unwrap();
+            } else {
+                write_graph_file(&engine, &path).unwrap();
+            }
+            let valid_bytes = fs::read(&path).unwrap();
+            fs::write(
+                projection_manifest_root(&path).join("projection-current.json"),
+                b"invalid publication pointer",
+            )
+            .unwrap();
+            assert!(matches!(
+                load_graph_file(&path),
+                Err(GraphError::CorruptFile { .. })
+            ));
+            let loaded = crate::fuzz_support::load_graph_file(&path).unwrap();
+            assert_eq!(loaded.node_store.node_count(), 2);
+            assert_eq!(loaded.node_store.primary_key(0), Some("A"));
+            assert_eq!(loaded.node_store.primary_key(1), Some("B"));
+            assert_eq!(loaded.edge_store.edge_count(), 1);
+            assert_eq!(loaded.reverse_edge_store.edge_count(), 1);
+            assert!(!loaded
+                .base_snapshot
+                .as_ref()
+                .unwrap()
+                .snapshot
+                .is_shareable());
+
+            let targets = read_section_offset(&path, 5);
+            write_u32_at(&path, targets, 2);
+            rewrite_crc(&path);
+            let invalid_bytes = fs::read(&path).unwrap();
+            match crate::fuzz_support::load_graph_file(&path) {
+                Err(GraphError::CorruptFile { reason }) => {
+                    assert!(reason.contains("target"), "unexpected corruption: {reason}");
+                }
+                Err(error) => panic!("unexpected artifact error: {error:?}"),
+                Ok(_) => panic!("out-of-range CSR target was accepted"),
+            }
+
+            // Opt-in corpus export uses the same writer and malformed fixture
+            // exercised above. Existing caller-owned files are never replaced.
+            if let Some(directory) = std::env::var_os("PGGRAPH_FUZZ_SEED_DIR") {
+                let directory = PathBuf::from(directory);
+                fs::create_dir_all(&directory).unwrap();
+                for (kind, bytes) in [("valid", valid_bytes), ("bad-target", invalid_bytes)] {
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(directory.join(format!("v{version}-{kind}.pggraph")))
+                        .unwrap();
+                    file.write_all(&bytes).unwrap();
+                }
+            }
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
     }
 
     fn adaptive_graph(max_type_id: u32) -> Engine {

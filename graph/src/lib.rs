@@ -110,7 +110,12 @@ use sql_traversal::validate_traverse_options;
 /// requiring a live PostgreSQL backend.
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz_support {
-    pub use crate::persistence::load_graph_file;
+    /// Decode a raw artifact without PostgreSQL publication selection or logging.
+    pub fn load_graph_file(
+        path: &std::path::Path,
+    ) -> crate::safety::GraphResult<crate::engine::Engine> {
+        crate::persistence::load_raw_graph_artifact_for_fuzzing(path)
+    }
 
     /// Parse sync JSON properties through the same lossy boundary used by SQL
     /// sync replay. Intended for fuzz targets.

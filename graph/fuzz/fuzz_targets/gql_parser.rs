@@ -1,5 +1,8 @@
 #![no_main]
 
+#[path = "../postgres_stubs.rs"]
+mod postgres_stubs;
+
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

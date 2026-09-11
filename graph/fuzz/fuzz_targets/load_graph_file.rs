@@ -1,5 +1,8 @@
 #![no_main]
 
+#[path = "../postgres_stubs.rs"]
+mod postgres_stubs;
+
 use graph::fuzz_support::load_graph_file;
 use libfuzzer_sys::fuzz_target;
 use std::io::Write;
