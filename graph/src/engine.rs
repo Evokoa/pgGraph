@@ -2171,7 +2171,7 @@ impl Engine {
     }
 
     pub fn reserve_edge_mutation_capacity(&mut self, additional: usize) -> GraphResult<()> {
-        let limit = crate::config::EDGE_BUFFER_SIZE.get() as usize;
+        let limit = crate::resource::configured_edge_buffer_size() as usize;
         if self.edge_buffer.len().saturating_add(additional) > limit {
             self.mark_read_only(ReadOnlyReason::EdgeBufferFull);
             return Err(GraphError::EdgeBufferFull {
@@ -2183,21 +2183,21 @@ impl Engine {
             .map_err(|_| GraphError::Oom {
                 used_mb: 0,
                 need_mb: 1,
-                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+                limit_mb: crate::resource::configured_memory_limit_mb().max(1) as u64,
             })?;
         self.edge_buffer_missing_relationship_identity_counts
             .try_reserve(additional)
             .map_err(|_| GraphError::Oom {
                 used_mb: 0,
                 need_mb: 1,
-                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+                limit_mb: crate::resource::configured_memory_limit_mb().max(1) as u64,
             })?;
         self.edge_buffer_missing_relationship_identity_edge_types
             .try_reserve(additional)
             .map_err(|_| GraphError::Oom {
                 used_mb: 0,
                 need_mb: 1,
-                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+                limit_mb: crate::resource::configured_memory_limit_mb().max(1) as u64,
             })?;
         Ok(())
     }
@@ -4313,6 +4313,44 @@ mod tests {
             .unwrap();
         assert!(!results.iter().any(|r| r.node_id == "E"));
         assert_eq!(results.len(), 4); // A, B, C, D
+    }
+
+    #[test]
+    fn native_edge_mutations_preserve_buffer_limit_across_threads() {
+        let workers = (0..2)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let mut engine = Engine::new();
+                    engine
+                        .push_edge_mutation(EdgeMutation {
+                            source: 0,
+                            target: 1,
+                            type_id: crate::types::EdgeTypeId::test_v6(1),
+                            schema_reversed: false,
+                            relationship_id: None,
+                            kind: MutationKind::Insert,
+                        })
+                        .expect("native edge insertion");
+                    assert_eq!(engine.edge_buffer.len(), 1);
+                    assert_eq!(engine.edge_buffer_revision, 1);
+                    assert!(engine.needs_vacuum);
+                    assert!(engine.has_any_missing_relationship_identity());
+                    assert!(matches!(
+                        engine.reserve_edge_mutation_capacity(100_000),
+                        Err(GraphError::EdgeBufferFull { size: 1 })
+                    ));
+                    assert!(engine.is_read_only);
+                    assert_eq!(
+                        engine.read_only_reason,
+                        Some(ReadOnlyReason::EdgeBufferFull)
+                    );
+                    assert_eq!(engine.edge_buffer.len(), 1);
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("native edge mutation worker");
+        }
     }
 
     #[test]

@@ -183,6 +183,16 @@ pub(crate) const fn configured_memory_limit_mb() -> i32 {
 }
 
 #[cfg(not(test))]
+pub(crate) fn configured_edge_buffer_size() -> i32 {
+    crate::config::EDGE_BUFFER_SIZE.get()
+}
+
+#[cfg(test)]
+pub(crate) const fn configured_edge_buffer_size() -> i32 {
+    100_000
+}
+
+#[cfg(not(test))]
 fn configured_query_memory_mb() -> i32 {
     crate::config::QUERY_MEMORY_MB.get()
 }
