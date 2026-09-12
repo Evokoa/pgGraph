@@ -43,11 +43,11 @@ class ArtifactInspectorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "width"):
                 inspector.inspect(self.artifact(Path(temporary), 7, 3))
 
-    def test_resolves_both_manifest_versions_and_checks_checksum(self):
+    def test_resolves_supported_manifest_versions_and_checks_checksum(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             artifact = self.artifact(root)
-            for version in (2, 3):
+            for version in (2, 3, 4):
                 manifest = json.dumps({"version": version, "generation_id": 1,
                                        "base_artifact_path": artifact.name}).encode()
                 (root / "projection-generation-00000000000000000001.json").write_bytes(manifest)
@@ -59,6 +59,40 @@ class ArtifactInspectorTests(unittest.TestCase):
             (root / "projection-current.json").write_text(json.dumps(pointer))
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 inspector.resolve_artifact(root)
+
+    def test_rejects_malformed_current_manifest_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = self.artifact(root)
+            invalid_fields = [
+                {"version": value} for value in (None, True, 4.0, "4", 1, 5)
+            ] + [
+                {"generation_id": value} for value in (None, True, 1.0, "1", 0, 2)
+            ] + [
+                {"base_artifact_path": value}
+                for value in (None, 7, "", "../base.pggraph", str(artifact))
+            ]
+            for fields in invalid_fields:
+                with self.subTest(fields=fields):
+                    manifest = json.dumps({"version": 4, "generation_id": 1,
+                                           "base_artifact_path": artifact.name, **fields}).encode()
+                    (root / "projection-generation-00000000000000000001.json").write_bytes(manifest)
+                    pointer = {"version": 1, "generation_id": 1,
+                               "manifest_checksum": f"crc32:{zlib.crc32(manifest) & 0xFFFFFFFF:08x}"}
+                    (root / "projection-current.json").write_text(json.dumps(pointer))
+                    with self.assertRaises(ValueError):
+                        inspector.resolve_artifact(root)
+
+    def test_rejects_noninteger_pointer_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for version in (True, 1.0, "1"):
+                with self.subTest(version=version):
+                    pointer = {"version": version, "generation_id": 1,
+                               "manifest_checksum": "crc32:00000000"}
+                    (root / "projection-current.json").write_text(json.dumps(pointer))
+                    with self.assertRaisesRegex(ValueError, "invalid version"):
+                        inspector.resolve_artifact(root)
 
     def test_graph_id_cli_requires_and_uses_database_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -37,7 +37,7 @@ SECTION_DESCRIPTOR_SIZE = 16
 BODY_CRC_OFFSET = 40
 HEADER_CRC_OFFSET = 44
 CURRENT_POINTER_VERSION = 1
-MANIFEST_VERSIONS = (2, 3)
+MANIFEST_VERSIONS = (2, 3, 4)
 MAX_CURRENT_POINTER_BYTES = 4 * 1024
 SECTION_NAMES = [
     "is_active",
@@ -108,7 +108,8 @@ def resolve_artifact(path: pathlib.Path) -> pathlib.Path:
         raise ValueError(f"{pointer_path} has unsupported or missing fields")
     generation_id = pointer["generation_id"]
     if (
-        pointer["version"] != CURRENT_POINTER_VERSION
+        type(pointer["version"]) is not int
+        or pointer["version"] != CURRENT_POINTER_VERSION
         or not isinstance(generation_id, int)
         or isinstance(generation_id, bool)
         or generation_id <= 0
@@ -131,7 +132,9 @@ def resolve_artifact(path: pathlib.Path) -> pathlib.Path:
 
     manifest = _read_json_object(manifest_path)
     if (
-        manifest.get("version") not in MANIFEST_VERSIONS
+        type(manifest.get("version")) is not int
+        or manifest.get("version") not in MANIFEST_VERSIONS
+        or type(manifest.get("generation_id")) is not int
         or manifest.get("generation_id") != generation_id
     ):
         raise ValueError(f"{manifest_path} does not describe current generation {generation_id}")

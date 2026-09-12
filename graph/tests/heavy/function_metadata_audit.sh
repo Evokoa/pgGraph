@@ -98,6 +98,7 @@ allowed_security_definer AS (
         ('registered_tables', ''),
         ('registered_tables_for_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
         ('reset', ''),
+        ('reset', 'clear_registrations boolean'),
         ('run_due_jobs', 'max_jobs integer'),
         ('run_job', 'job_id text'),
         ('run_sync_policy', 'policy_id text'),
