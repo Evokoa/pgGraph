@@ -19,6 +19,38 @@ def executable(path, body):
 
 
 class RuntimeGateProfileTests(unittest.TestCase):
+    def isolation_cache_fixture(self, persist="off", full="true", cache_exit=0):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable(root / "cargo", 'echo install >> "$TMPDIR/events"\n')
+            executable(root / "python3", 'echo "cache:$*" >> "$TMPDIR/events"; exit "$CACHE_EXIT"\n')
+            executable(root / "dropdb", "exit 0\n")
+            executable(root / "createdb", 'echo isolation-fixture >> "$TMPDIR/events"; exit 97\n')
+            environment = {"PATH": str(root) + ":/usr/bin:/bin", "TMPDIR": str(root),
+                           "PG_CONFIG": "/bin/false", "PERSIST_ON_BUILD": persist,
+                           "FULL_PROFILE": full, "CACHE_EXIT": str(cache_exit)}
+            result = subprocess.run(["bash", str(HEAVY / "gql_isolation_matrix.sh")],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            return result, (root / "events").read_text().splitlines()
+
+    def test_full_nonpersisted_isolation_runs_ordinary_cache_after_install(self):
+        result, events = self.isolation_cache_fixture()
+        self.assertEqual(result.returncode, 97, result.stderr)
+        self.assertEqual(events, ["install", f"cache:{HEAVY / 'cache_provenance.py'}", "isolation-fixture"])
+
+    def test_other_isolation_profiles_do_not_duplicate_cache_cases(self):
+        for persist, full in (("on", "false"), ("on", "true"), ("off", "false")):
+            with self.subTest(persist=persist, full=full):
+                result, events = self.isolation_cache_fixture(persist, full)
+                self.assertEqual(result.returncode, 97, result.stderr)
+                self.assertEqual(events, ["install", "isolation-fixture"])
+
+    def test_cache_failure_fails_gate_before_isolation_fixture(self):
+        result, events = self.isolation_cache_fixture(cache_exit=23)
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(events, ["install", f"cache:{HEAVY / 'cache_provenance.py'}"])
+        self.assertNotIn("GQL isolation matrix checks passed", result.stdout)
+
     def test_isolation_scope_defaults_and_explicit_persisted_full_profile(self):
         for persist, requested, expected in (("off", None, "true"), ("on", None, "false"),
                                               ("on", "true", "true"), ("off", "false", "false")):

@@ -496,7 +496,12 @@
       "audience": "internal",
       "tier": "rc",
       "required_tools": [
-        "bash"
+        "bash",
+        "cargo",
+        "python3",
+        "psql",
+        "createdb",
+        "dropdb"
       ],
       "inputs": [
         "documented CLI arguments",

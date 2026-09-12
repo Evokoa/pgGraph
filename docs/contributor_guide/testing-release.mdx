@@ -134,7 +134,13 @@ fixed-snapshot transactions, and aborted base changes. Add `--prepared` when the
 test cluster has `max_prepared_transactions > 0` to require both prepared commit
 and prepared rollback coverage. Run `gql_isolation_matrix.sh` separately for the
 full mapped-write profile under all three isolation levels; `FULL_PROFILE=true`
-also selects those assertions when `PERSIST_ON_BUILD=on`.
+also selects those assertions when `PERSIST_ON_BUILD=on`, where the standalone
+relationship mapping restriction on node deletion and identity changes still
+applies and can reject those assertions with `PG018`.
+The full nonpersisted isolation profile also runs the ordinary cache-provenance
+cases automatically after installing the production extension, including when
+selected by the release and supported-major gates; prepared cases still require
+the explicit `--prepared` invocation.
 
 ### Provision pgrx Test PostgreSQL
 

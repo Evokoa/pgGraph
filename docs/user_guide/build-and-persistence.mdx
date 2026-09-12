@@ -240,6 +240,8 @@ directory name is always the catalog `graph_id`, not `graph_name`. The database
 OID namespace applies to default and named graphs, including absolute
 `graph.data_dir` paths. Rebuild graphs after changing their database OID or
 adopting this layout from an older installation; old shared roots are not loaded.
+After moving `$PGDATA` or changing `graph.data_dir`, rebuild graphs whose resolved
+absolute artifact root changed, because durable publication heads match that path.
 
 If a transaction or savepoint aborts after readonly sync replay, the backend
 discards its replayed cache on the next graph call. Persisted graphs can reload

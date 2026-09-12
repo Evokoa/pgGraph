@@ -63,6 +63,9 @@ fi
 cargo pgrx install --pg-config "$PG_CONFIG" \
   --features "$PG_VERSION_FEATURE" \
   --no-default-features
+if [[ "$FULL_PROFILE" == "true" && "$PERSIST_ON_BUILD" == "off" ]]; then
+  python3 "$SCRIPT_DIR/cache_provenance.py"
+fi
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
