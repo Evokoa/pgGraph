@@ -76,18 +76,27 @@ PY
 started=0
 
 cleanup() {
+  local code=$?
+  trap - EXIT INT TERM
   if (( started == 1 )); then
-    "$pg_bin/pg_ctl" -D "$pgdata" -m immediate -t 20 -w stop >/dev/null 2>&1 || true
+    if ! "$pg_bin/pg_ctl" -D "$pgdata" -m immediate -t 20 -w stop; then
+      printf 'PostgreSQL shutdown failed; retained disposable cluster at %s\n' "$workdir" >&2
+      if (( code == 0 )); then code=1; fi
+      exit "$code"
+    fi
   fi
-  rm -rf "$workdir"
+  rm -rf "$workdir" || { if (( code == 0 )); then code=1; fi; }
+  exit "$code"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 "$pg_bin/initdb" --auth=trust --username="$pguser" -D "$pgdata" >/dev/null
 sentinel="$pgdata/.pggraph-disposable-cluster"
 printf '%s\n' "$token" >"$sentinel"
-"$pg_bin/pg_ctl" -D "$pgdata" -o "$postgres_opts" -t 60 -w start >/dev/null
 started=1
+"$pg_bin/pg_ctl" -D "$pgdata" -o "$postgres_opts" -t 60 -w start >/dev/null
 
 unset PGDATABASE PGPASSWORD PGSERVICE PGSERVICEFILE PGTARGETSESSIONATTRS
 export PG_CONFIG="$pg_config"

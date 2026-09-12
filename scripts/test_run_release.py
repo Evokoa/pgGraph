@@ -56,6 +56,8 @@ class RegistryTests(unittest.TestCase):
         )
         self.assertIn("rls-evidence-gate", registry["tiers"]["local-validation"])
         self.assertIn("package-install-matrix", registry["tiers"]["local-validation"])
+        self.assertIn("publication-upgrade", registry["tiers"]["local-validation"])
+        self.assertIn("publication-upgrade", registry["gates"]["release-bundle"]["depends_on"])
         gate = registry["gates"]["rls-evidence-gate"]
         self.assertEqual(Path(gate["command"][0]).name, "with_disposable_postgres.sh")
         self.assertEqual(Path(gate["command"][1]).name, "rls_large_table_gate_regression.sh")
@@ -212,6 +214,73 @@ case "$*" in *"--mode $FAIL_MODE") exit 17 ;; esac
                 proc = self.run_playground_modes(root, mode)
                 self.assertEqual(proc.returncode, 17, proc.stderr)
                 self.assertEqual(len((root / "calls").read_text().splitlines()), expected_calls)
+
+    def run_cleanup_fixture(self, root, *, command_code=0, stop_code=0, start_code=0, signal_name=""):
+        tools = root / "bin"
+        write_executable(tools / "pg_config", f"printf '%s\\n' {shlex.quote(str(tools))}\n")
+        write_executable(tools / "initdb", 'while [ "$1" != -D ]; do shift; done\nmkdir -p "$2"\n')
+        write_executable(tools / "pg_ctl", '''
+printf '%s\\n' "$*" >> "$CALLS"
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = -D ]; then printf '%s\\n' "$argument" > "$DATA_PATH"; fi
+  previous="$argument"
+done
+case "$*" in
+  *stop) exit "$STOP_CODE" ;;
+  *start) exit "$START_CODE" ;;
+esac
+''')
+        write_executable(tools / "pg_isready", 'exit 0\n')
+        write_executable(tools / "python3", '''
+source=$(cat)
+case "$source" in
+  *socket*) printf '55439\\n' ;;
+  *uuid*) printf 'fixture-cluster-token\\n' ;;
+  *) exit 1 ;;
+esac
+''')
+        return subprocess.run(
+            ["bash", str(run_release.ROOT / "scripts/with_disposable_postgres.sh"),
+             "/bin/sh", "-c", 'if [ -n "$SIGNAL_NAME" ]; then kill -"$SIGNAL_NAME" "$PPID"; fi; exit "$COMMAND_CODE"'],
+            env={**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "TMPDIR": str(root),
+                 "PG_CONFIG": str(tools / "pg_config"), "CALLS": str(root / "calls"),
+                 "DATA_PATH": str(root / "data-path"), "STOP_CODE": str(stop_code),
+                 "START_CODE": str(start_code), "COMMAND_CODE": str(command_code), "SIGNAL_NAME": signal_name},
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def test_failed_shutdown_preserves_data_and_original_failure(self) -> None:
+        for command_code, stop_code, expected, retained in ((0, 0, 0, False), (7, 0, 7, False),
+                                                          (0, 1, 1, True), (7, 1, 7, True)):
+            with self.subTest(command=command_code, stop=stop_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = self.run_cleanup_fixture(root, command_code=command_code, stop_code=stop_code)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                data = Path((root / "data-path").read_text().strip())
+                self.assertEqual(data.exists(), retained)
+                self.assertEqual(data.parent.exists(), retained)
+                if retained:
+                    self.assertIn("retained disposable cluster", result.stderr)
+                    self.assertTrue((data / ".pggraph-disposable-cluster").is_file())
+
+    def test_signal_cleanup_returns_nonzero_once(self) -> None:
+        for name, expected in (("INT", 130), ("TERM", 143)):
+            with self.subTest(signal=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = self.run_cleanup_fixture(root, signal_name=name)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = (root / "calls").read_text().splitlines()
+                self.assertEqual(sum(line.endswith("stop") for line in calls), 1)
+                self.assertFalse(Path((root / "data-path").read_text().strip()).exists())
+
+    def test_failed_start_attempts_shutdown_and_retains_failed_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self.run_cleanup_fixture(root, start_code=5, stop_code=1)
+            self.assertEqual(result.returncode, 5, result.stderr)
+            self.assertTrue(Path((root / "data-path").read_text().strip()).exists())
+            self.assertTrue((root / "calls").read_text().splitlines()[-1].endswith("stop"))
 
     def test_disposable_cluster_preserves_fsync_on_start_and_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

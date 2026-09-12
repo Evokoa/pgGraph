@@ -16,11 +16,32 @@ WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-rss.XXXXXX")"
 PID_FILE="$WORKDIR/backend.pid"
 OUT_FILE="$WORKDIR/build.out"
 RSS_FILE="$WORKDIR/rss.tsv"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 cleanup() {
+  local code=$?
+  trap - EXIT
+  if [[ -n "$OUTPUT_DIR" ]]; then
+    for file in "$PID_FILE" "$OUT_FILE" "$RSS_FILE"; do
+      if [[ -f "$file" ]]; then
+        cp "$file" "$OUTPUT_DIR/" || code=1
+      fi
+    done
+  fi
   rm -rf "$WORKDIR"
+  exit "$code"
 }
 trap cleanup EXIT
+
+# Refuse an existing evidence directory before installing or creating a database.
+# This also prevents a failed rerun from retaining samples from an older run.
+if [[ -n "$OUTPUT_DIR" ]]; then
+  requested_output="$OUTPUT_DIR"
+  OUTPUT_DIR=""
+  mkdir -p "$(dirname "$requested_output")"
+  mkdir "$requested_output"
+  OUTPUT_DIR="$requested_output"
+fi
 
 if [[ -z "$PG_CONFIG" ]]; then
   if [[ -x "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" ]]; then
@@ -96,6 +117,11 @@ while kill -0 "$psql_pid" >/dev/null 2>&1; do
   sleep 0.25
 done
 wait "$psql_pid" || { cat "$OUT_FILE"; exit 1; }
+if [[ -z "$backend_pid" || ! -s "$RSS_FILE" || "$peak_kb" -le 0 ]]; then
+  cat "$OUT_FILE"
+  echo "Build RSS measurement failed: no positive backend RSS sample was collected" >&2
+  exit 1
+fi
 
 # Verify the persisted result outside the sampled build backend.
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<SQL

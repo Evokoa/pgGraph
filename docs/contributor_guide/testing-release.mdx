@@ -380,6 +380,25 @@ PG_VERSION_FEATURE=pg17 SOURCE_DB=pggraph_backup_src RESTORE_DB=pggraph_backup_d
 ./tests/heavy/run_pg_upgrade_matrix.sh
 ```
 
+The package-backed patch upgrade gate builds the released `v1.2.0` source and
+candidate packages, creates and persists a fixture with the 1.2.0 library, then
+installs the candidate and runs `ALTER EXTENSION graph UPDATE TO '1.2.1'`.
+It checks transaction rollback, existing function identities and grants,
+publication metadata, source properties, exact labeled paths, a published
+rebuild, and synchronization of a new node and previously unseen edge label. The
+`v1.2.0` Git tag and exclusive ownership of the selected PostgreSQL installation
+are required. Run from `graph/`:
+
+```bash
+PG_VERSION_FEATURE=pg17 ../scripts/with_disposable_postgres.sh ./tests/heavy/publication_upgrade_artifact.sh
+```
+
+Select `pg14` through `pg18` to repeat the gate on each supported major. Set
+`UPGRADE_OUTPUT_DIR` to a new directory to retain package file digests and SQL.
+The gate restores the candidate package after fixture failures. RC, full-matrix
+and local-validation tiers include this gate on PostgreSQL 17. These local test
+packages do not create a final release bundle.
+
 Docker smoke requires a fresh `CONTAINER` name and checks exact search and
 traversal results. Its published port binds to loopback. Set `PG_PORT` to use
 a port other than the default `55432` when the sandbox is already running.
@@ -405,7 +424,14 @@ registered.
 repeated rebuild, and low-memory rebuild profiles. Tune it with `NODE_COUNT`,
 `EDGE_COUNT`, `BASELINE_BATCH_SIZE`, `SMALL_BATCH_SIZE`, `REBUILD_ROUNDS`, and
 `MAX_RSS_MB`. Use `RUN_BASELINE=0`, `RUN_SMALL_BATCH=0`, `RUN_REBUILD=0`, or
-`RUN_LOW_MEMORY_REBUILD=0` to narrow a local run.
+`RUN_LOW_MEMORY_REBUILD=0` to narrow a local run. Every RSS measurement requires
+at least one positive backend sample. A positive `MAX_RSS_MB` enables the
+ceiling; zero collects measurements without an RSS acceptance limit.
+
+Set `OUTPUT_DIR` to retain `backend.pid`, `build.out`, and `rss.tsv`, including
+available output from failed runs. The requested directory must be new, for
+both the sampler and the stress runner. Stress output uses a separate directory
+for each profile.
 
 `measure_mmap_pss.sh` is Linux-only. It keeps graph-query backends alive and
 reads `/proc/<pid>/smaps_rollup` so release evidence can use proportional set

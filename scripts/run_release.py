@@ -107,7 +107,7 @@ def validate_registry(registry: dict) -> None:
         command = gate.get("command", [])
         disposable_wrapper = command and Path(command[0]).name == "with_disposable_postgres.sh"
         destructive_cluster_script = any(
-            Path(argument).name in {"crash_recovery.sh", "tx_delta_crash_recovery.sh"}
+            Path(argument).name in {"crash_recovery.sh", "tx_delta_crash_recovery.sh", "publication_upgrade_artifact.sh"}
             for argument in command
         )
         if crash_enabled and "PGDATA" not in environment and not disposable_wrapper:

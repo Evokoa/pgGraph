@@ -221,11 +221,19 @@ SELECT graph.add_edge(
     label_column := 'relationship_name'
 );
 SELECT * FROM graph.build();
-SELECT 1 / CASE WHEN count(*) = 2 THEN 1 ELSE 0 END
-FROM graph.traverse(
-    'public.release_nodes'::regclass, 'a', 3,
-    edge_types := ARRAY['works_at', 'founded'], hydrate := false
-) WHERE depth > 0;
+DO $$ BEGIN
+    IF (SELECT array_agg(node_id ORDER BY depth) FROM graph.traverse(
+        'public.release_nodes'::regclass, 'a', 3,
+        edge_types := ARRAY['works_at', 'founded'], direction := 'out', hydrate := false
+    )) IS DISTINCT FROM ARRAY['a', 'b', 'c']::text[]
+       OR (SELECT edge_path FROM graph.traverse(
+        'public.release_nodes'::regclass, 'a', 3,
+        edge_types := ARRAY['works_at', 'founded'], direction := 'out', hydrate := false
+    ) WHERE node_id = 'c' AND depth = 2)
+        IS DISTINCT FROM '["works_at", "founded"]'::jsonb THEN
+        RAISE EXCEPTION 'backup-restore rollback changed the source chain or relationship labels';
+    END IF;
+END $$;
 SQL
 
 dropdb "$RESTORE_DB"

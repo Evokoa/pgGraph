@@ -40,6 +40,7 @@ HOST_MUTATING = {
     "graph/tests/heavy/phase3_update_smoke.sh",
     "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
     "graph/tests/heavy/v1_2_update_artifact_rollback.sh",
+    "graph/tests/heavy/publication_upgrade_artifact.sh",
 }
 LINUX_ONLY = {
     "graph/tests/heavy/shared_snapshot.py",
@@ -52,6 +53,7 @@ TOOL_OVERRIDES = {
     "graph/tests/heavy/generation_transactions.py": ["python3", "psql", "createdb"],
     "graph/tests/heavy/psql_session.py": ["python3", "psql"],
     "graph/tests/heavy/publication_upgrade.sh": ["bash", "psql", "createdb"],
+    "graph/tests/heavy/publication_upgrade_artifact.sh": ["bash", "cargo-pgrx", "git", "tar", "psql", "createdb", "python3"],
     "graph/tests/heavy/replay_transactions.py": ["python3", "psql", "createdb"],
     "graph/tests/heavy/rls_large_table_gate_regression.sh": ["bash", "psql", "createdb", "dropdb"],
     "graph/tests/heavy/shared_snapshot.py": [

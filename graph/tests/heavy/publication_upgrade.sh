@@ -2,10 +2,17 @@
 set -euo pipefail
 
 # Requires the released 1.2.0 install SQL and candidate 1.2.1 update SQL.
+# The package-backed wrapper uses separate backends around library replacement.
+mode="${1:-all-current}"
+case "$mode" in
+  all-current|prepare-1.2.0|verify-1.2.1) ;;
+  *) echo "Usage: $0 [all-current|prepare-1.2.0|verify-1.2.1]" >&2; exit 2 ;;
+esac
 PGGRAPH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$PGGRAPH_ROOT/scripts/lib/pggraph-common.sh"
 database="${DB_PREFIX:-pggraph_publication_upgrade_$$}"
 pggraph_validate_database_name "$database"
+if [[ "$mode" != "verify-1.2.1" ]]; then
 createdb "$database"
 psql -X -v ON_ERROR_STOP=1 -d "$database" <<'SQL'
 CREATE EXTENSION graph VERSION '1.2.0';
@@ -15,15 +22,67 @@ DO $$ BEGIN
   END IF;
 END $$;
 REVOKE EXECUTE ON FUNCTION graph.test_enabled() FROM PUBLIC;
-CREATE TEMP TABLE original_functions AS
+CREATE TABLE public.pggraph_upgrade_original_functions AS
 SELECT oid, proowner, proacl FROM pg_proc WHERE pronamespace = 'graph'::regnamespace;
-CREATE TABLE n(id text PRIMARY KEY);
-INSERT INTO n VALUES ('a'), ('b');
-SELECT graph.add_table('n'::regclass, 'id');
+CREATE TABLE n(id text PRIMARY KEY, name text NOT NULL);
+CREATE TABLE edges (
+    id bigint PRIMARY KEY,
+    from_id text NOT NULL REFERENCES n(id),
+    to_id text NOT NULL REFERENCES n(id),
+    relationship_name text NOT NULL
+);
+INSERT INTO n VALUES ('a', 'Alpha'), ('b', 'Beta');
+INSERT INTO edges VALUES (1, 'a', 'b', 'original_label');
+SELECT graph.add_table('n'::regclass, 'id', ARRAY['name']);
+-- Edges are not registered as nodes, so both endpoint columns belong to edges.
+SELECT graph.add_edge('edges'::regclass, 'from_id', 'n'::regclass,
+                     to_column := 'to_id', label := 'relationship',
+                     bidirectional := false, label_column := 'relationship_name');
+SQL
+if [[ "$mode" == "prepare-1.2.0" ]]; then
+  psql -X -v ON_ERROR_STOP=1 -d "$database" <<'SQL'
+SET graph.persist_on_build = on;
+SELECT * FROM graph.build();
+DO $$ BEGIN
+  IF (SELECT extversion FROM pg_extension WHERE extname = 'graph') IS DISTINCT FROM '1.2.0'
+     OR (SELECT array_agg(node_id ORDER BY depth) FROM graph.traverse(
+       'n'::regclass, 'a', 2, edge_types := ARRAY['original_label'], direction := 'out'))
+        IS DISTINCT FROM ARRAY['a', 'b']::text[]
+     OR (SELECT edge_path FROM graph.traverse(
+       'n'::regclass, 'a', 2, edge_types := ARRAY['original_label'], direction := 'out')
+       WHERE node_id = 'b' AND depth = 1) IS DISTINCT FROM '["original_label"]'::jsonb THEN
+    RAISE EXCEPTION 'released 1.2.0 package did not build the upgrade fixture';
+  END IF;
+END $$;
+SQL
+  printf 'Released 1.2.0 publication fixture prepared (%s)\n' "$database"
+  exit 0
+fi
+fi
+psql -X -v ON_ERROR_STOP=1 -d "$database" <<'SQL'
+DO $$ BEGIN
+  IF (SELECT extversion FROM pg_extension WHERE extname = 'graph') IS DISTINCT FROM '1.2.0'
+     OR to_regclass('graph._projection_heads') IS NOT NULL
+     OR to_regclass('public.pggraph_upgrade_original_functions') IS NULL THEN
+    RAISE EXCEPTION 'verification requires the prepared 1.2.0 catalog';
+  END IF;
+END $$;
+BEGIN;
+ALTER EXTENSION graph UPDATE TO '1.2.1';
+ROLLBACK;
+DO $$ BEGIN
+  IF (SELECT extversion FROM pg_extension WHERE extname = 'graph') IS DISTINCT FROM '1.2.0'
+     OR to_regclass('graph._projection_heads') IS NOT NULL THEN
+    RAISE EXCEPTION 'rolled-back update changed the 1.2.0 catalog';
+  END IF;
+END $$;
 ALTER EXTENSION graph UPDATE TO '1.2.1';
 DO $$ BEGIN
+  IF (SELECT extversion FROM pg_extension WHERE extname = 'graph') IS DISTINCT FROM '1.2.1' THEN
+    RAISE EXCEPTION 'publication update did not install version 1.2.1';
+  END IF;
   IF EXISTS (
-    SELECT 1 FROM original_functions original
+    SELECT 1 FROM public.pggraph_upgrade_original_functions original
     LEFT JOIN pg_proc current ON current.oid = original.oid
     WHERE current.oid IS NULL OR current.proowner <> original.proowner
        OR current.proacl IS DISTINCT FROM original.proacl
@@ -33,6 +92,12 @@ DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'graph'
              AND 'graph._projection_heads'::regclass = ANY(extconfig)) THEN
     RAISE EXCEPTION 'derived publication metadata must not be dumped';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class, LATERAL aclexplode(relacl) AS grant_entry
+    WHERE oid = 'graph._projection_heads'::regclass AND grant_entry.grantee = 0
+  ) THEN
+    RAISE EXCEPTION 'publication heads grant direct access to PUBLIC';
   END IF;
   IF EXISTS (SELECT 1 FROM graph._projection_heads) THEN
     RAISE EXCEPTION 'upgrade must not adopt filesystem artifacts';
@@ -51,10 +116,48 @@ DO $$ BEGIN
     RAISE EXCEPTION 'upgraded sync_retention did not return one diagnostic row';
   END IF;
 END $$;
+SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
 DO $$ BEGIN
-  IF (SELECT count(*) FROM graph.traverse('n'::regclass, 'a', 1)) <> 1 THEN
+  IF (SELECT array_agg(node_id ORDER BY depth) FROM graph.traverse(
+      'n'::regclass, 'a', 2, edge_types := ARRAY['original_label'], direction := 'out'))
+       IS DISTINCT FROM ARRAY['a', 'b']::text[]
+     OR (SELECT edge_path FROM graph.traverse(
+       'n'::regclass, 'a', 2, edge_types := ARRAY['original_label'], direction := 'out')
+       WHERE node_id = 'b' AND depth = 1) IS DISTINCT FROM '["original_label"]'::jsonb THEN
     RAISE EXCEPTION 'upgraded graph did not rebuild';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM graph._projection_heads) THEN
+    RAISE EXCEPTION 'upgraded rebuild did not publish a generation';
+  END IF;
+  IF (SELECT jsonb_object_agg(id, name) FROM public.n)
+       IS DISTINCT FROM '{"a":"Alpha","b":"Beta"}'::jsonb
+     OR (SELECT count(*) FROM public.edges WHERE id = 1 AND from_id = 'a'
+         AND to_id = 'b' AND relationship_name = 'original_label') <> 1
+     OR (SELECT count(*) FROM public.edges) <> 1 THEN
+    RAISE EXCEPTION 'upgrade changed source rows or properties';
+  END IF;
+END $$;
+SELECT graph.enable_sync();
+INSERT INTO n VALUES ('c', 'Gamma');
+INSERT INTO edges VALUES (2, 'b', 'c', 'new_after_upgrade');
+SELECT * FROM graph.apply_sync();
+DO $$ BEGIN
+  IF (SELECT array_agg(node_id ORDER BY depth) FROM graph.traverse(
+      'n'::regclass, 'a', 3, edge_types := ARRAY['original_label', 'new_after_upgrade'],
+      direction := 'out')) IS DISTINCT FROM ARRAY['a', 'b', 'c']::text[]
+     OR (SELECT array_agg(node_id ORDER BY depth) FROM graph.traverse(
+      'n'::regclass, 'b', 1, edge_types := ARRAY['new_after_upgrade'],
+      direction := 'out')) IS DISTINCT FROM ARRAY['b', 'c']::text[]
+     OR (SELECT edge_path FROM graph.traverse(
+       'n'::regclass, 'a', 3, edge_types := ARRAY['original_label', 'new_after_upgrade'],
+       direction := 'out') WHERE node_id = 'c' AND depth = 2)
+        IS DISTINCT FROM '["original_label", "new_after_upgrade"]'::jsonb THEN
+    RAISE EXCEPTION 'upgraded sync lost the new node, edge or unseen relationship label';
+  END IF;
+  IF (SELECT jsonb_object_agg(id, name) FROM public.n)
+       IS DISTINCT FROM '{"a":"Alpha","b":"Beta","c":"Gamma"}'::jsonb THEN
+    RAISE EXCEPTION 'upgraded sync changed source properties';
   END IF;
 END $$;
 SQL

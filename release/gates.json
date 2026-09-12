@@ -12,9 +12,9 @@
   "tiers": {
     "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
     "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "rust-docs", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "v1-update-artifact-rollback", "release-bundle"],
-    "local-validation": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "postgres-sanitizer"],
-    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "postgres-sanitizer", "release-bundle"]
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "v1-update-artifact-rollback", "publication-upgrade", "release-bundle"],
+    "local-validation": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "publication-upgrade", "postgres-sanitizer"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "publication-upgrade", "postgres-sanitizer", "release-bundle"]
   },
   "gates": {
     "script-contracts": {
@@ -224,11 +224,35 @@
       "thresholds": {"unsuppressed_memory_errors": 0},
       "exclusive_resources": ["cargo-target", "pgrx-cluster", "postgres-port"]
     },
+    "publication-upgrade": {
+      "command": [
+        "../scripts/with_disposable_postgres.sh",
+        "./tests/heavy/publication_upgrade_artifact.sh"
+      ],
+      "cwd": "graph",
+      "timeout_seconds": 21600,
+      "environment": {
+        "PG_VERSION_FEATURE": "pg17",
+        "DB_PREFIX": "pggraph_release_publication_upgrade"
+      },
+      "depends_on": [
+        "script-contracts"
+      ],
+      "thresholds": {
+        "failed_upgrades": 0
+      },
+      "exclusive_resources": [
+        "cargo-target",
+        "postgres-installation",
+        "disposable-postgres-cluster",
+        "postgres-port"
+      ]
+    },
     "release-bundle": {
       "command": ["bash", "-c", "../scripts/prepare_release_bundle.py --ref HEAD --out-dir ../release/evidence/artifacts/release-bundle && ../scripts/verify_release_bundle.py ../release/evidence/artifacts/release-bundle --commit $(git rev-parse HEAD)"],
       "cwd": "graph",
       "timeout_seconds": 600,
-      "depends_on": ["v1-update-artifact-rollback"],
+      "depends_on": ["v1-update-artifact-rollback", "publication-upgrade"],
       "thresholds": {"missing_artifacts": 0, "checksum_mismatches": 0},
       "artifacts": ["release/evidence/artifacts/release-bundle/*"],
       "exclusive_resources": []

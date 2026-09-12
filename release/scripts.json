@@ -1080,6 +1080,38 @@
       "decision": "keep"
     },
     {
+      "path": "graph/tests/heavy/publication_upgrade_artifact.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo-pgrx",
+        "git",
+        "tar",
+        "psql",
+        "createdb",
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
       "path": "graph/tests/heavy/query_start_hot_path.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -3150,6 +3182,31 @@
       "decision": "keep"
     },
     {
+      "path": "scripts/tests/test_build_rss_gate.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
       "path": "scripts/tests/test_inspect_pggraph_artifact.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -3166,6 +3223,31 @@
         "exit status"
       ],
       "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/tests/test_publication_upgrade.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
       "timeout_seconds": 600,
       "platforms": [
         "Linux",
