@@ -6,15 +6,29 @@ PG_VERSION_FEATURE="${PG_VERSION_FEATURE:-pg17}"
 PG_MAJOR="${PG_VERSION_FEATURE#pg}"
 PG_CONFIG="${PG_CONFIG:-}"
 PERSIST_ON_BUILD="${PERSIST_ON_BUILD:-off}"
+# Persistence and assertion scope can be selected independently. Preserve the
+# original full nonpersisted and create-only persisted profiles by default.
+FULL_PROFILE="${FULL_PROFILE:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRAPH_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-gql-isolation.XXXXXX")"
 ACTIVE_PIDS=()
 
 if [[ "$PERSIST_ON_BUILD" != "on" && "$PERSIST_ON_BUILD" != "off" ]]; then
   echo "PERSIST_ON_BUILD must be 'on' or 'off'" >&2
   exit 2
 fi
+if [[ -z "$FULL_PROFILE" ]]; then
+  if [[ "$PERSIST_ON_BUILD" == "on" ]]; then
+    FULL_PROFILE=false
+  else
+    FULL_PROFILE=true
+  fi
+fi
+if [[ "$FULL_PROFILE" != "true" && "$FULL_PROFILE" != "false" ]]; then
+  echo "FULL_PROFILE must be 'true' or 'false'" >&2
+  exit 2
+fi
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-gql-isolation.XXXXXX")"
 
 cleanup() {
   set +u
@@ -96,10 +110,7 @@ run_level() {
   local reader_ack_key="$((lock_key + 300000))"
   local reader_out="$WORKDIR/$slug-reader.out"
   local writer_out="$WORKDIR/$slug-writer.out"
-  local full_profile=true
-  if [[ "$PERSIST_ON_BUILD" == "on" ]]; then
-    full_profile=false
-  fi
+  local full_profile="$FULL_PROFILE"
 
   psql -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" \
     -v isolation="$isolation" \

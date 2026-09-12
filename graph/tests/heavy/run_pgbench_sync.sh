@@ -172,6 +172,11 @@ fi
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
 SET graph.auto_load = on;
+BEGIN;
+-- This untimed exhaustive oracle materializes 10,000 node/property rows and
+-- 9,999 edge rows with their governed hydration and projection workspace.
+-- Keep its bounded allowance separate from the workload and timed smoke.
+SET LOCAL graph.query_memory_mb = 256;
 DO $$
 DECLARE
     reached text[];
@@ -196,6 +201,7 @@ BEGIN
     END IF;
 END
 $$;
+COMMIT;
 SELECT node_count, edge_count, sync_status, pending_sync_rows
 FROM graph.status();
 SQL

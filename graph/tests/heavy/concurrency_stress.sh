@@ -87,7 +87,11 @@ cleanup() {
       status=$cleanup_status
     fi
   fi
-  rm -rf "$WORKDIR"
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf "$WORKDIR"
+  else
+    echo "Concurrency stress failed; retaining worker evidence: $WORKDIR" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -154,8 +158,32 @@ INSERT INTO public.graph_concurrency_edges (from_id, to_id)
 SELECT (:id - 1)::text, :id::text
 WHERE EXISTS (SELECT 1 FROM public.graph_concurrency_nodes WHERE id = (:id - 1)::text)
 ON CONFLICT DO NOTHING;
-SELECT count(*) >= 0
-FROM graph.traverse('public.graph_concurrency_nodes'::regclass, '1', 2, edge_types := ARRAY['linked'], direction := 'out', max_rows := 50);
+DO $$
+DECLARE
+    reached TEXT[];
+    detail TEXT;
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..120 LOOP
+        BEGIN
+            SELECT array_agg(node_id ORDER BY depth) INTO reached
+            FROM graph.traverse('public.graph_concurrency_nodes'::regclass, '1', 2,
+                                edge_types := ARRAY['linked'], direction := 'out',
+                                max_rows := 50);
+            IF reached IS DISTINCT FROM ARRAY['1', '2', '3']::text[] THEN
+                RAISE EXCEPTION 'concurrent traversal lost its source chain: %', reached;
+            END IF;
+            EXIT;
+        EXCEPTION WHEN lock_not_available THEN
+            GET STACKED DIAGNOSTICS detail = PG_EXCEPTION_DETAIL;
+            IF detail IS DISTINCT FROM 'pgGraph diagnostic: PG006' OR attempt = 120 THEN
+                RAISE;
+            END IF;
+            PERFORM pg_sleep(0.1);
+        END;
+    END LOOP;
+END
+$$;
 SQL
 
 worker_pids=()
@@ -263,7 +291,8 @@ BEGIN
 
     -- The enqueueing sessions can exit before their dynamic workers acquire
     -- the maintenance lock. Treat only the documented transient contention as
-    -- retryable; each operation retains a 12-second hard deadline.
+    -- retryable; each operation allows at most 120 attempts and 11.9 seconds
+    -- of explicit sleeps within the outer gate timeout.
     FOR attempt IN 1..120 LOOP
         BEGIN
             PERFORM * FROM graph.build();
