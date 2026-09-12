@@ -1,0 +1,155 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 148223.62,
+      "Total Cost": 148223.63,
+      "Plan Rows": 1,
+      "Plan Width": 8,
+      "Actual Startup Time": 326.080,
+      "Actual Total Time": 329.244,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 6299,
+      "Shared Read Blocks": 77035,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0,
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 148223.40,
+          "Total Cost": 148223.61,
+          "Plan Rows": 2,
+          "Plan Width": 4,
+          "Actual Startup Time": 325.944,
+          "Actual Total Time": 329.234,
+          "Actual Rows": 3,
+          "Actual Loops": 1,
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Single Copy": false,
+          "Shared Hit Blocks": 6299,
+          "Shared Read Blocks": 77035,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 147223.40,
+              "Total Cost": 147223.41,
+              "Plan Rows": 1,
+              "Plan Width": 4,
+              "Actual Startup Time": 317.116,
+              "Actual Total Time": 317.116,
+              "Actual Rows": 1,
+              "Actual Loops": 3,
+              "Shared Hit Blocks": 6299,
+              "Shared Read Blocks": 77035,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "Workers": [
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "rls_bench_edges",
+                  "Alias": "src",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 115278.70,
+                  "Plan Rows": 3194470,
+                  "Plan Width": 8,
+                  "Actual Startup Time": 0.111,
+                  "Actual Total Time": 136.868,
+                  "Actual Rows": 3333333,
+                  "Actual Loops": 3,
+                  "Shared Hit Blocks": 6299,
+                  "Shared Read Blocks": 77035,
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Dirtied Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "Workers": [
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Settings": {
+    },
+    "Planning": {
+      "Shared Hit Blocks": 90,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.475,
+    "Triggers": [
+    ],
+    "JIT": {
+      "Functions": 11,
+      "Options": {
+        "Inlining": false,
+        "Optimization": false,
+        "Expressions": true,
+        "Deforming": true
+      },
+      "Timing": {
+        "Generation": {
+          "Deform": 0.056,
+          "Total": 0.313
+        },
+        "Inlining": 0.000,
+        "Optimization": 0.280,
+        "Emission": 4.948,
+        "Total": 5.541
+      }
+    },
+    "Execution Time": 338.225
+  }
+]

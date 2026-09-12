@@ -1,0 +1,7 @@
+{
+  "profile": "10m-fixture-build-spill-16g",
+  "build_spill_disk_limit_mb": 16384,
+  "query_spill_disk_limit_mb": 4096,
+  "scope": "Fixture build only; query acceptance budgets unchanged",
+  "query_budgets_sha256": "235e6c477d6726495bb144dd0a3f89f68f108480d8be3094075ba2363fbeaff0"
+}

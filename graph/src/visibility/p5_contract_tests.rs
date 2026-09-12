@@ -377,7 +377,6 @@ fn p5_metrics_surface_resets_statement_counters_and_reports_resource_snapshot() 
 }
 
 #[test]
-#[ignore = "P5.3 retained 1M/10M evidence checkpoint"]
 fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
     validate_retained_evidence(&evidence_root(std::env::var_os(
         "PGGRAPH_RLS_EVIDENCE_ROOT",
@@ -604,7 +603,6 @@ fn validate_retained_evidence(measurements: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-#[ignore = "P4.7/P5.3 documentation and evidence closure checkpoint"]
 fn p4_and_p5_close_only_with_public_docs_and_retained_evidence_links() {
     let supported = repo_source("docs/user_guide/supported_features.mdx");
     let normalized = supported.split_whitespace().collect::<Vec<_>>().join(" ");

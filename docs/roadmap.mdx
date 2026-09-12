@@ -42,7 +42,7 @@ The 1.0 SQL and GQL profiles remain the named compatibility profiles because
 1.1 extends rather than replaces them. Future work must preserve the 1.1 RLS,
 publication, caller-identity, and PostgreSQL source-of-truth guarantees.
 
-## Post-1.2 Focus: Complete Selective-RLS Scale Evidence
+## Selective-RLS Scale Evidence
 
 pgGraph 1.2 includes the bounded visibility coordinator, lazy direct-identity
 resolution, lazy bounded BFS/DFS and path execution, deterministic
@@ -51,8 +51,9 @@ completeness summaries. Whole-graph analytics and other global work continue
 to use the eager visibility oracle by design.
 
 The candidate retains [exact-result comparisons](../release/evidence/engine/2026-09-11-selective-rls-exact/README.md)
-and [1M measurements](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md).
-The separate 10M qualification remains incomplete. These local measurements
+and complete [1M](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md)
+and [10M measurements](../release/evidence/engine/2026-09-12-p5-selective-rls-10m/README.md).
+These local measurements
 cover their stated fixtures, not every workload or a latency SLA. See
 [Supported Features](./user_guide/supported_features#current-rls-boundary) for
 current behavior and [Known Issues](./known-issues#some-rls-workloads-still-use-eager-visibility-preparation)

@@ -1,0 +1,2 @@
+query_work_limit,memory_limit_mb,query_memory_mb,spill_disk_limit_mb
+100000000,4096,2048,4096

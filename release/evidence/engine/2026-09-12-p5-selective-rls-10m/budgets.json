@@ -1,0 +1,17 @@
+{
+  "required_samples": 10,
+  "max_p95_total_ms": 600000,
+  "max_p95_visibility_ms": 600000,
+  "max_memory_peak_bytes": 2147483648,
+  "max_source_rows": 30000000,
+  "max_work_units": 100000000,
+  "automatic_identity_max_source_rows": 64,
+  "node_count": 10000000,
+  "composite_count": 10000000,
+  "warmups": 3,
+  "statement_timeout_ms": 6000000,
+  "query_memory_mb": 2048,
+  "graph_memory_limit_mb": 4096,
+  "runtime_cpu_quota": 4,
+  "purpose": "Local resource qualification; not a public latency SLA"
+}

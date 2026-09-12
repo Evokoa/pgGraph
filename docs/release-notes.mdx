@@ -97,8 +97,9 @@ Regression coverage includes the four reported adapter issues, caller-scoped
 RLS, snapshot and rollback behavior, commit-order replay, endpoint validation,
 and Linux snapshot lifetime. The small RLS runner regression validates its
 acceptance gate and refuses existing fixture databases and roles. Retained
-exact-result and 1M selective-RLS evidence cover their stated profiles; the
-separate 10M qualification remains outstanding. Candidate release gates
+exact-result, [1M](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md)
+and [10M selective-RLS evidence](../release/evidence/engine/2026-09-12-p5-selective-rls-10m/README.md)
+cover their stated profiles and resource envelopes. Candidate release gates
 remain in progress; these notes do not certify published packages or universal
 performance guarantees.
 
