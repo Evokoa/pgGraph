@@ -89,6 +89,8 @@ Module-local Rust tests cover:
 | `workflow_relationship_api.rs` | `path`, `connection`, `neighborhood` |
 | `workflow_validation.rs` | argument validation and unsupported modes |
 | `synthetic_release.rs` | synthetic release-gate SQL fixture through pgrx |
+| `integer_lookup.rs` | source-key lookup predicates, canonical identities and primary-key query plans |
+| `integer_hydration.rs` | integer hydration under RLS, effective roles, transaction changes and resource failures |
 
 The opt-in P9 high-cardinality query boundary uses a dedicated test database:
 

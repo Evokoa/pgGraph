@@ -4124,6 +4124,7 @@ fn hydrate_gql_rows_governed(
     if !needed {
         return Ok(hydrated);
     }
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
     for row in rows {
         for coordinate in std::iter::once(Some(&row.source))
             .chain(std::iter::once(row.target.as_ref()))
@@ -4134,7 +4135,7 @@ fn hydrate_gql_rows_governed(
             if hydrated.contains_key(&key) {
                 continue;
             }
-            let node = hydrate_required_node_governed(coordinate, governor, catalog_tables)?;
+            let node = hydrate_required_node_with_hydrator(coordinate, &mut hydrator)?;
             hydrated.insert(key, node);
         }
     }
@@ -4526,20 +4527,23 @@ where
         )
         .map_err(crate::safety::resource_limit_error)?;
 
-    acl::check_table_acl(edge_mapping.edge_table_oid)?;
-    let table_name =
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            regclass_text(edge_mapping.edge_table_oid)
-        }))?;
-    let source_key_predicate = relationship_source_key_predicate(edge_mapping);
+    let lookup = crate::sql_hydration::SourceKeyLookup::prepare(
+        edge_mapping.edge_table_oid,
+        &edge_mapping.source_key_columns,
+        "edge_row",
+        governor,
+    )?;
+    let table_name = &lookup.table_name;
+    let source_key_predicate = &lookup.key_expr;
+    let predicate = lookup.batch_predicate();
     let query = format!(
         "SELECT {source_key_predicate} AS graph_relationship_id
            FROM {table_name} edge_row
-          WHERE {source_key_predicate} = ANY($1::text[])
+          WHERE {predicate}
           LIMIT $2"
     );
     let args = vec![
-        source_keys.clone().into(),
+        lookup.batch_arg(&source_keys, governor)?,
         i64::try_from(source_keys.len()).unwrap_or(i64::MAX).into(),
     ];
     let mut visible = std::collections::HashSet::new();
@@ -4605,6 +4609,7 @@ fn hydrate_gql_node_rows_governed(
     if !needed {
         return Ok(hydrated);
     }
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
     for row in rows {
         if row.optional_null {
             continue;
@@ -4613,7 +4618,7 @@ fn hydrate_gql_node_rows_governed(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let node = hydrate_required_node_governed(&row.node, governor, catalog_tables)?;
+        let node = hydrate_required_node_with_hydrator(&row.node, &mut hydrator)?;
         hydrated.insert(key, node);
     }
     Ok(hydrated)
@@ -4648,6 +4653,7 @@ fn hydrate_gql_relationship_rows_governed(
     })?;
     let mut workspace =
         crate::sql_hydration::reserve_hydration_workspace(governor, rows.len(), key_bytes)?;
+    let mut lookup = None;
     for row in rows {
         check_query_hydrate_progress(governor, hydrated.len())?;
         let (Some(start), Some(end)) = (&row.rel_start, &row.rel_end) else {
@@ -4662,8 +4668,21 @@ fn hydrate_gql_relationship_rows_governed(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let relationship =
-            hydrate_required_relationship(edge_mapping, row.relationship_id, &mut workspace)?;
+        let lookup = match &mut lookup {
+            Some(lookup) => lookup,
+            empty @ None => empty.insert(crate::sql_hydration::SourceKeyLookup::prepare(
+                edge_mapping.edge_table_oid,
+                &edge_mapping.source_key_columns,
+                "edge_row",
+                governor,
+            )?),
+        };
+        let relationship = hydrate_required_relationship(
+            edge_mapping,
+            row.relationship_id,
+            &mut workspace,
+            lookup,
+        )?;
         hydrated.insert(key, relationship.0);
     }
     workspace.retain_until_governor_drop();
@@ -4689,21 +4708,19 @@ fn hydrate_required_relationship(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
     relationship_id: Option<crate::edge_store::RelationshipId>,
     workspace: &mut crate::resource::ResourceLease<'_>,
+    lookup: &crate::sql_hydration::SourceKeyLookup,
 ) -> safety::GraphResult<pgrx::JsonB> {
     let identity = relationship_source_identity_owned(edge_mapping, relationship_id, workspace)?;
-    let table_name =
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            regclass_text(edge_mapping.edge_table_oid)
-        }))?;
-    let source_key_predicate = relationship_source_key_predicate(edge_mapping);
+    let table_name = &lookup.table_name;
+    let predicate = lookup.scalar_predicate();
     let size_query = format!(
         "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(edge_row.*))::bigint,
                     pg_catalog.octet_length(pg_catalog.to_jsonb(edge_row.*)::text)::bigint
                FROM {table_name} edge_row
-              WHERE {source_key_predicate} = $1
+              WHERE {predicate}
               LIMIT 1"
     );
-    let size_args = vec![identity.source_key.as_str().into()];
+    let size_args = vec![lookup.scalar_arg(&identity.source_key)];
     let json_sizes =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             Spi::connect(|client| {
@@ -4746,9 +4763,9 @@ fn hydrate_required_relationship(
     let mut sql = format!(
         "SELECT to_jsonb(edge_row.*)
          FROM {table_name} edge_row
-         WHERE {source_key_predicate} = $1"
+         WHERE {predicate}"
     );
-    let args = vec![identity.source_key.as_str().into()];
+    let args = vec![lookup.scalar_arg(&identity.source_key)];
     sql.push_str(" LIMIT 1");
     crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
         Spi::connect(|client| {
@@ -4873,6 +4890,7 @@ fn clone_charged_relationship_identity(
     Ok(identity.to_owned())
 }
 
+#[cfg(test)]
 fn relationship_source_key_predicate(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
 ) -> String {
@@ -4911,19 +4929,23 @@ fn hydrate_required_node_governed(
     governor: &crate::resource::ResourceGovernor,
     catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
-    crate::sql_hydration::hydrate_node_governed_with_tables(
-        coordinate.table_oid,
-        &coordinate.node_id,
-        governor,
-        catalog_tables,
-    )?
-    .map(|json| json.0)
-    .ok_or_else(|| safety::GraphError::GqlExecution {
-        reason: format!(
-            "GQL could not hydrate node `{}` from table OID {}",
-            coordinate.node_id, coordinate.table_oid
-        ),
-    })
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
+    hydrate_required_node_with_hydrator(coordinate, &mut hydrator)
+}
+
+fn hydrate_required_node_with_hydrator(
+    coordinate: &crate::query::execute::GqlNodeCoordinate,
+    hydrator: &mut crate::sql_hydration::NodeHydrator<'_>,
+) -> safety::GraphResult<serde_json::Value> {
+    hydrator
+        .hydrate(coordinate.table_oid, &coordinate.node_id)?
+        .map(|json| json.0)
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL could not hydrate node `{}` from table OID {}",
+                coordinate.node_id, coordinate.table_oid
+            ),
+        })
 }
 
 #[cfg(feature = "pg_test")]

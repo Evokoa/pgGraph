@@ -970,6 +970,8 @@ mod tests {
     include!("pg_tests/traversal_api.rs");
     include!("pg_tests/sync_config_build.rs");
     include!("pg_tests/registration_search.rs");
+    include!("pg_tests/integer_hydration.rs");
+    include!("pg_tests/integer_lookup.rs");
     include!("pg_tests/components_jobs.rs");
     include!("pg_tests/maintenance_admin.rs");
     include!("pg_tests/workflow_search_api.rs");

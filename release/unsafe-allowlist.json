@@ -13,6 +13,7 @@
     {"path": "graph/src/projection/tx_delta.rs", "blocks": 1, "boundary": "PostgreSQL transaction callbacks", "owner": "transaction adapter"},
     {"path": "graph/src/runtime_state.rs", "blocks": 1, "boundary": "backend-local cancellation-safe snapshot lifetime", "owner": "runtime state adapter"},
     {"path": "graph/src/sql_facade/admin.rs", "blocks": 1, "boundary": "cancellation-safe compaction snapshot lifetime", "owner": "administration adapter"},
+    {"path": "graph/src/sql_hydration/source_key_lookup.rs", "blocks": 1, "boundary": "PostgreSQL transaction-owned source relation lock and locked relcache descriptor", "owner": "source hydration adapter"},
     {"path": "graph/src/sql_jobs.rs", "blocks": 1, "boundary": "PostgreSQL backend PID FFI", "owner": "background-job adapter"},
     {"path": "graph/src/sync_capture.rs", "blocks": 7, "boundary": "PostgreSQL advisory lock, snapshot and portal FFI", "owner": "sync capture adapter"},
     {"path": "graph/src/sql_visibility.rs", "blocks": 2, "boundary": "backend-local cancellation-safe SPI frame lifetime", "owner": "RLS visibility adapter"}

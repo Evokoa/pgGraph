@@ -7,7 +7,7 @@ use crate::api_types::{
 use crate::catalog::{table_oid_from_name, validate_column_exists};
 use crate::projection::layered::LayeredNeighbors;
 use crate::projection::neighbors::{Neighbor, NeighborSource, OverlayNeighbors};
-use crate::sql_hydration::{hydrate_node_governed_with_tables, hydrate_nodes_governed_with_tables};
+use crate::sql_hydration::{hydrate_nodes_governed_with_tables, NodeHydrator};
 use crate::sql_traversal::{
     execute_traverse_rows_in_context, json_i32_field, json_number_as_f64, json_number_from_f64,
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
@@ -764,6 +764,7 @@ fn expand_rows_to_parent_path_governed(
         })
         .collect::<HashMap<_, _>>();
     let mut expanded = Vec::new();
+    let mut hydrator = NodeHydrator::new(governor, tables);
     for row in &rows {
         let serde_json::Value::Array(path) = &row.5 .0 else {
             continue;
@@ -775,7 +776,7 @@ fn expand_rows_to_parent_path_governed(
             let node = if let Some(node) = by_coord.get(&(table_oid, id)) {
                 Some(pgrx::JsonB(node.0.clone()))
             } else {
-                hydrate_node_governed_with_tables(table_oid, id, governor, tables)?
+                hydrator.hydrate(table_oid, id)?
             };
             expanded.push((
                 row.0,
