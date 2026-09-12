@@ -2091,6 +2091,174 @@ fn multi_pattern_join_orders_before_windowing() {
 }
 
 #[test]
+fn multi_pattern_join_identity_seed_precedes_unrelated_raw_row_cap() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (c)<-[:works_at]-(v:users) \
+         WHERE u.id = 'seed-101' AND v.name = 'chosen' \
+         RETURN u.id AS source, v.id AS peer",
+    );
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) = lower_statement(statement)
+    else {
+        panic!("expected physical join read plan");
+    };
+    let mut engine = Engine::new();
+    let mut hydrated = HydratedRows::new();
+    let mut sources = Vec::new();
+    for index in 0..102 {
+        let key = format!("seed-{index}");
+        let node = engine.node_store.add_node(10, key.clone());
+        engine.resolution_insert(10, &key, node);
+        engine.insert_table_membership(10, node);
+        hydrated.insert(
+            (10, key.clone()),
+            serde_json::json!({"id": key, "name": if index == 0 { "chosen" } else { "other" }}),
+        );
+        sources.push(node);
+    }
+    let target = engine.node_store.add_node(20, "company".into());
+    engine.resolution_insert(20, "company", target);
+    engine.insert_table_membership(20, target);
+    let type_id = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        sources
+            .into_iter()
+            .map(|source| RawEdge {
+                source,
+                target,
+                type_id,
+                weight: None,
+                schema_reversed: false,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+
+    let rows = execute_join(&engine, &physical, None).unwrap();
+    assert_eq!(rows.len(), 102, "only the bound source should expand");
+    let projected =
+        project_join_rows(rows, &physical, &hydrated, &QueryParams::new(), false).unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "seed-101", "peer": "seed-0"})]
+    );
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_respects_parameters_and_visibility() {
+    let super::physical_plan::PhysicalStatement::JoinRead(plan) =
+        lower_statement(bind_statement_query(
+            "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+             WHERE u.id = $seed RETURN u.id AS source, v.id AS peer",
+        ))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let engine = engine_fixture();
+    let execute = |params: &QueryParams, visibility: &crate::visibility::VisibilityScope| {
+        let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+        let context = crate::visibility::QueryExecutionContext::new(&governor, visibility);
+        super::execute::execute_join_in_context(&engine, &plan, None, params, &context)
+    };
+    let unrestricted = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let params = QueryParams::from_iter([("seed".into(), serde_json::json!("u1"))]);
+    let rows = execute(&params, &unrestricted).unwrap();
+    assert_eq!(
+        project_join_rows(rows, &plan, &hydrated_fixture(), &params, false).unwrap(),
+        vec![serde_json::json!({"source": "u1", "peer": "u1"})]
+    );
+    for seed in [serde_json::json!("missing"), serde_json::Value::Null] {
+        let params = QueryParams::from_iter([("seed".into(), seed)]);
+        assert!(execute(&params, &unrestricted).unwrap().is_empty());
+    }
+    assert!(matches!(
+        execute(&QueryParams::new(), &unrestricted),
+        Err(GraphError::GqlParameter { .. })
+    ));
+    for hidden_node in [0, 2] {
+        let hidden = crate::visibility::VisibilityScope::enforced_for_test(
+            [hidden_node].into_iter().collect(),
+            roaring::RoaringBitmap::new(),
+            roaring::RoaringBitmap::new(),
+        );
+        assert!(execute(&params, &hidden).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_preserves_transaction_nodes_and_deletes() {
+    crate::projection::tx_delta::clear_for_test();
+    let super::physical_plan::PhysicalStatement::JoinRead(plan) =
+        lower_statement(bind_statement_query(
+            "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+             WHERE id(u) = 'u3' AND id(u) <> id(v)
+             RETURN u.id AS source, v.id AS peer",
+        ))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let engine = engine_fixture();
+    let source = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    crate::projection::tx_delta::record_added_edge(
+        source,
+        crate::projection::tx_delta::DeltaEdge {
+            target: 2,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
+            schema_reversed: false,
+            weight: None,
+            relationship_id: None,
+        },
+    )
+    .unwrap();
+    let rows = execute_join(&engine, &plan, None).unwrap();
+    let mut hydrated = hydrated_fixture();
+    hydrated.insert((10, "u3".into()), serde_json::json!({"id": "u3"}));
+    assert_eq!(
+        project_join_rows(rows, &plan, &hydrated, &QueryParams::new(), false).unwrap(),
+        vec![serde_json::json!({"source": "u3", "peer": "u1"})]
+    );
+    crate::projection::tx_delta::record_deleted_node(source).unwrap();
+    assert!(execute_join(&engine, &plan, None).unwrap().is_empty());
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_requires_mandatory_conjunctive_primary_key() {
+    for query in [
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE u.id = 'u1' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE u.id = 'u1' OR u.id = 'u2' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE NOT u.id = 'u1' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE u.name = 'Ada' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE v.id = 'u1' RETURN u",
+    ] {
+        let super::physical_plan::PhysicalStatement::JoinRead(plan) =
+            lower_statement(bind_statement_query(query))
+        else {
+            panic!("expected physical join read plan");
+        };
+        assert!(plan.source_identity_lookup.is_none(), "{query}");
+        assert_eq!(
+            execute_join(&engine_fixture(), &plan, None).unwrap().len(),
+            2
+        );
+    }
+}
+
+#[test]
 fn multi_pattern_join_ordering_errors_when_raw_row_cap_is_exceeded() {
     let statement = bind_statement_query(
         "MATCH (u:users)-[:works_at]->(c:companies), \

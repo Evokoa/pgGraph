@@ -189,6 +189,8 @@ pub(crate) struct LogicalJoinNodeSlot {
     pub(crate) label: String,
     /// Registered readable properties.
     pub(crate) properties: BTreeSet<String>,
+    /// Registered source primary-key columns used for identity constraints.
+    pub(crate) primary_key_columns: Vec<String>,
 }
 
 /// Bound relationship variable slot in a multi-pattern join.

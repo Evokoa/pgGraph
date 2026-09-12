@@ -171,6 +171,8 @@ pub(crate) struct PhysicalJoinPlan {
     pub(crate) distinct: bool,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
     pub(crate) predicate: Option<Predicate>,
+    /// Unique identity constraining the first mandatory pattern's source.
+    pub(crate) source_identity_lookup: Option<ValueExpr>,
     /// Sort keys in requested order.
     pub(crate) order_by: Vec<SortBinding>,
     /// Table OIDs requiring ACL checks before execution.

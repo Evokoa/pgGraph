@@ -508,6 +508,7 @@ fn execute_statement_governed(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
+                    params,
                     &context,
                 )
             })?;

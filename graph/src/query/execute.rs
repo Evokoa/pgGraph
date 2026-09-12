@@ -385,13 +385,20 @@ pub(crate) fn execute_join_governed(
 ) -> GraphResult<Vec<GqlRow>> {
     let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
     let context = coordinator.context(governor);
-    execute_join_in_context(engine, plan, tenant, &context)
+    execute_join_in_context(
+        engine,
+        plan,
+        tenant,
+        &crate::query::value::QueryParams::new(),
+        &context,
+    )
 }
 
 pub(crate) fn execute_join_in_context(
     engine: &Engine,
     plan: &PhysicalJoinPlan,
     tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
     context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
@@ -415,10 +422,22 @@ pub(crate) fn execute_join_in_context(
     )?
     .retain_until_governor_drop();
     let neighbors = GqlNeighbors::new(engine, context.visibility)?;
-    let state = JoinState {
+    let mut state = JoinState {
         node_slots: vec![None; plan.node_slots.len()],
         relationships: vec![None; plan.patterns.len()],
     };
+    if let (Some(pattern), Some(lookup)) =
+        (plan.patterns.first(), plan.source_identity_lookup.as_ref())
+    {
+        let table_oid = plan.node_slots[pattern.source_slot].table_oid;
+        let Some(source_idx) = resolve_source_identity(engine, table_oid, lookup, params, tenant)?
+        else {
+            return Ok(rows);
+        };
+        // The regular expansion admission still checks visibility, tenant,
+        // activity and transaction deletion before using this source.
+        state.node_slots[pattern.source_slot] = Some(source_idx);
+    }
     expand_join_pattern(
         engine,
         &neighbors,
@@ -1254,19 +1273,31 @@ fn read_source_nodes<'a>(
     // Identity is a physical seed constraint. Applying it only to expanded
     // rows lets unrelated sources consume the cap or survive OPTIONAL as
     // null-extended rows after their predicate rejects every target.
-    let source = crate::query::value::identity_lookup_text(lookup, params)?.and_then(|node_id| {
-        engine.resolve(plan.source_table_oid, &node_id).or_else(|| {
-            crate::projection::tx_delta::resolve_added_node(
-                plan.source_table_oid,
-                &node_id,
-                tenant,
-                engine.tenanted_table_oids.contains(&plan.source_table_oid),
-            )
-        })
-    });
+    let source = resolve_source_identity(engine, plan.source_table_oid, lookup, params, tenant)?;
     Ok(Box::new(source.into_iter().filter(move |&idx| {
         visibility.allows_node(idx) && tenant_allows_node(engine, idx, tenant)
     })))
+}
+
+fn resolve_source_identity(
+    engine: &Engine,
+    table_oid: u32,
+    lookup: &super::logical_plan::ValueExpr,
+    params: &crate::query::value::QueryParams,
+    tenant: Option<&str>,
+) -> GraphResult<Option<u32>> {
+    Ok(
+        crate::query::value::identity_lookup_text(lookup, params)?.and_then(|node_id| {
+            engine.resolve(table_oid, &node_id).or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    table_oid,
+                    &node_id,
+                    tenant,
+                    engine.tenanted_table_oids.contains(&table_oid),
+                )
+            })
+        }),
+    )
 }
 
 fn source_nodes<'a>(
