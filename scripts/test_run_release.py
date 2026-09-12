@@ -242,7 +242,7 @@ esac
 ''')
         return subprocess.run(
             ["bash", str(run_release.ROOT / "scripts/with_disposable_postgres.sh"),
-             "/bin/sh", "-c", 'if [ -n "$SIGNAL_NAME" ]; then kill -"$SIGNAL_NAME" "$PPID"; fi; exit "$COMMAND_CODE"'],
+             "/bin/sh", "-c", 'printf retained > "$PGDATA/client-evidence"; if [ -n "$SIGNAL_NAME" ]; then kill -"$SIGNAL_NAME" "$PPID"; fi; exit "$COMMAND_CODE"'],
             env={**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "TMPDIR": str(root),
                  "PG_CONFIG": str(tools / "pg_config"), "CALLS": str(root / "calls"),
                  "DATA_PATH": str(root / "data-path"), "STOP_CODE": str(stop_code),
@@ -250,8 +250,8 @@ esac
             capture_output=True, text=True, timeout=10,
         )
 
-    def test_failed_shutdown_preserves_data_and_original_failure(self) -> None:
-        for command_code, stop_code, expected, retained in ((0, 0, 0, False), (7, 0, 7, False),
+    def test_failed_gate_or_shutdown_preserves_data_and_original_failure(self) -> None:
+        for command_code, stop_code, expected, retained in ((0, 0, 0, False), (7, 0, 7, True),
                                                           (0, 1, 1, True), (7, 1, 7, True)):
             with self.subTest(command=command_code, stop=stop_code), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -263,6 +263,7 @@ esac
                 if retained:
                     self.assertIn("retained disposable cluster", result.stderr)
                     self.assertTrue((data / ".pggraph-disposable-cluster").is_file())
+                    self.assertEqual((data / "client-evidence").read_text(), "retained")
 
     def test_signal_cleanup_returns_nonzero_once(self) -> None:
         for name, expected in (("INT", 130), ("TERM", 143)):
@@ -272,15 +273,18 @@ esac
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = (root / "calls").read_text().splitlines()
                 self.assertEqual(sum(line.endswith("stop") for line in calls), 1)
-                self.assertFalse(Path((root / "data-path").read_text().strip()).exists())
+                data = Path((root / "data-path").read_text().strip())
+                self.assertEqual((data / "client-evidence").read_text(), "retained")
 
-    def test_failed_start_attempts_shutdown_and_retains_failed_stop(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            result = self.run_cleanup_fixture(root, start_code=5, stop_code=1)
-            self.assertEqual(result.returncode, 5, result.stderr)
-            self.assertTrue(Path((root / "data-path").read_text().strip()).exists())
-            self.assertTrue((root / "calls").read_text().splitlines()[-1].endswith("stop"))
+    def test_failed_start_attempts_shutdown_and_retains_data(self) -> None:
+        for stop_code in (0, 1):
+            with self.subTest(stop=stop_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = self.run_cleanup_fixture(root, start_code=5, stop_code=stop_code)
+                self.assertEqual(result.returncode, 5, result.stderr)
+                self.assertTrue(Path((root / "data-path").read_text().strip()).exists())
+                calls = (root / "calls").read_text().splitlines()
+                self.assertEqual(sum(line.endswith("stop") for line in calls), 1)
 
     def test_disposable_cluster_preserves_fsync_on_start_and_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

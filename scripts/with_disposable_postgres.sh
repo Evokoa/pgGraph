@@ -11,7 +11,8 @@ Usage:
 The wrapper derives PostgreSQL binaries from PG_CONFIG (or the selected
 PG_VERSION_FEATURE), creates a temporary trust-authenticated cluster and Unix
 socket, exports PGDATA/PGHOST/PGPORT/PGUSER/POSTGRES_CTL/POSTGRES_OPTS, and
-removes the cluster after the command exits. It is intended for destructive
+removes the cluster only when both the command and shutdown succeed. Failed
+runs retain the cluster for inspection. It is intended for destructive
 crash-recovery release gates; never point it at an existing data directory.
 USAGE
 }
@@ -84,6 +85,10 @@ cleanup() {
       if (( code == 0 )); then code=1; fi
       exit "$code"
     fi
+  fi
+  if (( code != 0 )); then
+    printf 'Gate failed; retained disposable cluster at %s\n' "$workdir" >&2
+    exit "$code"
   fi
   rm -rf "$workdir" || { if (( code == 0 )); then code=1; fi; }
   exit "$code"
