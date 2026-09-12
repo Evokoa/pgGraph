@@ -7,7 +7,7 @@ source "${PGGRAPH_ROOT}/scripts/lib/pggraph-common.sh"
 
 if [[ "${1:-}" == "--help" ]]; then
   cat <<'EOF'
-Usage: run_release_gate.sh [--tier pr|nightly|rc|full-matrix] [runner options]
+Usage: run_release_gate.sh [--tier pr|nightly|local-validation|rc|full-matrix] [runner options]
 
 With no arguments, runs the stable 1.x environment-variable interface.
 With --tier, delegates to scripts/run_release.py and writes JSON evidence.
@@ -140,7 +140,7 @@ if [[ "$RUN_PLAYGROUND" == "1" ]]; then
   PGGRAPH_PLAYGROUND_YES="${PGGRAPH_PLAYGROUND_YES:-1}" \
     PGGRAPH_REBUILD_IMAGE=1 \
     PGGRAPH_RECREATE_CONTAINER=1 \
-    ./tests/heavy/playground_release_gate.sh
+    ./tests/heavy/playground_release_gate.sh --all-modes
 fi
 
 if [[ "$RUN_PGBENCH" == "1" ]]; then

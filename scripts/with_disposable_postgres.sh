@@ -66,7 +66,8 @@ with socket.socket() as sock:
 PY
 )"
 pguser="${PGUSER:-pggraph}"
-postgres_opts="-F -k $socket_dir -p $port"
+# Retain PostgreSQL's durable flush behavior during process-crash tests.
+postgres_opts="-c fsync=on -k $socket_dir -p $port"
 token="$(python3 - <<'PY'
 import uuid
 print(uuid.uuid4())

@@ -286,7 +286,7 @@ def gate_environment(gate: dict) -> dict[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tier", choices=("pr", "nightly", "rc", "full-matrix"), default="pr")
+    parser.add_argument("--tier", choices=("pr", "nightly", "local-validation", "rc", "full-matrix"), default="pr")
     parser.add_argument("--evidence", type=Path, help="evidence manifest path")
     parser.add_argument("--resume", action="store_true", help="reuse passing gates with the same fingerprint")
     parser.add_argument("--list", action="store_true", help="list tiers and gates without running them")

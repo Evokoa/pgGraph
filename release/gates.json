@@ -12,8 +12,9 @@
   "tiers": {
     "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
     "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "rust-docs", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "v1-update-artifact-rollback", "release-bundle"],
-    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "postgres-sanitizer", "release-bundle"]
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "v1-update-artifact-rollback", "release-bundle"],
+    "local-validation": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "postgres-sanitizer"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "rls-evidence-gate", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "postgres-sanitizer", "release-bundle"]
   },
   "gates": {
     "script-contracts": {
@@ -87,6 +88,15 @@
       "depends_on": ["rust-static"],
       "thresholds": {"rustdoc_warnings": 0, "failed_doctests": 0},
       "exclusive_resources": ["cargo-target"]
+    },
+    "rls-evidence-gate": {
+      "command": ["../scripts/with_disposable_postgres.sh", "./tests/heavy/rls_large_table_gate_regression.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 300,
+      "environment": {"PG_VERSION_FEATURE": "pg17", "DBNAME": "pggraph_release_rls_gate"},
+      "depends_on": ["script-contracts"],
+      "thresholds": {"failed_regressions": 0},
+      "exclusive_resources": ["disposable-postgres-cluster", "postgres-port"]
     },
     "legacy-release": {
       "command": ["./tests/heavy/run_release_gate.sh"],

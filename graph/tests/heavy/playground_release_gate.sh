@@ -13,6 +13,18 @@ IMAGE_NAME="${PGGRAPH_IMAGE_NAME:-pggraph-postgres:17}"
 PLAYGROUND_DATASET="${PGGRAPH_PLAYGROUND_DATASET:-panama}"
 PLAYGROUND_MODE="${PGGRAPH_PLAYGROUND_MODE:-csr}"
 
+if [[ "${1:-}" == "--all-modes" ]]; then
+  shift
+  # Prepare each catalog's matching build mode. The second pass reuses the
+  # image and container created by the first pass.
+  PREPARE_PLAYGROUND=1 PGGRAPH_PLAYGROUND_MODE=csr \
+    bash "$0" "$@"
+  PREPARE_PLAYGROUND=1 PGGRAPH_PLAYGROUND_MODE=mutable \
+    PGGRAPH_REBUILD_IMAGE=0 PGGRAPH_RECREATE_CONTAINER=0 \
+    bash "$0" "$@"
+  exit 0
+fi
+
 case "${PLAYGROUND_MODE}" in
   csr|csr_readonly)
     PLAYGROUND_MODE="csr"

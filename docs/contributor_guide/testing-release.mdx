@@ -380,6 +380,10 @@ PG_VERSION_FEATURE=pg17 SOURCE_DB=pggraph_backup_src RESTORE_DB=pggraph_backup_d
 ./tests/heavy/run_pg_upgrade_matrix.sh
 ```
 
+Docker smoke requires a fresh `CONTAINER` name and checks exact search and
+traversal results. Its published port binds to loopback. Set `PG_PORT` to use
+a port other than the default `55432` when the sandbox is already running.
+
 Worker and memory sizing checks:
 
 ```bash
@@ -483,6 +487,7 @@ expected hashes.
 cd graph
 ./tests/heavy/playground_release_gate.sh
 PGGRAPH_PLAYGROUND_MODE=mutable ./tests/heavy/playground_release_gate.sh
+./tests/heavy/playground_release_gate.sh --all-modes
 ```
 
 By default the script uses the sandbox Docker container and PostgreSQL port
@@ -494,6 +499,9 @@ validating an already-prepared playground database. Set
 the first Panama dataset download. The aggregate `run_release_gate.sh` is
 non-interactive and sets this approval for its playground stage; run that gate
 only where downloading and unpacking the documented dataset is acceptable.
+The aggregate runs `--all-modes`, which prepares CSR and mutable projections
+separately and checks both catalogs. This option always prepares both modes,
+reusing the first pass's image and container for the second pass.
 
 ## Release Gate
 
@@ -530,6 +538,34 @@ combined log and artifact digest:
 python3 scripts/run_release.py --tier rc
 ```
 
+For all local validation checks without assembling a release bundle, run:
+
+```bash
+python3 scripts/run_release.py --tier local-validation --evidence /tmp/pggraph-local-validation.json
+```
+
+The `local-validation` tier runs the full matrix's installation, packaging,
+supported-major, upgrade, crash, resource, and sanitizer checks. It omits only
+`release-bundle`. RC, full-matrix, and local-validation also run the small RLS
+evidence acceptance regression in a disposable cluster. That regression checks
+the acceptance SQL, not large-table performance.
+
+Retained large-table RLS qualification remains an explicit additional run.
+For example, after installing the candidate with `development` features into a
+disposable PostgreSQL installation, run from `graph/` with its connection set:
+
+```bash
+SKIP_INSTALL=1 PG_VERSION_FEATURE=pg17 RUN_PROFILE=p5_release \
+  DBNAME=pggraph_p5_qualification NODE_COUNT=1000000 COMPOSITE_COUNT=1000000 \
+  SAMPLES=10 WARMUPS=3 OUTPUT_DIR=/tmp/pggraph-p5-qualification \
+  ./tests/heavy/rls_large_table_baseline.sh
+```
+
+Use fresh database and output names. The runner retains its database and role.
+The 10-million-row profile requires a separate explicit invocation with both
+counts set to `10000000`; no default tier runs it. Report any qualification
+scale that was not run separately from a passing local-validation tier.
+
 Use the named tier for reproducible release evidence. When diagnosing the
 historical aggregate command, run it through the same disposable-cluster
 wrapper:
@@ -547,7 +583,10 @@ PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release \
 Run crash gates only through the disposable wrapper because they kill and
 restart the postmaster. The wrapper creates a private data directory and socket;
 the fixture verifies a per-run sentinel, the connected server's data directory,
-and the postmaster command immediately before termination:
+and the postmaster command immediately before termination.
+
+The wrapper starts PostgreSQL with `fsync=on` and preserves that setting in
+restart options. These gates exercise process-crash recovery, not power loss.
 
 ```bash
 cd graph
