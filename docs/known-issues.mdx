@@ -118,6 +118,21 @@ PostgreSQL [removed SQL/PGQ from its PostgreSQL 19 release branch](https://githu
 on September 7, 2026. Future native integration has no committed target major;
 see the [Roadmap](./roadmap).
 
+### GQL property filters can reach the candidate cap before filtering
+
+GQL execution has a fixed 10,000-row candidate cap. A property-filtered node
+scan can reach this cap before evaluating its residual `WHERE` predicate,
+even when the final result would be small. Increasing `graph.max_nodes` or
+`graph.query_memory_mb` does not raise this cap. Queries that would need more
+candidates fail with SQLSTATE `22000` and diagnostic `PG017`; they do not
+silently return a filtered prefix.
+
+A supported primary-key equality can seed a node scan or the first mandatory
+source of a multi-pattern join before expansion. For broader property searches,
+use PostgreSQL source queries to select a bounded set of keys, then issue
+identity-seeded graph reads. Registered filter columns do not imply general
+GQL predicate pushdown.
+
 ## Resource Scope
 
 ### Limits are per operation and backend, not a cluster-wide memory quota

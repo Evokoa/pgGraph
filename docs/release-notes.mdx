@@ -40,6 +40,12 @@ publication. PostgreSQL 14 through 18 remain the supported target matrix.
 - Dotted JSONB property registration preserves INSERT, UPDATE, and mapped GQL
   writes. Invalid filter columns and incompatible types report input errors
   instead of internal-bug diagnostics.
+- Literal dotted source-column names, including a `label_column` named
+  `rel.type`, remain SQL identifiers in generated sync triggers.
+- Mandatory multi-pattern GQL joins apply a supported primary-key equality on
+  their first source before expansion. Unrelated graph rows no longer exhaust
+  that seeded expansion's cap. Residual predicates and the candidate cap remain
+  enforced; broader property scans retain their documented limits.
 - Artifacts are isolated by database and validated against registered catalog
   identities. Default graphs cannot adopt another database's files.
 - Graph generations publish through PostgreSQL transactions. Transaction and
@@ -90,8 +96,9 @@ package, then rebuild its derived graph state.
 Regression coverage includes the four reported adapter issues, caller-scoped
 RLS, snapshot and rollback behavior, commit-order replay, endpoint validation,
 and Linux snapshot lifetime. The small RLS runner regression validates its
-acceptance gate and refuses existing fixture databases and roles. It does not
-replace the outstanding 1M/10M selective-RLS evidence. Candidate release gates
+acceptance gate and refuses existing fixture databases and roles. Retained
+exact-result and 1M selective-RLS evidence cover their stated profiles; the
+separate 10M qualification remains outstanding. Candidate release gates
 remain in progress; these notes do not certify published packages or universal
 performance guarantees.
 
