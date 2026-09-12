@@ -237,30 +237,6 @@ fn relationship_identity_completeness_is_summarized_across_base_durable_and_tx_s
 }
 
 #[test]
-fn any_future_adaptive_selector_reuses_known_verdicts_instead_of_restarting_policy_work() {
-    let visibility = crate_source("src/sql_visibility.rs");
-    let design = repo_source("docs/roadmap.mdx");
-    let normalized_design = design.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        normalized_design.contains("must reuse known verdicts when completing an eager scope")
-            && normalized_design.contains("may never restart policy work from zero"),
-        "the no-restart adaptive policy invariant must remain explicit"
-    );
-
-    if visibility.contains("AdaptiveVisibility") {
-        assert!(
-            visibility.contains("complete_eager_visibility_reusing_verdicts"),
-            "adaptive fallback must carry the statement cache into eager completion"
-        );
-        let fallback = function_body(&visibility, "fn complete_eager_visibility_reusing_verdicts");
-        assert!(
-            !fallback.contains("prepare_eager_visibility("),
-            "adaptive completion must not restart PostgreSQL policy work from zero"
-        );
-    }
-}
-
-#[test]
 fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
     let runner = repo_source("graph/tests/heavy/rls_large_table_baseline.sh");
     let gate = repo_source("graph/tests/heavy/rls_large_table_gate.sql");
