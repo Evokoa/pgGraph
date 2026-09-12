@@ -61,6 +61,7 @@ RUN --mount=type=cache,target=/var/cache/pggraph-sfw \
     && echo "${sfw_sha256}  ${sfw_path}" | sha256sum --check --strict \
     && install -m 0755 "${sfw_path}" /usr/local/bin/sfw
 
+ARG CARGO_HTTP_TIMEOUT=120
 RUN sfw cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
 
 WORKDIR /src/graph
