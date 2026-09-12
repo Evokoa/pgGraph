@@ -41,7 +41,11 @@ fn integer_hydration_json(statement: &str) -> serde_json::Value {
 fn integer_hydration_preserves_rls_and_effective_definer_role() {
     build_integer_hydration_fixture();
     Spi::run(
-        "ALTER TABLE public.graph_integer_nodes_pgtest ENABLE ROW LEVEL SECURITY;
+        "ALTER TABLE public.graph_integer_edges_pgtest
+             ADD FOREIGN KEY (src) REFERENCES public.graph_integer_nodes_pgtest(id),
+             ADD FOREIGN KEY (dst) REFERENCES public.graph_integer_nodes_pgtest(id);
+         SELECT * FROM graph.build();
+         ALTER TABLE public.graph_integer_nodes_pgtest ENABLE ROW LEVEL SECURITY;
          ALTER TABLE public.graph_integer_edges_pgtest ENABLE ROW LEVEL SECURITY;
          CREATE POLICY integer_nodes_visible ON public.graph_integer_nodes_pgtest
              USING (id <= 2);
