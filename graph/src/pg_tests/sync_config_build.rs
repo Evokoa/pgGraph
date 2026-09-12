@@ -56,6 +56,78 @@ fn trigger_sync_adds_edge_overlay_after_explicit_apply_sync() {
 }
 
 #[pg_test]
+fn trigger_sync_preserves_dotted_label_columns_and_json_property_paths() {
+    reset_and_create_fixtures();
+    Spi::run(
+        r#"ALTER TABLE public.graph_test_friendships_pgtest
+               ADD COLUMN "rel.type" text NOT NULL DEFAULT 'base';
+           ALTER TABLE public.graph_test_users_pgtest
+               ADD COLUMN rel jsonb NOT NULL DEFAULT '{"type": 0}',
+               ADD COLUMN "rel.type" text NOT NULL DEFAULT 'literal-node-value';
+           SELECT graph.add_table(
+               'graph_test_users_pgtest'::regclass,
+               id_column := 'id', columns := ARRAY['rel.type']);
+           SELECT graph.add_edge(
+               'graph_test_friendships_pgtest'::regclass, 'user_id',
+               'graph_test_users_pgtest'::regclass, 'friend_id',
+               'fallback', bidirectional := false, label_column := 'rel.type');
+           SET graph.sync_mode = 'trigger';
+           SELECT * FROM graph.build()"#,
+    )
+    .expect("build dotted label and JSON property fixture failed");
+
+    for (write_sql, operation, expected_label, expected_property) in [
+        (
+            r#"INSERT INTO public.graph_test_users_pgtest (id, name, rel)
+                   VALUES ('dotted-node', 'Dotted', '{"type": 7}');
+               INSERT INTO public.graph_test_friendships_pgtest
+                   (id, user_id, friend_id, "rel.type")
+                   VALUES ('dotted-edge', 'dotted-node', 'u1', 'inserted.kind')"#,
+            "I",
+            "inserted.kind",
+            "7",
+        ),
+        (
+            r#"UPDATE public.graph_test_users_pgtest SET rel = '{"type": 9}'
+                   WHERE id = 'dotted-node';
+               UPDATE public.graph_test_friendships_pgtest SET "rel.type" = 'updated.kind'
+                   WHERE id = 'dotted-edge'"#,
+            "U",
+            "updated.kind",
+            "9",
+        ),
+    ] {
+        Spi::run(write_sql).expect("write dotted label and JSON property failed");
+        let label_property = Spi::get_one::<String>(&format!(
+            "SELECT properties->>'rel.type' FROM graph._sync_log
+             WHERE table_oid = 'graph_test_friendships_pgtest'::regclass
+               AND pk = 'dotted-edge' AND op = '{operation}'
+             ORDER BY id DESC LIMIT 1"
+        ))
+        .expect("read literal label capture failed");
+        assert_eq!(label_property.as_deref(), Some(expected_label));
+        let node_property = Spi::get_one::<String>(&format!(
+            "SELECT properties->>'rel.type' FROM graph._sync_log
+             WHERE table_oid = 'graph_test_users_pgtest'::regclass
+               AND pk = 'dotted-node' AND op = '{operation}'
+             ORDER BY id DESC LIMIT 1"
+        ))
+        .expect("read JSON property capture failed");
+        assert_eq!(node_property.as_deref(), Some(expected_property));
+
+        Spi::run("SELECT * FROM graph.apply_sync()").expect("apply dotted label sync failed");
+        let actual_paths = Spi::get_one::<String>(
+            "SELECT string_agg(node_id || ':' || (edge_path->>0), ',' ORDER BY node_id)
+             FROM graph.traverse('graph_test_users_pgtest'::regclass, 'dotted-node', 1,
+                                direction := 'out', hydrate := false)
+             WHERE depth = 1",
+        )
+        .expect("traverse synced dotted label failed");
+        assert_eq!(actual_paths, Some(format!("u1:{expected_label}")));
+    }
+}
+
+#[pg_test]
 fn sync_mode_trigger_installs_and_manual_removes_graph_triggers() {
     reset_and_create_fixtures();
     Spi::run(

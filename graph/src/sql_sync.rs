@@ -118,21 +118,31 @@ pub(crate) fn current_sync_mode() -> safety::GraphResult<config::SyncMode> {
 
 pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
     let (tables, edges, filter_columns) = read_catalog()?;
-    let mut trigger_specs =
-        std::collections::BTreeMap::<u32, (builder::PrimaryKeySpec, Vec<String>)>::new();
+    let mut trigger_specs = std::collections::BTreeMap::<
+        u32,
+        (builder::PrimaryKeySpec, Vec<sync::TriggerColumn>),
+    >::new();
     for table in &tables {
-        let mut columns = table.columns.to_vec();
+        let mut columns: Vec<_> = table
+            .columns
+            .iter()
+            .cloned()
+            .map(sync::TriggerColumn::Property)
+            .collect();
         for filter in filter_columns
             .iter()
             .filter(|filter| filter.table_oid == table.table_oid)
         {
-            if !columns.iter().any(|column| column == &filter.column_name) {
-                columns.push(filter.column_name.clone());
+            if !columns
+                .iter()
+                .any(|column| column.name() == filter.column_name)
+            {
+                columns.push(sync::TriggerColumn::Property(filter.column_name.clone()));
             }
         }
         if let Some(tenant_column) = &table.tenant_column {
-            if !columns.iter().any(|column| column == tenant_column) {
-                columns.push(tenant_column.clone());
+            if !columns.iter().any(|column| column.name() == tenant_column) {
+                columns.push(sync::TriggerColumn::SourceColumn(tenant_column.clone()));
             }
         }
         trigger_specs.insert(table.table_oid, (table.id_columns.clone(), columns));
@@ -152,8 +162,8 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
             .chain(edge.weight_column.iter())
             .chain(edge.label_column.iter())
         {
-            if !columns.iter().any(|existing| existing == column) {
-                columns.push(column.clone());
+            if !columns.iter().any(|existing| existing.name() == column) {
+                columns.push(sync::TriggerColumn::SourceColumn(column.clone()));
             }
         }
     }

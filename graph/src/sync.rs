@@ -239,15 +239,29 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
     Ok(tombstoned)
 }
 
+/// Registered properties permit JSON paths; source columns are exact SQL names.
+pub(crate) enum TriggerColumn {
+    Property(String),
+    SourceColumn(String),
+}
+
+impl TriggerColumn {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Property(name) | Self::SourceColumn(name) => name,
+        }
+    }
+}
+
 /// Generate the SQL for creating trigger functions on a registered table.
 ///
 /// For composite PKs, the PK expression uses
 /// `jsonb_build_array(NEW."col1"::text, NEW."col2"::text)::text` to produce
 /// a JSON array string matching the builder's format.
-pub fn generate_trigger_sql(
+pub(crate) fn generate_trigger_sql(
     qt: &QualifiedTable,
     primary_key: &PrimaryKeySpec,
-    columns: &[String],
+    columns: &[TriggerColumn],
 ) -> String {
     let table_sql = qualified_table_sql(qt);
     let trigger_fn_name = format!("_sync_{}", qt.oid);
@@ -255,7 +269,11 @@ pub fn generate_trigger_sql(
     let key_val_pairs_new = columns
         .iter()
         .map(|column| {
-            let value = match column.split_once('.') {
+            let path = match column {
+                TriggerColumn::Property(name) => name.split_once('.'),
+                TriggerColumn::SourceColumn(_) => None,
+            };
+            let value = match path {
                 Some((base, path)) => {
                     let mut expression = format!("NEW.{}", quote_ident(base));
                     for key in path.split('.') {
@@ -264,9 +282,9 @@ pub fn generate_trigger_sql(
                     }
                     format!("({expression})::text")
                 }
-                None => format!("NEW.{}::text", quote_ident(column)),
+                None => format!("NEW.{}::text", quote_ident(column.name())),
             };
-            format!("{}, {value}", quote_literal(column))
+            format!("{}, {value}", quote_literal(column.name()))
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -419,7 +437,10 @@ mod tests {
         let sql = generate_trigger_sql(
             &qt,
             &primary_key,
-            &["Display Name".to_string(), "order".to_string()],
+            &[
+                TriggerColumn::SourceColumn("Display Name".into()),
+                TriggerColumn::Property("order".into()),
+            ],
         );
 
         assert!(sql.contains(r#""Weird Schema"."select""#));
@@ -440,7 +461,10 @@ mod tests {
         let sql = generate_trigger_sql(
             &qt,
             &PrimaryKeySpec::from_columns(vec!["id".into()]),
-            &["props.w".into(), "Profile.details.owner's name".into()],
+            &[
+                TriggerColumn::Property("props.w".into()),
+                TriggerColumn::Property("Profile.details.owner's name".into()),
+            ],
         );
 
         assert!(sql.contains(r#"'props.w', (NEW."props" -> 'w')::text"#));
@@ -448,6 +472,31 @@ mod tests {
             r#"'Profile.details.owner''s name', (NEW."Profile" -> 'details' -> 'owner''s name')::text"#
         ));
         assert!(!sql.contains(r#"NEW."props.w""#));
+    }
+
+    #[test]
+    fn generate_trigger_sql_distinguishes_dotted_source_columns_from_properties() {
+        let qt = QualifiedTable {
+            oid: 42,
+            schema: "public".into(),
+            name: "relationships".into(),
+        };
+        let primary_key = PrimaryKeySpec::from_columns(vec!["id".into()]);
+        let source_sql = generate_trigger_sql(
+            &qt,
+            &primary_key,
+            &[TriggerColumn::SourceColumn("rel.type".into())],
+        );
+        assert!(source_sql.contains(r#"'rel.type', NEW."rel.type"::text"#));
+        assert!(!source_sql.contains(r#"NEW."rel" -> 'type'"#));
+
+        let property_sql = generate_trigger_sql(
+            &qt,
+            &primary_key,
+            &[TriggerColumn::Property("rel.type".into())],
+        );
+        assert!(property_sql.contains(r#"'rel.type', (NEW."rel" -> 'type')::text"#));
+        assert!(!property_sql.contains(r#"NEW."rel.type""#));
     }
 
     // ─── INSERT ───
@@ -769,7 +818,10 @@ mod tests {
         let sql = generate_trigger_sql(
             &qt,
             &primary_key,
-            &["name".to_string(), "email".to_string()],
+            &[
+                TriggerColumn::Property("name".into()),
+                TriggerColumn::Property("email".into()),
+            ],
         );
         assert!(
             sql.contains("\"public\".\"users\""),
