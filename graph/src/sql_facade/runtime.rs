@@ -695,6 +695,8 @@ fn load_selected_graph_from_disk(
                 }
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
+                let stamp = crate::sql_sync::prepare_backend_replay()?;
+                crate::sql_sync::mark_backend_replay(stamp);
                 *e.borrow_mut() = loaded_engine;
                 crate::runtime_state::mark_loaded_graph(graph);
                 pgrx::log!(

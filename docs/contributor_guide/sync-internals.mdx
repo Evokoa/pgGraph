@@ -38,9 +38,16 @@ causes `55P03` (`PG006`) without advancing replay; retry after it commits.
 Offline builds retain their separate coherent-source transaction locks.
 
 READ COMMITTED captures a new snapshot after fencing. REPEATABLE READ and
-SERIALIZABLE keep snapshot-local replay only: cached replay is discarded on
-entry and exit so imported snapshots cannot inherit newer overlay rows. Durable
-publication still requires READ COMMITTED and rejects uncommitted source rows.
+SERIALIZABLE can reuse a resident base only when its last build or replay has a
+confirmed committed top-level transaction ID visible in their snapshot. Unknown
+or invisible provenance discards the cache, so imported older snapshots cannot
+inherit newer rows. Mapped transaction-overlay writes can retain that unchanged
+base across transaction end. Base loading or replay within a fixed snapshot is
+discarded at transaction end: sequence IDs can have invisible lower entries even
+after a higher entry becomes visible. Aborted base changes, including savepoint
+rollback and prepared transactions, cannot establish committed cache provenance.
+Durable publication still requires READ COMMITTED and rejects uncommitted source
+rows.
 
 Bootstrap and sync schema helpers create:
 

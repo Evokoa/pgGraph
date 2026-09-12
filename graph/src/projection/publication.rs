@@ -102,7 +102,8 @@ pub(crate) fn publish(
     require_publication_snapshot()?;
     let graph_id = require_selected_root(root)?;
     let caller_oid = crate::catalog::current_role_oid()?;
-    crate::sql_sync::mark_backend_replay();
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     let published = with_pending_publication(
         PendingPublication {
             caller_oid,
@@ -220,7 +221,8 @@ pub(crate) fn historical_generations_required(root: &Path) -> GraphResult<bool> 
 /// Clear publication after the caller authorizes and locks graph administration.
 /// Immutable files remain available to transactions that still see the old head.
 pub(crate) fn clear_direct(graph_id: &str) -> GraphResult<()> {
-    crate::sql_sync::mark_backend_replay();
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     Spi::run_with_args(
         "DELETE FROM graph._projection_heads WHERE graph_id = $1::uuid",
         &[graph_id.into()],

@@ -65,6 +65,7 @@ Module-local Rust tests cover:
 | `types.rs` | parser helpers and filter operation boundaries |
 | `config.rs` | GUC parser fallbacks |
 | `safety.rs` | SQLSTATE mapping |
+| `sql_sync.rs` | committed cache provenance, fixed-snapshot replay disposal, and transaction/savepoint lifecycle |
 
 ## pgrx SQL Tests
 
@@ -119,6 +120,21 @@ runner remains a separate PG17 stress gate so the release matrix stays bounded.
 
 See [SQL Tests](./sql-tests) for the full SQL test inventory and the boundary
 each layer is meant to cover.
+
+After installing production features in a disposable PostgreSQL cluster, run
+the resident-cache snapshot regressions with its `PGHOST`, `PGPORT`, and `PGUSER`:
+
+```bash
+python3 graph/tests/heavy/cache_provenance.py
+```
+
+The script creates fresh fixture databases and retains them. It checks imported
+snapshots before build and replay, out-of-order sync-log commits, overlay-only
+fixed-snapshot transactions, and aborted base changes. Add `--prepared` when the
+test cluster has `max_prepared_transactions > 0` to require both prepared commit
+and prepared rollback coverage. Run `gql_isolation_matrix.sh` separately for the
+full mapped-write profile under all three isolation levels; `FULL_PROFILE=true`
+also selects those assertions when `PERSIST_ON_BUILD=on`.
 
 ### Provision pgrx Test PostgreSQL
 

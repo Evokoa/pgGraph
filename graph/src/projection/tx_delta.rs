@@ -1214,10 +1214,14 @@ unsafe extern "C-unwind" fn xact_callback(
             | XactEvent::XACT_EVENT_PARALLEL_COMMIT
             | XactEvent::XACT_EVENT_PARALLEL_ABORT
     ) {
-        crate::sql_sync::finish_replay_transaction(matches!(
-            event,
-            XactEvent::XACT_EVENT_ABORT | XactEvent::XACT_EVENT_PARALLEL_ABORT
-        ));
+        let outcome = match event {
+            XactEvent::XACT_EVENT_PREPARE => crate::sql_sync::ReplayTransactionOutcome::Prepare,
+            XactEvent::XACT_EVENT_ABORT | XactEvent::XACT_EVENT_PARALLEL_ABORT => {
+                crate::sql_sync::ReplayTransactionOutcome::Abort
+            }
+            _ => crate::sql_sync::ReplayTransactionOutcome::Commit,
+        };
+        crate::sql_sync::finish_replay_transaction(outcome);
         clear_current_transaction_state();
     }
 }

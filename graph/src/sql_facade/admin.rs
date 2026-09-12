@@ -486,7 +486,8 @@ fn drop_graph(
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let metadata = catalog::drop_graph_metadata(graph_name, tenant, namespace)
             .unwrap_or_else(|err| err.report());
-        crate::sql_sync::mark_backend_replay();
+        let stamp = crate::sql_sync::prepare_backend_replay().unwrap_or_else(|err| err.report());
+        crate::sql_sync::mark_backend_replay(stamp);
         graph_metadata_iterator(vec![metadata])
     })
 }
@@ -1963,6 +1964,8 @@ fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::Gr
     let loaded = crate::persistence::load_graph_file_with_residency(path, resident)?;
     let (tables, edges, filters) = read_catalog()?;
     loaded.validate_catalog_fingerprint(Some(catalog_fingerprint(&tables, &edges, &filters)?))?;
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });

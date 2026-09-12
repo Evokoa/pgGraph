@@ -63,7 +63,7 @@ beside it in the crate tree.
 | `discover.rs` | Schema/FK discovery |
 | `sync.rs` | Trigger SQL generation and sync table creation |
 | `sync_capture.rs` | Short writer fencing and explicit snapshot capture for replay |
-| `sql_sync.rs` | Durable sync log reading and apply logic |
+| `sql_sync.rs` | Durable sync log reading, apply logic, and resident-cache transaction provenance |
 | `sql_build.rs` | Build/vacuum orchestration and locks |
 | `sql_jobs.rs` | Durable background build/maintenance jobs and hosted job helpers |
 | `sql_search.rs` | Source-table search SQL and match verification |

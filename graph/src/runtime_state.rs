@@ -89,6 +89,7 @@ pub(crate) fn touch_loaded_graph(graph_id: &str) {
 }
 
 pub(crate) fn clear_loaded_graph() {
+    crate::sql_sync::clear_cache_provenance();
     LOADED_GRAPH_SLOT.with(|slot| {
         *slot.borrow_mut() = None;
     });

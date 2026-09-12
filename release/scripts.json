@@ -199,6 +199,34 @@
       "decision": "keep"
     },
     {
+      "path": "graph/tests/heavy/cache_provenance.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "python3",
+        "psql",
+        "createdb"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
       "path": "graph/tests/heavy/catalog_provenance.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -3273,6 +3301,31 @@
         "exit status"
       ],
       "destructive": true,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/tests/test_runtime_gate_profiles.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
       "timeout_seconds": 600,
       "platforms": [
         "Linux",

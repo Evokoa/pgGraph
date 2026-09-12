@@ -525,6 +525,8 @@ fn execute_build_inner(
     let build_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     let memory_used_mb = new_engine.estimated_memory_used_mb();
 
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     ENGINE.with(|e| {
         *e.borrow_mut() = new_engine;
     });
@@ -686,6 +688,8 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
 
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     ENGINE.with(|e| {
         *e.borrow_mut() = new_engine;
     });

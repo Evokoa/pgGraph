@@ -48,6 +48,7 @@ LINUX_ONLY = {
     "graph/tests/heavy/run_open_type_query_resource_matrix.sh",
 }
 TOOL_OVERRIDES = {
+    "graph/tests/heavy/cache_provenance.py": ["python3", "psql", "createdb"],
     "graph/tests/heavy/build_endpoint_identity.sh": ["bash", "psql", "createdb"],
     "graph/tests/heavy/catalog_provenance.sh": ["bash", "psql", "createdb"],
     "graph/tests/heavy/generation_transactions.py": ["python3", "psql", "createdb"],

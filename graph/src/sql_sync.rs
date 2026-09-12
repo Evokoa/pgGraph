@@ -28,29 +28,155 @@ use xxhash_rust::xxh3::xxh3_64;
 thread_local! {
     static REPLAYED_SUBTRANSACTIONS: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     static REPLAY_ABORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static FIXED_SNAPSHOT_ENTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CACHE_PROVENANCE: std::cell::Cell<CacheProvenance> = const { std::cell::Cell::new(CacheProvenance::new()) };
+    static REPLAY_TRANSACTION_STAMP: std::cell::Cell<Option<ReplayTransactionStamp>> = const { std::cell::Cell::new(None) };
 }
 
-pub(crate) fn mark_backend_replay() {
+/// Full top-level XID, when already assigned. Missing provenance never licenses reuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReplayTransactionStamp(Option<std::num::NonZeroU64>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheStamp {
+    Unknown,
+    Pending(ReplayTransactionStamp),
+    Committed(std::num::NonZeroU64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixedSnapshotCache {
+    NotEntered,
+    Preserved,
+    Changed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayTransactionOutcome {
+    Commit,
+    Abort,
+    Prepare,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheProvenance {
+    stamp: CacheStamp,
+    fixed: FixedSnapshotCache,
+}
+
+impl CacheProvenance {
+    const fn new() -> Self {
+        Self {
+            stamp: CacheStamp::Unknown,
+            fixed: FixedSnapshotCache::NotEntered,
+        }
+    }
+
+    fn mark_mutation(&mut self, stamp: ReplayTransactionStamp) {
+        self.stamp = CacheStamp::Pending(stamp);
+        if self.fixed != FixedSnapshotCache::NotEntered {
+            self.fixed = FixedSnapshotCache::Changed;
+        }
+    }
+
+    fn fixed_snapshot_candidate(&mut self) -> Option<std::num::NonZeroU64> {
+        // Until PostgreSQL verifies visibility, both errors and a negative
+        // result must leave the cache unusable beyond the current transaction.
+        self.fixed = FixedSnapshotCache::Changed;
+        match self.stamp {
+            CacheStamp::Committed(xid) => Some(xid),
+            CacheStamp::Unknown | CacheStamp::Pending(_) => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.stamp = CacheStamp::Unknown;
+        if self.fixed != FixedSnapshotCache::NotEntered {
+            self.fixed = FixedSnapshotCache::Changed;
+        }
+    }
+
+    fn finish(&mut self, outcome: ReplayTransactionOutcome, invalidated: bool) -> bool {
+        // A fixed snapshot may skip an invisible lower sync ID while replaying a
+        // higher one. Its scalar watermark must never escape that transaction.
+        let discard = invalidated
+            || self.fixed == FixedSnapshotCache::Changed
+            || (outcome != ReplayTransactionOutcome::Commit
+                && matches!(self.stamp, CacheStamp::Pending(_)));
+        self.stamp = if discard {
+            CacheStamp::Unknown
+        } else {
+            match self.stamp {
+                CacheStamp::Pending(ReplayTransactionStamp(Some(xid))) => {
+                    CacheStamp::Committed(xid)
+                }
+                CacheStamp::Pending(ReplayTransactionStamp(None)) => CacheStamp::Unknown,
+                other => other,
+            }
+        };
+        self.fixed = FixedSnapshotCache::NotEntered;
+        discard
+    }
+}
+
+/// Capture once per transaction, outside all ENGINE and thread-local borrows.
+pub(crate) fn prepare_backend_replay() -> safety::GraphResult<ReplayTransactionStamp> {
+    if let Some(stamp) = REPLAY_TRANSACTION_STAMP.get() {
+        return Ok(stamp);
+    }
+    #[cfg(not(test))]
+    let xid = crate::sql_visibility::postgres_error_as_rust_unwind(|| {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT pg_catalog.pg_current_xact_id_if_assigned()::pg_catalog.text",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<String>(1)
+        })
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("cache transaction provenance failed: {error}"))
+    })?
+    .map(|value| {
+        value.parse::<std::num::NonZeroU64>().map_err(|error| {
+            safety::GraphError::Internal(format!("invalid cache transaction provenance: {error}"))
+        })
+    })
+    .transpose()?;
+    #[cfg(test)]
+    let xid = None;
+    let stamp = ReplayTransactionStamp(xid);
+    REPLAY_TRANSACTION_STAMP.set(Some(stamp));
+    Ok(stamp)
+}
+
+/// Mark before changing the resident base. This performs no SPI.
+pub(crate) fn mark_backend_replay(stamp: ReplayTransactionStamp) {
     let depth = crate::projection::tx_delta::subtransaction_depth() as usize;
     REPLAYED_SUBTRANSACTIONS.with(|levels| {
         let mut levels = levels.borrow_mut();
         levels.resize(depth + 1, false);
         levels[depth] = true;
     });
+    let mut provenance = CACHE_PROVENANCE.get();
+    provenance.mark_mutation(stamp);
+    CACHE_PROVENANCE.set(provenance);
 }
 
-pub(crate) fn finish_replay_transaction(aborted: bool) {
-    if FIXED_SNAPSHOT_ENTERED.replace(false) {
-        REPLAY_ABORTED.set(true);
-    }
+pub(crate) fn finish_replay_transaction(outcome: ReplayTransactionOutcome) {
     REPLAYED_SUBTRANSACTIONS.with(|levels| {
         let mut levels = levels.borrow_mut();
-        if aborted && levels.iter().any(|dirty| *dirty) {
+        if outcome != ReplayTransactionOutcome::Commit && levels.iter().any(|dirty| *dirty) {
             REPLAY_ABORTED.set(true);
         }
         levels.clear();
     });
+    let mut provenance = CACHE_PROVENANCE.get();
+    REPLAY_ABORTED.set(provenance.finish(outcome, REPLAY_ABORTED.get()));
+    CACHE_PROVENANCE.set(provenance);
+    REPLAY_TRANSACTION_STAMP.set(None);
 }
 
 pub(crate) fn finish_replay_subtransaction(depth: u32, aborted: bool) {
@@ -68,13 +194,60 @@ pub(crate) fn finish_replay_subtransaction(depth: u32, aborted: bool) {
     });
 }
 
+pub(crate) fn clear_cache_provenance() {
+    let mut provenance = CACHE_PROVENANCE.get();
+    provenance.clear();
+    CACHE_PROVENANCE.set(provenance);
+}
+
+fn enter_fixed_snapshot() -> safety::GraphResult<()> {
+    let mut provenance = CACHE_PROVENANCE.get();
+    if provenance.fixed != FixedSnapshotCache::NotEntered {
+        return Ok(());
+    }
+    // Failed or canceled visibility checks must not leave an accepted cache.
+    let candidate = provenance.fixed_snapshot_candidate();
+    CACHE_PROVENANCE.set(provenance);
+    let previously_invalidated = REPLAY_ABORTED.replace(true);
+    let Some(xid) = candidate else {
+        return Ok(());
+    };
+    if previously_invalidated {
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    let visible = crate::sql_visibility::postgres_error_as_rust_unwind(|| {
+        Spi::connect(|client| {
+            client.select(
+                "SELECT pg_catalog.pg_visible_in_snapshot($1::pg_catalog.xid8, pg_catalog.pg_current_snapshot())",
+                None, &[xid.to_string().into()],
+            )?.first().get::<bool>(1)
+        })
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("cache snapshot provenance failed: {error}"))
+    })?
+    .ok_or_else(|| {
+        safety::GraphError::Internal("cache snapshot provenance returned NULL".into())
+    })?;
+    #[cfg(test)]
+    let visible = {
+        let _ = xid;
+        false
+    };
+    if visible {
+        provenance.fixed = FixedSnapshotCache::Preserved;
+        CACHE_PROVENANCE.set(provenance);
+        REPLAY_ABORTED.set(false);
+    }
+    Ok(())
+}
+
 /// Discard replayed source rows only after PostgreSQL has finished aborting.
 /// Transaction callbacks set a flag without borrowing an engine or calling SPI.
 pub(crate) fn recover_aborted_replay() -> safety::GraphResult<()> {
-    if crate::projection::publication::uses_fixed_snapshot()
-        && !FIXED_SNAPSHOT_ENTERED.replace(true)
-    {
-        REPLAY_ABORTED.set(true);
+    if crate::projection::publication::uses_fixed_snapshot() {
+        enter_fixed_snapshot()?;
     }
     if REPLAY_ABORTED.get() {
         crate::projection::tx_delta::ensure_engine_replacement_allowed("sync rollback recovery")?;
@@ -965,6 +1138,8 @@ fn install_loaded_engine_for_selected_graph(
         }
     };
     loaded.validate_catalog_fingerprint(Some(expected))?;
+    let stamp = prepare_backend_replay()?;
+    mark_backend_replay(stamp);
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
@@ -2434,6 +2609,7 @@ fn apply_sync_log_entry_with_context(
     let operation = SyncRowOperation::from_entry(entry, &tenant_change)?;
     let edge_mutation_reservation =
         sync_entry_edge_mutation_reservation(entry, table_oid, context, &rows)?;
+    let stamp = prepare_backend_replay()?;
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
@@ -2455,7 +2631,7 @@ fn apply_sync_log_entry_with_context(
                 }
             }
         }
-        mark_backend_replay();
+        mark_backend_replay(stamp);
         apply_sync_row_operation(&mut eng, table_oid, entry, context, &rows, operation)?;
         match entry.op {
             SyncOp::Insert => {
@@ -4589,8 +4765,101 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 
 #[cfg(test)]
 mod tests {
+    fn committed_cache() -> super::CacheProvenance {
+        let xid = std::num::NonZeroU64::new(42).unwrap();
+        let mut cache = super::CacheProvenance::new();
+        cache.mark_mutation(super::ReplayTransactionStamp(Some(xid)));
+        assert!(!cache.finish(super::ReplayTransactionOutcome::Commit, false));
+        assert_eq!(cache.stamp, super::CacheStamp::Committed(xid));
+        cache
+    }
+
+    #[test]
+    fn cache_mutation_requires_actual_commit_and_known_top_level_xid() {
+        use super::{
+            CacheProvenance, CacheStamp, ReplayTransactionOutcome, ReplayTransactionStamp,
+        };
+        let xid = std::num::NonZeroU64::new(42).unwrap();
+        for outcome in [
+            ReplayTransactionOutcome::Abort,
+            ReplayTransactionOutcome::Prepare,
+        ] {
+            let mut cache = CacheProvenance::new();
+            cache.mark_mutation(ReplayTransactionStamp(Some(xid)));
+            assert!(cache.finish(outcome, false));
+            assert_eq!(cache.stamp, CacheStamp::Unknown);
+        }
+        let mut cache = CacheProvenance::new();
+        cache.mark_mutation(ReplayTransactionStamp(None));
+        assert!(!cache.finish(ReplayTransactionOutcome::Commit, false));
+        assert_eq!(cache.stamp, CacheStamp::Unknown);
+    }
+
+    #[test]
+    fn fixed_entry_requires_committed_provenance_and_positive_snapshot_visibility() {
+        let mut cache = super::CacheProvenance::new();
+        assert_eq!(cache.fixed_snapshot_candidate(), None);
+        cache.mark_mutation(super::ReplayTransactionStamp(std::num::NonZeroU64::new(43)));
+        assert_eq!(cache.fixed_snapshot_candidate(), None);
+
+        let mut cache = committed_cache();
+        assert_eq!(
+            cache.fixed_snapshot_candidate(),
+            std::num::NonZeroU64::new(42)
+        );
+        // A failed check (including an imported older snapshot) cannot preserve
+        // this candidate merely because its writer eventually committed.
+        assert!(cache.finish(super::ReplayTransactionOutcome::Commit, false));
+        assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+    }
+
+    #[test]
+    fn overlay_only_fixed_transactions_preserve_the_committed_baseline() {
+        for outcome in [
+            super::ReplayTransactionOutcome::Commit,
+            super::ReplayTransactionOutcome::Abort,
+        ] {
+            let mut cache = committed_cache();
+            let baseline = cache.stamp;
+            cache.fixed = super::FixedSnapshotCache::Preserved;
+            assert!(!cache.finish(outcome, false));
+            assert_eq!(cache.stamp, baseline);
+            assert_eq!(cache.fixed, super::FixedSnapshotCache::NotEntered);
+        }
+    }
+
+    #[test]
+    fn fixed_snapshot_replay_never_exports_its_possibly_incomplete_watermark() {
+        for outcome in [
+            super::ReplayTransactionOutcome::Commit,
+            super::ReplayTransactionOutcome::Abort,
+        ] {
+            let mut cache = committed_cache();
+            cache.fixed = super::FixedSnapshotCache::Preserved;
+            cache.mark_mutation(super::ReplayTransactionStamp(std::num::NonZeroU64::new(43)));
+            assert!(cache.finish(outcome, false));
+            assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+        }
+    }
+
+    #[test]
+    fn aborted_savepoint_or_cache_clear_cannot_revalidate_prior_provenance() {
+        let mut cache = committed_cache();
+        cache.mark_mutation(super::ReplayTransactionStamp(std::num::NonZeroU64::new(43)));
+        assert!(cache.finish(super::ReplayTransactionOutcome::Commit, true));
+        assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+
+        let mut cache = committed_cache();
+        cache.clear();
+        assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+        cache.fixed = super::FixedSnapshotCache::Preserved;
+        cache.clear();
+        assert!(cache.finish(super::ReplayTransactionOutcome::Commit, false));
+    }
+
     #[test]
     fn replay_abort_tracks_nested_scopes_and_survives_outer_commit() {
+        super::CACHE_PROVENANCE.set(super::CacheProvenance::new());
         super::REPLAY_ABORTED.set(false);
         super::REPLAYED_SUBTRANSACTIONS.with(|levels| *levels.borrow_mut() = vec![true, false]);
         super::finish_replay_subtransaction(1, true);
@@ -4606,14 +4875,14 @@ mod tests {
             super::REPLAY_ABORTED.get(),
             "released child replay belongs to its parent"
         );
-        super::finish_replay_transaction(false);
+        super::finish_replay_transaction(super::ReplayTransactionOutcome::Commit);
         assert!(
             super::REPLAY_ABORTED.get(),
             "outer commit must not hide an unrecovered abort"
         );
         super::REPLAY_ABORTED.set(false);
         super::REPLAYED_SUBTRANSACTIONS.with(|levels| *levels.borrow_mut() = vec![true]);
-        super::finish_replay_transaction(true);
+        super::finish_replay_transaction(super::ReplayTransactionOutcome::Abort);
         assert!(super::REPLAY_ABORTED.get());
         super::REPLAY_ABORTED.set(false);
     }
