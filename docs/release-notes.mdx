@@ -63,6 +63,10 @@ diagnostic `graph.sync_retention()` reports pruning blockers and retained
 volume. Shared sources, alternate artifact roots, and protected generation
 visibility conservatively prevent reclamation.
 
+Ingestion memory estimates account for dictionary capacity and key sizes,
+avoiding overly conservative `PG007` rejections as relationship identities
+accumulate. Maintenance limits still apply before publication.
+
 Ingestion reuses validated immutable bases. Supported Linux backends can share
 sealed base snapshots; unavailable sharing facilities and other platforms use
 private snapshots. Catalog metadata and overlays remain private, and logical
