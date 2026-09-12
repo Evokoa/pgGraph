@@ -46,19 +46,34 @@ old_started=0
 new_started=0
 
 cleanup() {
+  local status=$?
+  local stop_failed=0
+  trap - EXIT INT TERM
   if (( old_started == 1 )); then
-    "$OLD_BINDIR/pg_ctl" -D "$OLD_DATADIR" -m immediate -w stop >/dev/null 2>&1 || true
+    "$OLD_BINDIR/pg_ctl" -D "$OLD_DATADIR" -m immediate -w stop >/dev/null 2>&1 || stop_failed=1
   fi
   if (( new_started == 1 )); then
-    "$NEW_BINDIR/pg_ctl" -D "$NEW_DATADIR" -m immediate -w stop >/dev/null 2>&1 || true
+    "$NEW_BINDIR/pg_ctl" -D "$NEW_DATADIR" -m immediate -w stop >/dev/null 2>&1 || stop_failed=1
   fi
+  if (( stop_failed == 1 )); then
+    echo "PostgreSQL shutdown failed; retaining upgrade data in $WORKDIR" >&2
+    if (( status == 0 )); then status=1; fi
+  fi
+  exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-"$OLD_BINDIR/pg_ctl" -D "$OLD_DATADIR" -o "-F -k $SOCKET_DIR -p $OLD_PORT" -w start
 old_started=1
+"$OLD_BINDIR/pg_ctl" -D "$OLD_DATADIR" -o "-k $SOCKET_DIR -p $OLD_PORT" -w start
 "$OLD_BINDIR/createdb" -h "$SOCKET_DIR" -p "$OLD_PORT" -U "$PGUSER" "$DBNAME"
 "$OLD_BINDIR/psql" -X -h "$SOCKET_DIR" -p "$OLD_PORT" -U "$PGUSER" -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+DO $$ BEGIN
+  IF current_setting('fsync') <> 'on' THEN
+    RAISE EXCEPTION 'Gate requires fsync=on';
+  END IF;
+END $$;
 CREATE EXTENSION graph;
 SELECT graph.reset();
 CREATE TABLE graph_upgrade_nodes (
@@ -110,9 +125,14 @@ fi
     --new-port="$NEW_PORT"
 )
 
-"$NEW_BINDIR/pg_ctl" -D "$NEW_DATADIR" -o "-F -k $SOCKET_DIR -p $NEW_PORT" -w start
 new_started=1
+"$NEW_BINDIR/pg_ctl" -D "$NEW_DATADIR" -o "-k $SOCKET_DIR -p $NEW_PORT" -w start
 "$NEW_BINDIR/psql" -X -h "$SOCKET_DIR" -p "$NEW_PORT" -U "$PGUSER" -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+DO $$ BEGIN
+  IF current_setting('fsync') <> 'on' THEN
+    RAISE EXCEPTION 'Gate requires fsync=on';
+  END IF;
+END $$;
 -- PostgreSQL source tables and extension catalogs are upgraded in place. The
 -- derived pgGraph artifact is rebuilt in the new cluster data directory.
 SET graph.persist_on_build = on;

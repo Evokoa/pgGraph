@@ -17,13 +17,14 @@ SOCKET_DIR="$WORKDIR/socket"
 SERVER_LOG="$WORKDIR/postgres.log"
 VALGRIND_PID=""
 PG_BIN=""
+STOP_FAILED=0
 
 stop_postgres() {
   if [[ -n "$VALGRIND_PID" ]]; then
     local server_pid="$VALGRIND_PID"
     VALGRIND_PID=""
     if kill -0 "$server_pid" >/dev/null 2>&1; then
-      "$PG_BIN/pg_ctl" -D "$DATA_DIR" -m fast -t 10 -w stop >/dev/null 2>&1 || true
+      "$PG_BIN/pg_ctl" -D "$DATA_DIR" -m fast -t 10 -w stop >/dev/null 2>&1 || STOP_FAILED=1
     fi
     if kill -0 "$server_pid" >/dev/null 2>&1; then
       kill "$server_pid" >/dev/null 2>&1 || true
@@ -39,9 +40,11 @@ stop_postgres() {
     fi
     if ! wait "$server_pid"; then
       echo "Valgrind-wrapped PostgreSQL exited unsuccessfully" >&2
+      STOP_FAILED=1
       return 1
     fi
   fi
+  return "$STOP_FAILED"
 }
 
 show_diagnostics() {
@@ -58,8 +61,18 @@ show_diagnostics() {
 }
 
 cleanup() {
-  stop_postgres >/dev/null 2>&1 || true
-  rm -rf "$WORKDIR"
+  local status=$?
+  trap - EXIT ERR INT TERM
+  if ! stop_postgres; then
+    echo "PostgreSQL shutdown failed; retaining sanitizer data in $WORKDIR" >&2
+    if (( status == 0 )); then status=1; fi
+  fi
+  if (( status == 0 )); then
+    rm -rf "$WORKDIR" || status=$?
+  else
+    echo "Sanitizer failed; retaining work directory: $WORKDIR" >&2
+  fi
+  exit "$status"
 }
 
 report_error() {
@@ -71,6 +84,8 @@ report_error() {
 
 trap report_error ERR
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if ! command -v valgrind >/dev/null 2>&1; then
   if command -v docker >/dev/null 2>&1; then
@@ -131,7 +146,7 @@ valgrind \
   --trace-children=yes \
   --suppressions="$SCRIPT_DIR/postgres_process_valgrind.supp" \
   --log-file="$WORKDIR/valgrind.%p.log" \
-  "$PG_BIN/postgres" -D "$DATA_DIR" -F -p "$PORT" -k "$SOCKET_DIR" \
+  "$PG_BIN/postgres" -D "$DATA_DIR" -p "$PORT" -k "$SOCKET_DIR" \
   >"$SERVER_LOG" 2>&1 &
 VALGRIND_PID=$!
 
@@ -159,6 +174,14 @@ if [[ "$ready" != "1" ]]; then
   show_diagnostics
   exit 1
 fi
+
+"$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+DO $$ BEGIN
+  IF current_setting('fsync') <> 'on' THEN
+    RAISE EXCEPTION 'Gate requires fsync=on';
+  END IF;
+END $$;
+SQL
 
 "$PG_BIN/createdb" "$DBNAME"
 "$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -d postgres -c \

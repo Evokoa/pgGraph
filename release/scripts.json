@@ -3232,6 +3232,31 @@
       "decision": "keep"
     },
     {
+      "path": "scripts/tests/test_process_cleanup.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
       "path": "scripts/tests/test_publication_upgrade.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",

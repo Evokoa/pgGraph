@@ -26,9 +26,18 @@ for pair in $UPGRADE_PAIRS; do
   sentinel="$workdir/.pggraph-disposable-upgrade"
   touch "$sentinel"
   cleanup() {
-    rm -rf "$workdir"
+    local status=$?
+    trap - EXIT INT TERM
+    if (( status != 0 )); then
+      echo "Upgrade validation failed; retaining work directory: $workdir" >&2
+    else
+      rm -rf "$workdir" || status=$?
+    fi
+    exit "$status"
   }
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   "$old_bindir/initdb" --auth=trust --username=pggraph -D "$workdir/old" >/dev/null
 
   OLD_BINDIR="$old_bindir" \
@@ -40,7 +49,7 @@ for pair in $UPGRADE_PAIRS; do
   PGUSER=pggraph \
     ./tests/heavy/pg_upgrade_validate.sh
 
-  cleanup
+  rm -rf "$workdir"
   trap - EXIT INT TERM
 done
 
