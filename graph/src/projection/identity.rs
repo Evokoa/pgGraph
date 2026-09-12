@@ -35,7 +35,10 @@ impl RelationshipIdentityDictionary {
                 "relationship identity dictionary must reserve empty slot 0",
             ));
         }
-        let mut ids_by_identity = HashMap::with_capacity(identities.len().saturating_sub(1));
+        let mut ids_by_identity = HashMap::new();
+        ids_by_identity
+            .try_reserve(identities.len().saturating_sub(1))
+            .map_err(identity_allocation_error)?;
         for (idx, identity) in identities.iter().enumerate().skip(1) {
             let Some(identity) = identity else {
                 return Err(identity_corrupt(format!(
@@ -52,7 +55,10 @@ impl RelationshipIdentityDictionary {
                 requested: idx,
                 limit: RelationshipId::MAX as usize,
             })?;
-            if ids_by_identity.insert(identity.clone(), id).is_some() {
+            let indexed =
+                crate::relationship_identity_store::RelationshipIdentityRef::from(identity)
+                    .try_to_owned()?;
+            if ids_by_identity.insert(indexed, id).is_some() {
                 return Err(identity_corrupt(format!(
                     "relationship identity dictionary contains duplicate mapping {} source key {}",
                     identity.mapping_id, identity.source_key
@@ -70,14 +76,30 @@ impl RelationshipIdentityDictionary {
         &mut self,
         identities: impl IntoIterator<Item = RelationshipIdentity>,
     ) -> GraphResult<()> {
-        let mut unseen = identities
-            .into_iter()
-            .filter(|identity| !self.ids_by_identity.contains_key(identity))
-            .collect::<Vec<_>>();
-        unseen.sort_by(|left, right| {
+        let incoming = identities.into_iter();
+        let mut unseen = Vec::new();
+        if let (_, Some(upper)) = incoming.size_hint() {
+            unseen
+                .try_reserve_exact(upper)
+                .map_err(identity_allocation_error)?;
+        }
+        for identity in incoming {
+            if !self.ids_by_identity.contains_key(&identity) {
+                unseen.try_reserve(1).map_err(identity_allocation_error)?;
+                unseen.push(identity);
+            }
+        }
+        // Equal identities are interchangeable; unstable sorting needs no heap scratch.
+        unseen.sort_unstable_by(|left, right| {
             (left.mapping_id, &left.source_key).cmp(&(right.mapping_id, &right.source_key))
         });
         unseen.dedup();
+        self.identities
+            .try_reserve_exact(unseen.len())
+            .map_err(identity_allocation_error)?;
+        self.ids_by_identity
+            .try_reserve(unseen.len())
+            .map_err(identity_allocation_error)?;
         for identity in unseen {
             let idx = self.identities.len();
             let id = RelationshipId::try_from(idx).map_err(|_| GraphError::OverlayLimit {
@@ -85,7 +107,10 @@ impl RelationshipIdentityDictionary {
                 requested: idx,
                 limit: RelationshipId::MAX as usize,
             })?;
-            self.ids_by_identity.insert(identity.clone(), id);
+            let indexed =
+                crate::relationship_identity_store::RelationshipIdentityRef::from(&identity)
+                    .try_to_owned()?;
+            self.ids_by_identity.insert(indexed, id);
             self.identities.push(Some(identity));
         }
         Ok(())
@@ -107,6 +132,71 @@ impl RelationshipIdentityDictionary {
     }
 }
 
+/// Bound ingestion's dictionary allocations, excluding the caller's retained engines.
+///
+/// Two dictionaries cover both collection growth and the original plus decoded
+/// write-validation dictionary. Each owns a vector and a reverse map, hence two
+/// copies of its key bytes. The input append buffer and encoded bytes are added
+/// separately, rather than multiplying fixed per-entry padding by copy counts.
+pub(crate) fn ingestion_identity_workspace_bytes(
+    identity_count: usize,
+    key_bytes: usize,
+    incoming_rows: usize,
+    incoming_key_bytes: usize,
+) -> GraphResult<usize> {
+    let overflow = || GraphError::Internal("identity workspace size overflowed".into());
+    // Match std's SwissTable layout, as used by the eager visibility preflight:
+    // spare buckets, one control byte per bucket, final group/alignment slack.
+    let buckets = identity_count
+        .checked_next_power_of_two()
+        .and_then(|n| n.checked_mul(2))
+        .map(|n| n.max(4))
+        .ok_or_else(overflow)?;
+    let map_bytes = buckets
+        .checked_mul(std::mem::size_of::<(RelationshipIdentity, RelationshipId)>() + 1)
+        .and_then(|n| n.checked_add(64))
+        .ok_or_else(overflow)?;
+    // Existing decoded vectors may have geometric spare capacity. New batch
+    // growth reserves exactly; two times the final length covers either route.
+    let vector_bytes = identity_count
+        .checked_mul(2)
+        .map(|n| n.max(4))
+        .and_then(|n| n.checked_mul(std::mem::size_of::<Option<RelationshipIdentity>>()))
+        .ok_or_else(overflow)?;
+    let strings = identity_count
+        .checked_mul(32)
+        .and_then(|n| n.checked_add(key_bytes))
+        .ok_or_else(overflow)?;
+    let dictionary = map_bytes
+        .checked_add(vector_bytes)
+        .and_then(|n| n.checked_add(strings.checked_mul(2)?))
+        .and_then(|n| n.checked_add(std::mem::size_of::<RelationshipIdentityDictionary>()))
+        .ok_or_else(overflow)?;
+    let incoming = incoming_rows
+        .checked_mul(2)
+        .map(|n| n.max(4))
+        .and_then(|n| n.checked_mul(std::mem::size_of::<RelationshipIdentity>()))
+        .and_then(|n| n.checked_add(incoming_key_bytes))
+        .and_then(|n| n.checked_add(incoming_rows.checked_mul(32)?))
+        .ok_or_else(overflow)?;
+    // Bincode standard: vector length <= 9 bytes; each entry has a one-byte
+    // Option tag, mapping u64 <= 9 bytes and string length <= 9 bytes.
+    let encoded = identity_count
+        .checked_mul(1 + 9 + 9)
+        .and_then(|n| n.checked_add(key_bytes))
+        .and_then(|n| n.checked_add(HEADER_SIZE + 9))
+        .ok_or_else(overflow)?;
+    dictionary
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(incoming))
+        .and_then(|n| n.checked_add(encoded.checked_mul(2)?))
+        .ok_or_else(overflow)
+}
+
+fn identity_allocation_error(error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Internal(format!("relationship identity allocation failed: {error}"))
+}
+
 /// Write a dictionary artifact atomically and return checksum and byte count.
 pub(crate) fn write_identity_artifact(
     root: &Path,
@@ -114,25 +204,35 @@ pub(crate) fn write_identity_artifact(
     dictionary: &RelationshipIdentityDictionary,
 ) -> GraphResult<(String, u64)> {
     fs::create_dir_all(root).map_err(|err| identity_io("create directory", root, err))?;
-    let payload =
-        bincode::serde::encode_to_vec(dictionary.identities(), bincode::config::standard())
-            .map_err(|err| {
-                GraphError::Internal(format!("relationship identity encoding failed: {err}"))
-            })?;
+    let encoded_len = identity_artifact_encoded_len(dictionary)?;
     let count =
         u32::try_from(dictionary.identities().len()).map_err(|_| GraphError::OverlayLimit {
             kind: "relationship_identities".to_string(),
             requested: dictionary.identities().len(),
             limit: u32::MAX as usize,
         })?;
-    let payload_len = u64::try_from(payload.len())
+    let payload_len = u64::try_from(encoded_len - HEADER_SIZE)
         .map_err(|_| GraphError::Internal("identity payload length exceeds u64".to_string()))?;
-    let mut bytes = vec![0_u8; HEADER_SIZE];
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(encoded_len)
+        .map_err(identity_allocation_error)?;
+    bytes.resize(HEADER_SIZE, 0);
     bytes[0..8].copy_from_slice(MAGIC);
     bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
     bytes[12..16].copy_from_slice(&count.to_le_bytes());
     bytes[16..24].copy_from_slice(&payload_len.to_le_bytes());
-    bytes.extend_from_slice(&payload);
+    bincode::serde::encode_into_std_write(
+        dictionary.identities(),
+        &mut bytes,
+        bincode::config::standard(),
+    )
+    .map_err(|err| GraphError::Internal(format!("relationship identity encoding failed: {err}")))?;
+    if bytes.len() != encoded_len {
+        return Err(GraphError::Internal(
+            "relationship identity encoding size changed".into(),
+        ));
+    }
     let checksum = checksum_bytes(&bytes);
     bytes[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
 
@@ -151,6 +251,33 @@ pub(crate) fn write_identity_artifact(
     }
     result?;
     Ok((format!("crc32:{checksum:08x}"), bytes.len() as u64))
+}
+
+/// Count the unchanged encoded artifact before reserving its output buffer.
+pub(crate) fn identity_artifact_encoded_len(
+    dictionary: &RelationshipIdentityDictionary,
+) -> GraphResult<usize> {
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("identity encoding size overflowed"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(HEADER_SIZE);
+    bincode::serde::encode_into_std_write(
+        dictionary.identities(),
+        &mut counter,
+        bincode::config::standard(),
+    )
+    .map_err(|err| GraphError::Internal(format!("identity encoding preflight failed: {err}")))?;
+    Ok(counter.0)
 }
 
 /// Read and validate a dictionary artifact and its expected checksum.
@@ -226,7 +353,13 @@ fn read_identity_artifact_inner(
             "relationship identity artifact payload length mismatch",
         ));
     }
-    let mut bytes = Vec::with_capacity(expected_file_len as usize);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(
+            usize::try_from(expected_file_len)
+                .map_err(|_| identity_corrupt("identity artifact size exceeds usize"))?,
+        )
+        .map_err(identity_allocation_error)?;
     bytes.extend_from_slice(&header);
     bytes.resize(expected_file_len as usize, 0);
     file.read_exact(&mut bytes[HEADER_SIZE..])
@@ -337,12 +470,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identity_workspace_rejects_overflow_in_each_allocation_term() {
+        for (count, keys, incoming, incoming_keys) in [
+            (usize::MAX, 0, 0, 0),
+            (1, usize::MAX, 0, 0),
+            (1, 0, usize::MAX, 0),
+            (1, 0, 1, usize::MAX),
+        ] {
+            assert!(
+                ingestion_identity_workspace_bytes(count, keys, incoming, incoming_keys).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn identity_workspace_covers_collection_growth_at_capacity_boundaries() {
+        fn allocated(dictionary: &RelationshipIdentityDictionary) -> usize {
+            dictionary.identities.capacity() * std::mem::size_of::<Option<RelationshipIdentity>>()
+                + dictionary.ids_by_identity.capacity()
+                    * std::mem::size_of::<(RelationshipIdentity, RelationshipId)>()
+                + dictionary
+                    .identities
+                    .iter()
+                    .flatten()
+                    .map(|identity| identity.source_key.capacity())
+                    .sum::<usize>()
+                + dictionary
+                    .ids_by_identity
+                    .keys()
+                    .map(|identity| identity.source_key.capacity())
+                    .sum::<usize>()
+        }
+        for initial in [1, 3, 7, 14, 28, 56, 112, 224] {
+            let mut identities = vec![None];
+            identities.extend((0..initial).map(|id| {
+                Some(RelationshipIdentity {
+                    mapping_id: 1,
+                    source_key: id.to_string(),
+                })
+            }));
+            let mut dictionary =
+                RelationshipIdentityDictionary::try_from_identities(identities).unwrap();
+            let old = allocated(&dictionary);
+            let appended = (initial..initial * 2 + 1)
+                .map(|id| RelationshipIdentity {
+                    mapping_id: 1,
+                    source_key: id.to_string(),
+                })
+                .collect::<Vec<_>>();
+            let incoming_count = appended.len();
+            let incoming_bytes = appended
+                .iter()
+                .map(|identity| identity.source_key.len())
+                .sum::<usize>();
+            let total_keys = incoming_bytes
+                + dictionary
+                    .identities
+                    .iter()
+                    .flatten()
+                    .map(|identity| identity.source_key.len())
+                    .sum::<usize>();
+            let bound = ingestion_identity_workspace_bytes(
+                dictionary.identities.len() + incoming_count,
+                total_keys,
+                incoming_count,
+                incoming_bytes,
+            )
+            .unwrap();
+            dictionary.intern_all(appended).unwrap();
+            assert!(bound > old + allocated(&dictionary));
+            for id in 0..initial {
+                assert_eq!(
+                    dictionary
+                        .id_for(&RelationshipIdentity {
+                            mapping_id: 1,
+                            source_key: id.to_string(),
+                        })
+                        .unwrap(),
+                    u32::try_from(id + 1).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dictionary_interning_is_deterministic_and_artifact_roundtrips() {
         let mut dictionary = RelationshipIdentityDictionary::try_from_identities(vec![None])
             .expect("empty dictionary validates");
         let first = RelationshipIdentity {
-            mapping_id: 2,
-            source_key: "b".to_string(),
+            mapping_id: u64::MAX,
+            source_key: "é".repeat(251),
         };
         let second = RelationshipIdentity {
             mapping_id: 1,
@@ -365,6 +582,15 @@ mod tests {
         let path = root.join("identities.bin");
         let (checksum, bytes) =
             write_identity_artifact(&root, &path, &dictionary).expect("identity artifact writes");
+        let original_payload =
+            bincode::serde::encode_to_vec(dictionary.identities(), bincode::config::standard())
+                .unwrap();
+        let encoded = fs::read(&path).unwrap();
+        assert_eq!(&encoded[HEADER_SIZE..], original_payload.as_slice());
+        assert_eq!(
+            encoded.len(),
+            identity_artifact_encoded_len(&dictionary).unwrap()
+        );
         let decoded = read_identity_artifact(&path, &checksum).expect("identity artifact reads");
         assert_eq!(decoded, dictionary);
         let bounded = read_manifest_identity_artifact(

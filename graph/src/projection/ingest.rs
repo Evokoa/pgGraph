@@ -17,8 +17,8 @@ use crate::projection::edge_type_dictionary::{
     EdgeTypeDictionary,
 };
 use crate::projection::identity::{
-    read_identity_artifact, read_manifest_identity_artifact, write_identity_artifact,
-    RelationshipIdentityDictionary,
+    identity_artifact_encoded_len, ingestion_identity_workspace_bytes, read_identity_artifact,
+    read_manifest_identity_artifact, write_identity_artifact, RelationshipIdentityDictionary,
 };
 use crate::projection::manifest::{
     ManifestEdgeTypeDictionaryRef, ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef,
@@ -352,7 +352,7 @@ impl ProjectionIngester {
     where
         F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
     {
-        let _ingest_memory = governor
+        let mut ingest_memory = governor
             .map(|governor| {
                 // Cover directory iteration and metadata inspection used by
                 // the allocation-free size preflight itself.
@@ -367,6 +367,7 @@ impl ProjectionIngester {
                     rows,
                     base_relationship_identities,
                     base_edge_type_labels.unwrap_or(&[]),
+                    None,
                 )?;
                 lease
                     .try_resize(peak)
@@ -375,6 +376,26 @@ impl ProjectionIngester {
             })
             .transpose()?;
         let previous = self.store.load_latest_current()?;
+        if let (Some(lease), IdentitySource::Slice(_), Some(reference)) = (
+            ingest_memory.as_mut(),
+            base_relationship_identities,
+            previous
+                .as_ref()
+                .and_then(|manifest| manifest.relationship_identities.as_ref()),
+        ) {
+            // Slice callers load the current cumulative artifact, which may
+            // contain more identities than their original base slice.
+            let peak = ingestion_memory_upper_bound(
+                &self.root,
+                rows,
+                base_relationship_identities,
+                base_edge_type_labels.unwrap_or(&[]),
+                Some(reference),
+            )?;
+            lease
+                .try_resize(peak)
+                .map_err(crate::safety::resource_limit_error)?;
+        }
         let previous_watermark = previous
             .as_ref()
             .map_or(0, |manifest| manifest.sync_watermark);
@@ -1167,8 +1188,6 @@ fn validate_ingestion_limits<'a>(
 const INGEST_PREFLIGHT_FIXED_BYTES: usize = 1024 * 1024;
 const INGEST_ROW_PEAK_MULTIPLIER: usize = 32;
 const INGEST_ROW_FIXED_PEAK_BYTES: usize = 4 * 1024;
-const INGEST_IDENTITY_FIXED_PEAK_BYTES: usize = 512;
-const INGEST_IDENTITY_PEAK_COPIES: usize = 8;
 
 /// Bound the simultaneously live ingestion workspace before constructing it.
 ///
@@ -1183,6 +1202,7 @@ fn ingestion_memory_upper_bound(
     rows: &[ProjectionSyncRow],
     base_relationship_identities: IdentitySource<'_>,
     base_edge_type_labels: &[String],
+    prior_identity: Option<&ManifestIdentityRef>,
 ) -> GraphResult<ByteCount> {
     let row_dynamic = rows.iter().try_fold(0usize, |total, row| {
         INGEST_ROW_BYTES
@@ -1215,31 +1235,52 @@ fn ingestion_memory_upper_bound(
         })
         .ok_or_else(ingest_resource_size_overflow)?;
 
-    let identity_count = base_relationship_identities
-        .len()
+    let base_identity_count = prior_identity.map_or_else(
+        || Ok(base_relationship_identities.len()),
+        |reference| {
+            usize::try_from(reference.entry_count).map_err(|_| ingest_resource_size_overflow())
+        },
+    )?;
+    let identity_count = base_identity_count
         .checked_add(
             rows.iter()
                 .filter(|row| row.relationship_identity.is_some())
                 .count(),
         )
         .ok_or_else(ingest_resource_size_overflow)?;
-    let identity_strings = base_relationship_identities
-        .iter()
-        .flatten()
-        .chain(
-            rows.iter()
-                .filter_map(|row| row.relationship_identity.as_ref().map(Into::into)),
-        )
-        .try_fold(0usize, |total, identity| {
-            total
-                .checked_add(identity.source_key.len())
-                .ok_or_else(ingest_resource_size_overflow)
-        })?;
-    let identity_peak = identity_count
-        .checked_mul(INGEST_IDENTITY_FIXED_PEAK_BYTES)
-        .and_then(|fixed| fixed.checked_add(identity_strings))
-        .and_then(|bytes| bytes.checked_mul(INGEST_IDENTITY_PEAK_COPIES))
+    let base_identity_strings = if let Some(reference) = prior_identity {
+        // The encoded artifact length bounds all decoded key bytes without
+        // reading or allocating the cumulative payload during preflight.
+        usize::try_from(reference.bytes).map_err(|_| ingest_resource_size_overflow())?
+    } else {
+        base_relationship_identities
+            .iter()
+            .flatten()
+            .try_fold(0usize, |total, identity| {
+                total
+                    .checked_add(identity.source_key.len())
+                    .ok_or_else(ingest_resource_size_overflow)
+            })?
+    };
+    let incoming_identity_strings = rows.iter().try_fold(0usize, |bytes, row| {
+        bytes
+            .checked_add(
+                row.relationship_identity
+                    .as_ref()
+                    .map_or(0, |identity| identity.source_key.len()),
+            )
+            .ok_or_else(ingest_resource_size_overflow)
+    })?;
+    let identity_strings = base_identity_strings
+        .checked_add(incoming_identity_strings)
         .ok_or_else(ingest_resource_size_overflow)?;
+    let identity_peak = ingestion_identity_workspace_bytes(
+        identity_count,
+        identity_strings,
+        rows.len(),
+        incoming_identity_strings,
+    )
+    .map_err(|_| ingest_resource_size_overflow())?;
     let edge_type_label_bytes = base_edge_type_labels
         .iter()
         .map(String::len)
@@ -1327,44 +1368,6 @@ fn largest_manifest_file_bytes(root: &Path) -> GraphResult<usize> {
         largest = largest.max(bytes);
     }
     Ok(largest)
-}
-
-fn identity_artifact_encoded_len(
-    dictionary: &RelationshipIdentityDictionary,
-) -> GraphResult<usize> {
-    let mut counter = CountingWriter::default();
-    bincode::serde::encode_into_std_write(
-        dictionary.identities(),
-        &mut counter,
-        bincode::config::standard(),
-    )
-    .map_err(|err| {
-        GraphError::Internal(format!(
-            "relationship identity resource preflight encoding failed: {err}"
-        ))
-    })?;
-    32usize
-        .checked_add(counter.bytes)
-        .ok_or_else(ingest_resource_size_overflow)
-}
-
-#[derive(Default)]
-struct CountingWriter {
-    bytes: usize,
-}
-
-impl Write for CountingWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.bytes = self
-            .bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| std::io::Error::other("encoded identity length overflowed"))?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 fn ingest_resource_size_overflow() -> GraphError {
@@ -1960,6 +1963,131 @@ mod tests {
         .expect_err("text heap bytes must count against ingest budget");
 
         assert!(matches!(err, GraphError::OverlayLimit { .. }));
+    }
+
+    #[test]
+    fn governed_ingest_appends_to_large_identity_store_with_bounded_workspace() {
+        let dir = seeded_artifacts("projection_governed_identity_capacity");
+        let publisher = ingester(&dir);
+        let mut identities = vec![None];
+        identities.extend((1..51_504).map(|id| {
+            Some(RelationshipIdentity {
+                mapping_id: 7,
+                source_key: id.to_string(),
+            })
+        }));
+        let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_mib(256).unwrap()),
+        ));
+        // Represent the caller's simultaneously live normalization and planning
+        // workspace. The ingester must fit without changing the operation limit.
+        let caller = governor
+            .reserve_memory(ResourcePhase::SyncIngest, ByteCount::from_mib(64).unwrap())
+            .unwrap();
+        for batch in 0..4u64 {
+            let prefix = identities.clone();
+            let first = identities.len();
+            let rows = (0..200)
+                .map(|offset| {
+                    let mut row = edge_row(
+                        batch * 200 + u64::try_from(offset).unwrap() + 1,
+                        0,
+                        1,
+                        None,
+                        MutationOperation::InsertEdge,
+                    );
+                    row.relationship_identity = Some(RelationshipIdentity {
+                        mapping_id: 7,
+                        source_key: (first + offset).to_string(),
+                    });
+                    row
+                })
+                .collect::<Vec<_>>();
+            let store =
+                crate::relationship_identity_store::RelationshipIdentityStore::Owned(identities);
+            let (result, validated) = publisher
+                .ingest_committed_rows_with_store_governed(
+                    &rows,
+                    MutationBufferLimits::new(10_000, 1024 * 1024),
+                    &store,
+                    None,
+                    &governor,
+                    |manifest| {
+                        let reference = manifest.relationship_identities.as_ref().unwrap();
+                        let dictionary = read_manifest_identity_artifact(
+                            &dir.path().join(&reference.path),
+                            &reference.checksum,
+                            reference.bytes,
+                            reference.entry_count,
+                        )?;
+                        assert_eq!(&dictionary.identities()[..prefix.len()], prefix.as_slice());
+                        for (offset, row) in rows.iter().enumerate() {
+                            let id =
+                                dictionary.id_for(row.relationship_identity.as_ref().unwrap())?;
+                            assert_eq!(usize::try_from(id).unwrap(), first + offset);
+                        }
+                        for reference in &manifest.segments {
+                            DeltaSegment::read_from_path(&dir.path().join(&reference.path))?;
+                        }
+                        Ok(dictionary)
+                    },
+                )
+                .expect("capacity-accounted ingest publishes within the unchanged budget");
+            let manifest = result.manifest.unwrap();
+            assert_eq!(
+                manifest.sync_watermark,
+                i64::try_from((batch + 1) * 200).unwrap()
+            );
+            let validated = validated.unwrap();
+            assert_eq!(validated.identities().len(), first + 200);
+            identities = validated.identities().to_vec();
+            assert_eq!(
+                governor.memory_used(),
+                caller.amount(),
+                "all ingest leases release"
+            );
+        }
+    }
+
+    #[test]
+    fn governed_slice_ingest_counts_current_cumulative_dictionary() {
+        let dir = seeded_artifacts("projection_governed_current_identity_capacity");
+        let publisher = ingester(&dir);
+        let mut identities = vec![None];
+        identities.extend((1..30_000).map(|id| {
+            Some(RelationshipIdentity {
+                mapping_id: 7,
+                source_key: id.to_string(),
+            })
+        }));
+        let dictionary = RelationshipIdentityDictionary::try_from_identities(identities).unwrap();
+        let reference = publisher.write_identity_dictionary(2, &dictionary).unwrap();
+        let mut current =
+            ProjectionManifest::base_only(2, "base.pggraph", "crc32:00000000", 1, 0, 2);
+        current.previous_generation_id = Some(1);
+        current.relationship_identities = Some(reference);
+        publisher.store.publish(&current).unwrap();
+        let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_mib(4).unwrap()),
+        ));
+        let error = publisher
+            .ingest_committed_rows_with_identities_governed(
+                &[edge_row(1, 0, 1, None, MutationOperation::InsertEdge)],
+                MutationBufferLimits::new(10, 1024 * 1024),
+                &[None],
+                &governor,
+                |_| -> GraphResult<()> {
+                    panic!(
+                        "insufficient identity workspace must reject before candidate validation"
+                    )
+                },
+            )
+            .expect_err("current dictionary exceeds the workspace even with an empty base slice");
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        assert_eq!(
+            publisher.store.load_latest_current().unwrap().unwrap(),
+            current
+        );
     }
 
     #[test]
