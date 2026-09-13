@@ -58,8 +58,8 @@ if [[ "${PREPARE_PLAYGROUND}" == "1" ]]; then
     --database postgres
     --user postgres
     --password postgres
-    --datasets-dir "${SANDBOX_DIR}/benchmark/datasets"
-    --results-dir "${SANDBOX_DIR}/benchmark/results"
+    --datasets-dir "${PGGRAPH_PLAYGROUND_DATASETS_DIR:-${SANDBOX_DIR}/benchmark/datasets}"
+    --results-dir "${PGGRAPH_PLAYGROUND_RESULTS_DIR:-${SANDBOX_DIR}/benchmark/results}"
     --build-mode "${BUILD_MODE}"
     --prepare-only
   )
