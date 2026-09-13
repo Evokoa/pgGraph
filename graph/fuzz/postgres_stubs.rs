@@ -8,13 +8,51 @@
 //! those binaries load outside a backend. Function stubs abort on use; global
 //! stubs exist only to satisfy symbol relocation.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_int, c_uint, c_void};
 
 // PG17 declares MyDatabaseId as Oid (u32) and XactIsoLevel as C int.
 #[no_mangle]
 pub static mut MyDatabaseId: u32 = 0;
 #[no_mangle]
 pub static mut XactIsoLevel: std::ffi::c_int = 0;
+
+// PG17 declares IsUnderPostmaster as bool. Standalone loaders must not enter
+// PostgreSQL descriptor accounting. This symbol is linked only by fuzz targets.
+#[no_mangle]
+pub static mut IsUnderPostmaster: bool = false;
+
+// Match the PG17 ABI for backend functions retained by the graph rlib. The
+// projection parsers never call these; abort if a target crosses that boundary.
+// Oid is u32, AclMode is u64, AclResult is C unsigned int, and LOCKMODE is C int.
+#[no_mangle]
+pub extern "C" fn superuser_arg(_role_id: u32) -> bool {
+    std::process::abort();
+}
+
+#[no_mangle]
+pub extern "C" fn check_enable_rls(_relation_id: u32, _role_id: u32, _no_error: bool) -> c_int {
+    std::process::abort();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_parameter_aclcheck(_name: *const c_char, _role_id: u32, _mode: u64) -> c_uint {
+    std::process::abort();
+}
+
+#[no_mangle]
+pub extern "C" fn LockRelationOid(_relation_id: u32, _lock_mode: c_int) {
+    std::process::abort();
+}
+
+#[no_mangle]
+pub extern "C" fn AcquireExternalFD() -> bool {
+    std::process::abort();
+}
+
+#[no_mangle]
+pub extern "C" fn ReleaseExternalFD() {
+    std::process::abort();
+}
 
 macro_rules! pg_stub_fn {
     ($($name:ident),+ $(,)?) => {
@@ -340,19 +378,49 @@ mod tests {
     #[test]
     fn backend_function_stub_aborts_instead_of_returning() {
         const CHILD: &str = "PGGRAPH_FUZZ_STUB_ABORT_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            super::GetTransactionSnapshot();
+        if let Some(symbol) = std::env::var_os(CHILD) {
+            match symbol.to_str().expect("stub symbol") {
+                "GetTransactionSnapshot" => {
+                    super::GetTransactionSnapshot();
+                }
+                "superuser_arg" => {
+                    super::superuser_arg(0);
+                }
+                "check_enable_rls" => {
+                    super::check_enable_rls(0, 0, false);
+                }
+                "pg_parameter_aclcheck" => {
+                    super::pg_parameter_aclcheck(c"graph.rls_mode".as_ptr(), 0, 0);
+                }
+                "LockRelationOid" => super::LockRelationOid(0, 1),
+                "AcquireExternalFD" => {
+                    super::AcquireExternalFD();
+                }
+                "ReleaseExternalFD" => super::ReleaseExternalFD(),
+                other => panic!("unknown stub symbol: {other}"),
+            }
             panic!("PostgreSQL stub returned instead of aborting");
         }
-        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "tests::backend_function_stub_aborts_instead_of_returning",
-            ])
-            .env(CHILD, "1")
-            .status()
-            .expect("start abort probe");
-        // SIGABRT is 6 on the supported Linux and macOS fuzz hosts.
-        assert_eq!(status.signal(), Some(6));
+        for symbol in [
+            "GetTransactionSnapshot",
+            "superuser_arg",
+            "check_enable_rls",
+            "pg_parameter_aclcheck",
+            "LockRelationOid",
+            "AcquireExternalFD",
+            "ReleaseExternalFD",
+        ] {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::backend_function_stub_aborts_instead_of_returning",
+                    ])
+                    .env(CHILD, symbol)
+                    .status()
+                    .expect("start abort probe");
+            // SIGABRT is 6 on the supported Linux and macOS fuzz hosts.
+            assert_eq!(status.signal(), Some(6), "stub {symbol} must abort");
+        }
     }
 }
