@@ -51,6 +51,10 @@ publication. PostgreSQL 14 through 18 remain the supported target matrix.
   The 10,000-match cap and resource budgets remain enforced. Optional matches,
   joins, paths, DISTINCT, aggregates, ordering and pagination retain their
   [documented candidate limits](./known-issues#gql-candidate-limits-depend-on-the-query-shape).
+- GQL `DETACH DELETE` resolves transaction-created nodes and removes their
+  incident transaction edges, including synthetic reverse edges. Recreating a
+  deleted key resolves its current live transaction identity, preserving later
+  GQL reads, relationship creation and rollback.
 - Artifacts are isolated by database and validated against registered catalog
   identities. Default graphs cannot adopt another database's files.
 - Graph generations publish through PostgreSQL transactions. Transaction and

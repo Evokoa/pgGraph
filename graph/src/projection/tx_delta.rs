@@ -599,6 +599,10 @@ pub(crate) fn added_node_keys(
                     .added_nodes
                     .iter()
                     .filter(|node| node.table_oid == table_oid)
+                    .filter(|node| {
+                        node.node_idx
+                            .is_none_or(|index| !delta.deleted_nodes.contains(&index))
+                    })
                     .filter(
                         |node| match (tenant, node.tenant.as_deref(), table_is_tenanted) {
                             (Some(active), Some(created), true) => active == created,
@@ -638,6 +642,7 @@ pub(crate) fn added_node_indexes(
                         },
                     )
                     .filter_map(|node| node.node_idx)
+                    .filter(|index| !delta.deleted_nodes.contains(index))
                     .collect()
             })
             .unwrap_or_default()
@@ -655,7 +660,7 @@ pub(crate) fn max_added_node_primary_key_bytes() -> usize {
     })
 }
 
-/// Resolve a transaction-local node to its temporary graph index.
+/// Resolve the newest live transaction-local node to its temporary graph index.
 pub(crate) fn resolve_added_node(
     table_oid: u32,
     primary_key: &str,
@@ -667,9 +672,13 @@ pub(crate) fn resolve_added_node(
             delta
                 .added_nodes
                 .iter()
+                .rev()
                 .find(|node| {
                     node.table_oid == table_oid
                         && node.primary_key == primary_key
+                        && node
+                            .node_idx
+                            .is_some_and(|index| !delta.deleted_nodes.contains(&index))
                         && match (tenant, node.tenant.as_deref(), table_is_tenanted) {
                             (Some(active), Some(created), true) => active == created,
                             (Some(_), None, true) => false,

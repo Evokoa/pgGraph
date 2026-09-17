@@ -1528,12 +1528,20 @@ fn execute_detach_delete_node(
         });
     };
     let node_idx = ENGINE.with(|engine| {
+        let engine = engine.borrow();
         engine
-            .borrow()
             .resolve(plan.table_oid, &row.node.node_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.table_oid,
+                    &row.node.node_id,
+                    tenant_scope,
+                    engine.tenanted_table_oids.contains(&plan.table_oid),
+                )
+            })
             .ok_or_else(|| safety::GraphError::GqlExecution {
                 reason: format!(
-                    "GQL DETACH DELETE node `{}` is not in the built graph",
+                    "GQL DETACH DELETE node `{}` is not in the built graph or transaction delta",
                     row.node.node_id
                 ),
             })
@@ -3242,8 +3250,29 @@ fn record_deleted_edge_delta(
 fn record_detach_deleted_edge_delta(edge: &DeletedIncidentEdge) -> safety::GraphResult<()> {
     let Some((source, target, type_id)) = ENGINE.with(|engine| {
         let engine = engine.borrow();
-        let source = engine.resolve(edge.source_table_oid, &edge.source_id)?;
-        let target = engine.resolve(edge.target_table_oid, &edge.target_id)?;
+        // PostgreSQL has already authorized and deleted these incident rows.
+        // Resolve their coordinates without filtering out another endpoint's
+        // tenant, so every projected deleted edge receives its delta.
+        let source = engine
+            .resolve(edge.source_table_oid, &edge.source_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    edge.source_table_oid,
+                    &edge.source_id,
+                    None,
+                    false,
+                )
+            })?;
+        let target = engine
+            .resolve(edge.target_table_oid, &edge.target_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    edge.target_table_oid,
+                    &edge.target_id,
+                    None,
+                    false,
+                )
+            })?;
         let type_id = engine.edge_type_id(&edge.rel_type)?;
         Some((source, target, type_id))
     }) else {
@@ -3251,7 +3280,9 @@ fn record_detach_deleted_edge_delta(edge: &DeletedIncidentEdge) -> safety::Graph
     };
     crate::projection::tx_delta::record_deleted_edge(source, target, type_id)?;
     if edge.bidirectional {
-        crate::projection::tx_delta::record_deleted_edge(target, source, type_id)?;
+        crate::projection::tx_delta::record_deleted_edge_with_identity(
+            target, source, type_id, true, None,
+        )?;
     }
     Ok(())
 }
@@ -5200,6 +5231,52 @@ fn test_recheck_delete_edge_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_transaction_edges_cancel_both_overlay_orientations() {
+        use crate::projection::tx_delta;
+        tx_delta::clear_for_test();
+        let mut engine = crate::engine::Engine::new();
+        engine.node_store.add_node(10, "base-a".into());
+        engine.node_store.add_node(10, "base-b".into());
+        let type_id = engine.register_edge_type("friend").unwrap();
+        let previous = ENGINE.with(|cell| cell.replace(engine));
+        let source = tx_delta::record_added_node_indexed(10, "new-a", None, 2).unwrap();
+        let target = tx_delta::record_added_node_indexed(10, "new-b", None, 2).unwrap();
+        for (from, to, reversed) in [
+            (source, target, false),
+            (target, source, true),
+            (0, 1, false),
+        ] {
+            tx_delta::record_added_edge(
+                from,
+                tx_delta::DeltaEdge {
+                    target: to,
+                    type_id,
+                    schema_reversed: reversed,
+                    weight: None,
+                    relationship_id: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(tx_delta::stats().added_edges, 3);
+        record_detach_deleted_edge_delta(&DeletedIncidentEdge {
+            rel_type: "friend".into(),
+            source_table_oid: 10,
+            target_table_oid: 10,
+            source_id: "new-a".into(),
+            target_id: "new-b".into(),
+            bidirectional: true,
+        })
+        .unwrap();
+        let (inserts, _) = tx_delta::edge_overlay(crate::types::TraversalDirection::Out);
+        assert_eq!(tx_delta::stats().added_edges, 1);
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[&0], vec![(1, type_id, false, None)]);
+        tx_delta::clear_for_test();
+        ENGINE.with(|cell| cell.replace(previous));
+    }
 
     fn edge_mapping(mapping_id: u64) -> crate::query::catalog_snapshot::EdgeMappingInfo {
         crate::query::catalog_snapshot::EdgeMappingInfo {

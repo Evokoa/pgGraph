@@ -5702,6 +5702,127 @@ fn executor_node_scan_reads_graph_and_transaction_nodes() {
 }
 
 #[test]
+fn detached_transaction_identity_reuse_selects_only_live_generation() {
+    use crate::projection::tx_delta;
+
+    for key in ["u1", "u3"] {
+        tx_delta::clear_for_test();
+        let engine = engine_fixture();
+        let initial = engine.resolve(10, key).unwrap_or_else(|| {
+            tx_delta::record_added_node_indexed(10, key, None, engine.node_store.node_count())
+                .unwrap()
+        });
+        tx_delta::record_deleted_node(initial).unwrap();
+        for _ in 0..2 {
+            let replacement =
+                tx_delta::record_added_node_indexed(10, key, None, engine.node_store.node_count())
+                    .unwrap();
+            assert_ne!(replacement, initial);
+            assert_eq!(engine.resolve(10, key), None);
+            assert_eq!(
+                tx_delta::resolve_added_node(10, key, None, false),
+                Some(replacement)
+            );
+            assert_eq!(tx_delta::added_node_indexes(10, None, false), [replacement]);
+            assert_eq!(tx_delta::added_node_keys(10, None, false), [key]);
+            for present in [true, false] {
+                let mut hidden = roaring::RoaringBitmap::new();
+                if !present {
+                    hidden.insert(replacement);
+                }
+                let visibility = crate::visibility::VisibilityScope::enforced_for_test(
+                    hidden,
+                    roaring::RoaringBitmap::new(),
+                    roaring::RoaringBitmap::new(),
+                );
+                for query in [
+                    format!("MATCH (u:users) WHERE u.id = '{key}' RETURN u"),
+                    "MATCH (u:users) RETURN u".to_owned(),
+                ] {
+                    let plan = filtered_node_plan(&query);
+                    let governor =
+                        crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+                    let context =
+                        crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+                    let rows = super::execute::execute_node_scan_in_context(
+                        &engine,
+                        &plan,
+                        None,
+                        &QueryParams::new(),
+                        &context,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        rows.iter().filter(|row| row.node.node_id == key).count(),
+                        usize::from(present)
+                    );
+                }
+            }
+            tx_delta::record_deleted_node(replacement).unwrap();
+            assert_eq!(engine.resolve(10, key), None);
+            assert_eq!(tx_delta::resolve_added_node(10, key, None, false), None);
+            assert!(tx_delta::added_node_keys(10, None, false).is_empty());
+            assert!(tx_delta::added_node_indexes(10, None, false).is_empty());
+            assert!(tx_delta::added_node_by_index(replacement).is_some());
+        }
+    }
+    tx_delta::clear_for_test();
+}
+
+#[test]
+fn detached_transaction_nodes_stay_absent_from_all_node_scan_shapes() {
+    crate::projection::tx_delta::clear_for_test();
+    let engine = engine_fixture();
+    let added = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    crate::projection::tx_delta::record_deleted_node(added).unwrap();
+    let unrestricted = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let enforced = crate::visibility::VisibilityScope::enforced_for_test(
+        roaring::RoaringBitmap::new(),
+        roaring::RoaringBitmap::new(),
+        roaring::RoaringBitmap::new(),
+    );
+    for visibility in [&unrestricted, &enforced] {
+        for query in [
+            "MATCH (u:users) WHERE u.id = 'u3' RETURN u",
+            "OPTIONAL MATCH (u:users) WHERE u.id = 'u3' RETURN u",
+            "MATCH (u:users) RETURN u",
+        ] {
+            let plan = filtered_node_plan(query);
+            let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+            let context = crate::visibility::QueryExecutionContext::new(&governor, visibility);
+            let rows = super::execute::execute_node_scan_in_context(
+                &engine,
+                &plan,
+                None,
+                &QueryParams::new(),
+                &context,
+            )
+            .unwrap();
+            if plan.optional {
+                assert_eq!(rows.len(), 1);
+                assert!(rows[0].optional_null);
+            } else if plan.identity_lookup.is_some() {
+                assert!(rows.is_empty());
+            } else {
+                assert_eq!(
+                    rows.iter()
+                        .map(|row| row.node.node_id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["u1", "u2"]
+                );
+            }
+        }
+    }
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
 fn executor_node_scan_hides_unscoped_transaction_nodes_under_tenant_scope() {
     crate::projection::tx_delta::clear_for_test();
     let ast = crate::gql::parse_statement("MATCH (u:users) RETURN u").unwrap();

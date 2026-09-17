@@ -7619,6 +7619,354 @@ fn gql_detach_delete_removes_incident_edges_before_node() {
     assert_eq!(traverse_deleted_sqlstate, "P0002");
 }
 
+fn build_transaction_detach_fixture(bidirectional: bool) {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on;
+        SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name', 'age'])")
+        .expect("register transaction detach nodes failed");
+    Spi::run(&format!("SELECT graph.add_edge('graph_test_friendships_pgtest'::regclass,
+        'user_id', 'graph_test_users_pgtest'::regclass, 'friend_id', 'friend',
+        bidirectional := {bidirectional});
+        SELECT * FROM graph.build(mode := 'mutable_overlay')"))
+        .expect("build transaction detach graph failed");
+}
+
+fn transaction_detach_snapshot(bidirectional: bool) -> serde_json::Value {
+    Spi::get_one::<pgrx::JsonB>(&format!(
+        "WITH expected_edges AS (
+            SELECT id, user_id AS source, friend_id AS target FROM public.graph_test_friendships_pgtest
+            UNION ALL
+            SELECT id, friend_id, user_id FROM public.graph_test_friendships_pgtest WHERE {bidirectional}
+         ), actual_edges AS (
+            SELECT jsonb_build_object('id', row #>> '{{r,id}}',
+                'source', row->>'source', 'target', row->>'target') AS edge
+            FROM graph.gql('MATCH (a:graph_test_users_pgtest)-[r:friend]->(b:graph_test_users_pgtest)
+                RETURN a.id AS source, b.id AS target, r')
+         ) SELECT jsonb_build_object(
+            'nodes', (SELECT jsonb_agg(to_jsonb(n) ORDER BY id) FROM public.graph_test_users_pgtest n),
+            'graph_nodes', (SELECT jsonb_agg(row ORDER BY row->>'id') FROM graph.gql(
+                'MATCH (n:graph_test_users_pgtest) RETURN n.id AS id, n.name AS name, n.age AS age')),
+            'edges', (SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text), '[]'::jsonb)
+                FROM expected_edges e),
+            'graph_edges', (SELECT COALESCE(jsonb_agg(edge ORDER BY edge::text), '[]'::jsonb) FROM actual_edges),
+            'delta', (SELECT jsonb_build_array(tx_delta_added_nodes, tx_delta_deleted_nodes,
+                tx_delta_added_edges, tx_delta_deleted_edges) FROM graph.status())
+         )"
+    )).expect("snapshot transaction detach state failed").unwrap().0
+}
+
+fn assert_transaction_detach_edges_and_rollback(bidirectional: bool) {
+    build_transaction_detach_fixture(bidirectional);
+    Spi::run("SELECT * FROM graph.gql(
+        'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN n');
+        SELECT * FROM graph.gql(
+        'CREATE (n:graph_test_users_pgtest {id: ''u4'', name: ''Dana'', age: 30}) RETURN n')")
+        .expect("create transaction detach nodes failed");
+    for (id, source, target) in [
+        ("in", "u1", "u3"), ("out-a", "u3", "u2"), ("out-b", "u3", "u2"),
+        ("self", "u3", "u3"), ("new-peer", "u3", "u4"), ("keep", "u2", "u4"),
+    ] {
+        let query = format!("MATCH (a:graph_test_users_pgtest {{id: '{source}'}}),
+            (b:graph_test_users_pgtest {{id: '{target}'}})
+            CREATE (a)-[r:friend {{id: '{id}'}}]->(b) RETURN r");
+        Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&query)))
+            .expect("create transaction detach edge failed");
+    }
+    let before = transaction_detach_snapshot(bidirectional);
+    assert_eq!(before["nodes"], before["graph_nodes"]);
+    assert_eq!(before["edges"], before["graph_edges"]);
+    Spi::run("DO $$ BEGIN
+        BEGIN
+            PERFORM * FROM graph.gql(
+                'MATCH (n:graph_test_users_pgtest {id: ''u3''}) DETACH DELETE n RETURN n');
+            IF EXISTS (SELECT FROM public.graph_test_users_pgtest WHERE id = 'u3') THEN
+                RAISE check_violation;
+            END IF;
+            RAISE no_data_found;
+        EXCEPTION WHEN no_data_found THEN NULL;
+        END;
+    END $$").expect("rollback transaction detach failed");
+    assert_eq!(transaction_detach_snapshot(bidirectional), before);
+    // Capacity rejection occurs after edge DML and must roll that DML back.
+    Spi::run("SET graph.max_tx_delta_nodes = 2").unwrap();
+    let delete = "SELECT * FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest {id: ''u3''}) DETACH DELETE n RETURN n.name AS name')";
+    assert_eq!(sqlstate_for_error(delete).as_deref(), Some("54000"));
+    Spi::run("RESET graph.max_tx_delta_nodes").unwrap();
+    assert_eq!(transaction_detach_snapshot(bidirectional), before);
+    let name = Spi::get_one::<String>(&format!("SELECT row->>'name' FROM ({delete}) d")).unwrap();
+    assert_eq!(name.as_deref(), Some("Cara"));
+    let after = transaction_detach_snapshot(bidirectional);
+    assert_eq!(after["nodes"], serde_json::json!([
+        {"id":"u1","name":"Alice","age":37}, {"id":"u2","name":"Bob","age":41},
+        {"id":"u4","name":"Dana","age":30},
+    ]));
+    assert_eq!(after["nodes"], after["graph_nodes"]);
+    assert_eq!(after["edges"], after["graph_edges"]);
+    assert_eq!(after["delta"][2], serde_json::json!(if bidirectional { 2 } else { 1 }));
+    assert_eq!(Spi::get_one::<String>(
+        "SELECT string_agg(id, ',' ORDER BY id) FROM public.graph_test_friendships_pgtest"
+    ).unwrap().as_deref(), Some("f1,keep"));
+    for query in [
+        "MATCH (n:graph_test_users_pgtest {id: 'u3'}) RETURN n",
+        "MATCH (n:graph_test_users_pgtest) WHERE n.name = 'Cara' RETURN n",
+    ] {
+        assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM graph.gql({})",
+            super::sql_literal(query))).unwrap(), Some(0));
+    }
+}
+
+#[pg_test]
+fn gql_transaction_detach_directed_edges_and_rollback() {
+    assert_transaction_detach_edges_and_rollback(false);
+}
+
+#[pg_test]
+fn gql_transaction_detach_bidirectional_edges_and_rollback() {
+    assert_transaction_detach_edges_and_rollback(true);
+}
+
+#[pg_test]
+fn gql_transaction_detach_standalone_node_preserves_empty_reads() {
+    build_transaction_detach_fixture(false);
+    Spi::run("SELECT * FROM graph.gql(
+        'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN n')")
+        .unwrap();
+    assert_eq!(Spi::get_one::<String>("SELECT row->>'name' FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest {id: ''u3''}) DETACH DELETE n RETURN n.name AS name')")
+        .unwrap().as_deref(), Some("Cara"));
+    let snapshot = transaction_detach_snapshot(false);
+    assert_eq!(snapshot["nodes"], snapshot["graph_nodes"]);
+    assert_eq!(snapshot["edges"], snapshot["graph_edges"]);
+    assert_eq!(snapshot["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(Spi::get_one::<bool>("SELECT row->'n' = 'null'::jsonb FROM graph.gql(
+        'OPTIONAL MATCH (n:graph_test_users_pgtest {id: ''u3''}) RETURN n')").unwrap(), Some(true));
+    assert_eq!(sqlstate_for_error("SELECT * FROM graph.traverse(
+        'graph_test_users_pgtest'::regclass, 'u3', 1, hydrate := false)").as_deref(), Some("P0002"));
+}
+
+#[pg_test]
+fn gql_transaction_detach_reuses_built_identity() {
+    assert_transaction_detach_identity_reuse("u1");
+}
+
+#[pg_test]
+fn gql_transaction_detach_reuses_transaction_identity() {
+    assert_transaction_detach_identity_reuse("u3");
+}
+
+fn assert_transaction_detach_identity_reuse(key: &str) {
+    build_transaction_detach_fixture(true);
+    Spi::run("CREATE ROLE graph_detach_generation_reader;
+        GRANT USAGE ON SCHEMA graph, public TO graph_detach_generation_reader;
+        GRANT SELECT ON public.graph_test_users_pgtest, public.graph_test_friendships_pgtest
+            TO graph_detach_generation_reader;
+        ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY detach_generation_read ON public.graph_test_users_pgtest FOR SELECT
+            TO graph_detach_generation_reader USING (true)").unwrap();
+    if key == "u3" {
+        Spi::run("SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Original'', age: 29}) RETURN n')")
+            .unwrap();
+    }
+    let delete = format!("MATCH (n:graph_test_users_pgtest {{id: '{key}'}}) DETACH DELETE n RETURN n");
+    let create = format!("CREATE (n:graph_test_users_pgtest {{id: '{key}', name: 'Replacement', age: 55}}) RETURN n");
+    let before = transaction_detach_snapshot(true);
+    Spi::run(&format!("DO $$ BEGIN BEGIN
+        PERFORM * FROM graph.gql({});
+        PERFORM * FROM graph.gql({});
+        RAISE no_data_found;
+        EXCEPTION WHEN no_data_found THEN NULL; END; END $$",
+        super::sql_literal(&delete), super::sql_literal(&create))).unwrap();
+    assert_eq!(transaction_detach_snapshot(true), before);
+    let original = Spi::get_one::<pgrx::JsonB>(&format!(
+        "SELECT row FROM graph.gql({})", super::sql_literal(&format!(
+            "MATCH (n:graph_test_users_pgtest {{id: '{key}'}}) RETURN n.id AS id, n.name AS name, n.age AS age"
+        )))).unwrap().unwrap().0;
+    assert!(before["nodes"].as_array().unwrap().contains(&original));
+
+    for cycle in 0..2 {
+        if cycle == 0 {
+            Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&delete))).unwrap();
+        }
+        Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&create))).unwrap();
+        Spi::run("SET ROLE graph_detach_generation_reader").unwrap();
+        for query in [
+            format!("MATCH (n:graph_test_users_pgtest {{id: '{key}'}}) RETURN n.id AS id, n.name AS name, n.age AS age"),
+            "MATCH (n:graph_test_users_pgtest) WHERE n.name = 'Replacement' RETURN n.id AS id, n.name AS name, n.age AS age".to_owned(),
+        ] {
+            assert_eq!(Spi::get_one::<pgrx::JsonB>(&format!(
+                "SELECT jsonb_agg(row) FROM graph.gql({})", super::sql_literal(&query)
+            )).unwrap().unwrap().0, serde_json::json!([{"id":key,"name":"Replacement","age":55}]));
+        }
+        assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', {}, hydrate := false)", super::sql_literal(key)))
+            .unwrap(), Some(1));
+        Spi::run("RESET ROLE").unwrap();
+        // Both source and target resolution must use the replacement index.
+        for (id, source, target) in [("replacement-out", key, "u2"), ("replacement-in", "u2", key)] {
+            let query = format!("MATCH (a:graph_test_users_pgtest {{id: '{source}'}}),
+                (b:graph_test_users_pgtest {{id: '{target}'}})
+                CREATE (a)-[r:friend {{id: '{id}'}}]->(b) RETURN r");
+            Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&query))).unwrap();
+        }
+        Spi::run("SET ROLE graph_detach_generation_reader").unwrap();
+        let replacement = transaction_detach_snapshot(true);
+        assert_eq!(replacement["nodes"], replacement["graph_nodes"]);
+        assert_eq!(replacement["edges"], replacement["graph_edges"]);
+        let identity_hop = format!("MATCH (a:graph_test_users_pgtest {{id: '{key}'}})-[r:friend]->(b:graph_test_users_pgtest) RETURN r");
+        assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM graph.gql({})",
+            super::sql_literal(&identity_hop))).unwrap(), Some(2));
+        Spi::run("RESET ROLE").unwrap();
+        Spi::run(&format!("DO $$ BEGIN BEGIN
+            PERFORM * FROM graph.gql({});
+            RAISE no_data_found;
+            EXCEPTION WHEN no_data_found THEN NULL; END; END $$", super::sql_literal(&delete))).unwrap();
+        assert_eq!(transaction_detach_snapshot(true), replacement);
+        Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&delete))).unwrap();
+        let after = transaction_detach_snapshot(true);
+        assert_eq!(after["nodes"], after["graph_nodes"]);
+        assert_eq!(after["edges"], after["graph_edges"]);
+        assert_eq!(after["delta"][2], serde_json::json!(0));
+        for query in [
+            format!("MATCH (n:graph_test_users_pgtest {{id: '{key}'}}) RETURN n"),
+            "MATCH (n:graph_test_users_pgtest) WHERE n.name = 'Replacement' RETURN n".to_owned(),
+        ] {
+            assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM graph.gql({})",
+                super::sql_literal(&query))).unwrap(), Some(0));
+        }
+        assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM public.graph_test_users_pgtest WHERE id = {}",
+            super::sql_literal(key))).unwrap(), Some(0));
+    }
+}
+
+#[pg_test]
+fn gql_transaction_detach_respects_acl_rls_and_tenant_scope() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run("ALTER TABLE public.graph_test_users_pgtest ADD COLUMN tenant_id text NOT NULL DEFAULT 'tenant-a';
+        SET graph.mutable_enabled = on;
+        SELECT graph.add_table('graph_test_users_pgtest'::regclass, id_column := 'id',
+            columns := ARRAY['name', 'age'], tenant_column := 'tenant_id');
+        SELECT graph.add_edge('graph_test_friendships_pgtest'::regclass, 'user_id',
+            'graph_test_users_pgtest'::regclass, 'friend_id', 'friend', bidirectional := false);
+        SELECT * FROM graph.build(mode := 'mutable_overlay');
+        SET graph.tenant_setting = 'app.graph_detach_tenant';
+        SET graph.enforce_tenant_scope = on;
+        SET app.graph_detach_tenant = 'tenant-a';
+        SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN n');
+        SELECT * FROM graph.gql(
+            'MATCH (a:graph_test_users_pgtest {id: ''u1''}), (b:graph_test_users_pgtest {id: ''u3''})
+             CREATE (a)-[r:friend {id: ''created-edge''}]->(b) RETURN r');
+        CREATE ROLE graph_transaction_detach_reader;
+        GRANT USAGE ON SCHEMA graph, public TO graph_transaction_detach_reader;
+        GRANT SELECT, UPDATE ON public.graph_test_users_pgtest TO graph_transaction_detach_reader;
+        GRANT SELECT ON public.graph_test_friendships_pgtest TO graph_transaction_detach_reader")
+        .expect("prepare transaction detach permissions failed");
+    let delete = "SELECT * FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest {id: ''u3''}) DETACH DELETE n RETURN n.name AS name')";
+    let capture = format!("SELECT public.graph_test_sqlstate({})", super::sql_literal(delete));
+    let source_snapshot = "SELECT jsonb_build_object(
+        'nodes', (SELECT jsonb_agg(to_jsonb(n) ORDER BY id) FROM public.graph_test_users_pgtest n),
+        'edges', (SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM public.graph_test_friendships_pgtest e),
+        'delta', (SELECT jsonb_build_array(tx_delta_added_nodes, tx_delta_deleted_nodes,
+            tx_delta_added_edges, tx_delta_deleted_edges) FROM graph.status()))";
+    let before = Spi::get_one::<pgrx::JsonB>(source_snapshot).unwrap().unwrap().0;
+    Spi::run("SET ROLE graph_transaction_detach_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("42501"));
+    Spi::run("RESET ROLE; GRANT DELETE ON public.graph_test_users_pgtest TO graph_transaction_detach_reader;
+        SET ROLE graph_transaction_detach_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("42501"));
+    Spi::run("RESET ROLE; GRANT DELETE ON public.graph_test_friendships_pgtest TO graph_transaction_detach_reader;
+        ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY transaction_detach_select ON public.graph_test_users_pgtest FOR SELECT
+            TO graph_transaction_detach_reader USING (tenant_id = 'tenant-a' AND id <> 'u3');
+        CREATE POLICY transaction_detach_delete ON public.graph_test_users_pgtest FOR DELETE
+            TO graph_transaction_detach_reader USING (false);
+        CREATE POLICY transaction_detach_update ON public.graph_test_users_pgtest FOR UPDATE
+            TO graph_transaction_detach_reader USING (true);
+        SET ROLE graph_transaction_detach_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("22000"));
+    Spi::run("RESET ROLE; ALTER POLICY transaction_detach_select ON public.graph_test_users_pgtest
+        USING (tenant_id = 'tenant-a'); SET ROLE graph_transaction_detach_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("22000"));
+    Spi::run("RESET ROLE").unwrap();
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(source_snapshot).unwrap().unwrap().0, before);
+    Spi::run("ALTER POLICY transaction_detach_delete ON public.graph_test_users_pgtest USING (true);
+        ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY transaction_detach_edge_select ON public.graph_test_friendships_pgtest FOR SELECT
+            TO graph_transaction_detach_reader USING (true);
+        CREATE POLICY transaction_detach_edge_delete ON public.graph_test_friendships_pgtest FOR DELETE
+            TO graph_transaction_detach_reader USING (false);
+        SET ROLE graph_transaction_detach_reader").unwrap();
+    // Edge RLS preserves the incident row, so its foreign key prevents node deletion.
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("23503"));
+    Spi::run("RESET ROLE").unwrap();
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(source_snapshot).unwrap().unwrap().0, before);
+    Spi::run("ALTER POLICY transaction_detach_edge_delete ON public.graph_test_friendships_pgtest USING (true);
+        SET ROLE graph_transaction_detach_reader; SET app.graph_detach_tenant = 'tenant-b'").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("22000"));
+    Spi::run("SET app.graph_detach_tenant = 'tenant-a'").unwrap();
+    assert_eq!(Spi::get_one::<String>(&format!("SELECT row->>'name' FROM ({delete}) d"))
+        .unwrap().as_deref(), Some("Cara"));
+    Spi::run("RESET ROLE").unwrap();
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM public.graph_test_users_pgtest WHERE id = 'u3'")
+        .unwrap(), Some(0));
+    assert_eq!(Spi::get_one::<String>("SELECT string_agg(id, ',' ORDER BY id) FROM public.graph_test_friendships_pgtest")
+        .unwrap().as_deref(), Some("f1"));
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest) RETURN n.id')").unwrap(), Some(2));
+}
+
+#[pg_test]
+fn gql_transaction_detach_cleans_edges_to_another_tenant() {
+    reset_and_create_fixtures();
+    Spi::run("ALTER TABLE public.graph_test_users_pgtest ADD COLUMN tenant_id text NOT NULL DEFAULT 'tenant-a';
+        SET graph.mutable_enabled = on;
+        SELECT graph.add_table('graph_test_users_pgtest'::regclass, id_column := 'id',
+            columns := ARRAY['name', 'age'], tenant_column := 'tenant_id');
+        SELECT graph.add_edge('graph_test_friendships_pgtest'::regclass, 'user_id',
+            'graph_test_users_pgtest'::regclass, 'friend_id', 'friend', bidirectional := true);
+        SELECT * FROM graph.build(mode := 'mutable_overlay');
+        SET graph.tenant_setting = 'app.graph_detach_tenant';
+        SET graph.enforce_tenant_scope = on;
+        SET app.graph_detach_tenant = 'tenant-a';
+        SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN n');
+        ALTER TABLE public.graph_test_users_pgtest ALTER COLUMN tenant_id SET DEFAULT 'tenant-b';
+        SET app.graph_detach_tenant = 'tenant-b';
+        SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u4'', name: ''Dana'', age: 30}) RETURN n');
+        SET graph.enforce_tenant_scope = off;
+        SET graph.tenant_setting = '';
+        SELECT * FROM graph.gql(
+            'MATCH (a:graph_test_users_pgtest {id: ''u3''}), (b:graph_test_users_pgtest {id: ''u4''})
+             CREATE (a)-[r:friend {id: ''cross-out''}]->(b) RETURN r');
+        SELECT * FROM graph.gql(
+            'MATCH (a:graph_test_users_pgtest {id: ''u4''}), (b:graph_test_users_pgtest {id: ''u3''})
+             CREATE (a)-[r:friend {id: ''cross-in''}]->(b) RETURN r');
+        SET graph.tenant_setting = 'app.graph_detach_tenant';
+        SET graph.enforce_tenant_scope = on;
+        SET app.graph_detach_tenant = 'tenant-a'").unwrap();
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest {id: ''u4''}) RETURN n')").unwrap(), Some(0));
+    assert_eq!(Spi::get_one::<i64>("SELECT tx_delta_added_edges FROM graph.status()").unwrap(), Some(4));
+    Spi::run("SELECT * FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest {id: ''u3''}) DETACH DELETE n RETURN n')").unwrap();
+    assert_eq!(Spi::get_one::<i64>("SELECT tx_delta_added_edges FROM graph.status()").unwrap(), Some(0));
+    assert_eq!(Spi::get_one::<String>("SELECT string_agg(id, ',' ORDER BY id)
+        FROM public.graph_test_friendships_pgtest").unwrap().as_deref(), Some("f1"));
+    assert_eq!(Spi::get_one::<String>("SELECT tenant_id FROM public.graph_test_users_pgtest WHERE id = 'u4'")
+        .unwrap().as_deref(), Some("tenant-b"));
+    Spi::run("SET app.graph_detach_tenant = 'tenant-b'").unwrap();
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.gql(
+        'MATCH (n:graph_test_users_pgtest {id: ''u4''}) RETURN n')").unwrap(), Some(1));
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.gql(
+        'MATCH (a:graph_test_users_pgtest {id: ''u4''})-[r:friend]->(b:graph_test_users_pgtest) RETURN r')")
+        .unwrap(), Some(0));
+}
+
 #[pg_test]
 fn gql_detach_delete_delta_limit_rolls_back_source_rows() {
     reset_and_create_fixtures();
