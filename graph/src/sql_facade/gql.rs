@@ -475,6 +475,16 @@ fn execute_statement_governed(
             crate::sql_visibility::record_selected_visibility_strategy(false);
             let context = coordinator.context(governor);
             check_node_scan_acl(&plan);
+            if plan.can_filter_scan_candidates() {
+                return execute_filtered_node_scan(
+                    &plan,
+                    tenant_scope,
+                    params,
+                    hydrate,
+                    &context,
+                    catalog_tables,
+                );
+            }
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_node_scan_in_context(
                     &engine.borrow(),
@@ -924,6 +934,69 @@ fn prepare_gql_eager_visibility(
     clippy::too_many_arguments,
     reason = "identity-bounded GQL execution keeps the plan, caller scope, catalog, and governor explicit"
 )]
+/// Filter ordinary node reads before retaining their bounded result set.
+fn execute_filtered_node_scan(
+    plan: &crate::query::physical_plan::PhysicalNodeScan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    use crate::query::{execute, value};
+
+    crate::sql_visibility::with_source_policy_guard(|| {
+        let governor = context.governor;
+        let workspace = ENGINE
+            .with(|engine| execute::reserve_filtered_node_scan(&engine.borrow(), plan, governor))?;
+        let mut cursor = execute::NodeScanCursor::new();
+        let mut matches = Vec::new();
+        let mut hydrated = value::HydratedRows::new();
+        let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
+        loop {
+            // No engine borrow spans SPI, which can invoke caller RLS policies.
+            let candidate =
+                ENGINE.with(|engine| cursor.next(&engine.borrow(), plan, tenant_scope, context))?;
+            let Some(row) = candidate else { break };
+            let key = (row.node.table_oid, row.node.node_id.clone());
+            if hydrated.contains_key(&key) {
+                continue;
+            }
+            let scoped = hydrator
+                .hydrate_scoped(row.node.table_oid, &row.node.node_id)?
+                .ok_or_else(|| safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "GQL could not hydrate node `{}` from table OID {}",
+                        row.node.node_id, row.node.table_oid
+                    ),
+                })?;
+            let crate::sql_hydration::ScopedHydratedNode {
+                value,
+                workspace: row_workspace,
+            } = scoped;
+            let mut candidate_hydrated = value::HydratedRows::new();
+            candidate_hydrated
+                .try_reserve(1)
+                .map_err(|_| execute::filtered_node_allocation_error(governor))?;
+            candidate_hydrated.insert(key, value.0);
+            if value::node_candidate_matches(&row, plan, &candidate_hydrated, params)? {
+                execute::push_filtered_node_row(&mut matches, row, plan, governor)?;
+                hydrated
+                    .try_reserve(1)
+                    .map_err(|_| execute::filtered_node_allocation_error(governor))?;
+                hydrated.extend(candidate_hydrated);
+                row_workspace.retain_until_governor_drop();
+            }
+            // Rejected JSON and its lease drop before scanning another candidate.
+        }
+        workspace.retain_until_governor_drop();
+        measure_gql_read_recheck(matches.len(), || {
+            ensure_gql_node_rows_visible(&matches, governor, catalog_tables)
+        })?;
+        value::project_node_rows_governed(matches, plan, &hydrated, params, hydrate, governor)
+    })
+}
+
 fn execute_identity_node_scan_lazy(
     plan: &crate::query::physical_plan::PhysicalNodeScan,
     tenant_scope: Option<&str>,

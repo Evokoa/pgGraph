@@ -75,6 +75,175 @@ pub(crate) struct GqlNodeRow {
     pub(crate) optional_null: bool,
 }
 
+enum NodeScanPosition {
+    Base(u32),
+    Added(usize),
+    Done,
+}
+
+/// Resumable node candidates, without holding an engine borrow during hydration.
+pub(crate) struct NodeScanCursor {
+    position: NodeScanPosition,
+}
+
+impl NodeScanCursor {
+    pub(crate) fn new() -> Self {
+        Self {
+            position: NodeScanPosition::Base(0),
+        }
+    }
+
+    pub(crate) fn next(
+        &mut self,
+        engine: &Engine,
+        plan: &PhysicalNodeScan,
+        tenant: Option<&str>,
+        context: &QueryExecutionContext<'_>,
+    ) -> GraphResult<Option<GqlNodeRow>> {
+        if !engine.built {
+            return Err(GraphError::NotBuilt);
+        }
+        // Hydration also consumes shared work units. Its increments must not
+        // let this scan skip elapsed checks by changing the checkpoint residue.
+        crate::resource::check_postgres_interrupts();
+        context
+            .governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
+            .map_err(crate::safety::resource_limit_error)?;
+        loop {
+            let node = match self.position {
+                NodeScanPosition::Base(start) => {
+                    let idx = match engine.table_membership.get(&plan.table_oid) {
+                        Some(nodes) => nodes.range(start..).next(),
+                        None => (start < engine.node_store.node_count()).then_some(start),
+                    };
+                    let Some(idx) = idx.filter(|idx| *idx < engine.node_store.node_count()) else {
+                        self.position = NodeScanPosition::Added(0);
+                        continue;
+                    };
+                    self.position = idx
+                        .checked_add(1)
+                        .map_or(NodeScanPosition::Added(0), NodeScanPosition::Base);
+                    consume_query_work(
+                        context.governor,
+                        crate::resource::ResourcePhase::QueryCandidates,
+                    )?;
+                    if engine.node_store.table_oid(idx) != Some(plan.table_oid)
+                        || !node_active(engine, idx)
+                        || crate::projection::tx_delta::node_deleted(idx)
+                        || !tenant_allows_node(engine, idx, tenant)
+                        || !context.visibility.allows_node(idx)
+                    {
+                        continue;
+                    }
+                    coordinate(engine, idx)?
+                }
+                NodeScanPosition::Added(position) => {
+                    let candidate =
+                        crate::projection::tx_delta::with_added_node_at(position, |node| {
+                            let table_is_tenanted =
+                                engine.tenanted_table_oids.contains(&plan.table_oid);
+                            if node.table_oid != plan.table_oid
+                                || (table_is_tenanted
+                                    && tenant.is_some()
+                                    && tenant != node.tenant.as_deref())
+                                || node.node_idx.is_some_and(|idx| {
+                                    crate::projection::tx_delta::node_deleted(idx)
+                                        || !context.visibility.allows_node(idx)
+                                })
+                                || (node.node_idx.is_none()
+                                    && !context.visibility.is_unrestricted())
+                            {
+                                None
+                            } else {
+                                Some(GqlNodeCoordinate {
+                                    table_oid: node.table_oid,
+                                    node_id: node.primary_key.clone(),
+                                })
+                            }
+                        });
+                    let Some(node) = candidate else {
+                        self.position = NodeScanPosition::Done;
+                        return Ok(None);
+                    };
+                    self.position = position
+                        .checked_add(1)
+                        .map_or(NodeScanPosition::Done, NodeScanPosition::Added);
+                    consume_query_work(
+                        context.governor,
+                        crate::resource::ResourcePhase::QueryCandidates,
+                    )?;
+                    let Some(node) = node else { continue };
+                    node
+                }
+                NodeScanPosition::Done => return Ok(None),
+            };
+            return Ok(Some(GqlNodeRow {
+                node,
+                optional_null: false,
+            }));
+        }
+    }
+}
+
+/// Reserve retained coordinates, map keys, and one transient scan candidate.
+pub(crate) fn reserve_filtered_node_scan<'a>(
+    engine: &Engine,
+    plan: &PhysicalNodeScan,
+    governor: &'a crate::resource::ResourceGovernor,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let key_bytes = engine
+        .node_store
+        .max_primary_key_bytes()
+        .max(crate::projection::tx_delta::max_added_node_primary_key_bytes());
+    let bytes = key_bytes
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(1_024))
+        .and_then(|bytes| {
+            plan.execution_row_cap()
+                .checked_add(1)
+                .and_then(|rows| rows.checked_mul(bytes))
+        })
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("GQL filtered scan workspace overflowed".into()))?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryCandidates, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+/// Admit a filtered match, preserving the hard cap and allocation failures.
+pub(crate) fn push_filtered_node_row(
+    rows: &mut Vec<GqlNodeRow>,
+    row: GqlNodeRow,
+    plan: &PhysicalNodeScan,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<()> {
+    let cap = plan.execution_row_cap();
+    if rows.len() >= cap {
+        return Err(GraphError::GqlExecution {
+            reason: format!("GQL result row cap exceeded ({cap})"),
+        });
+    }
+    rows.try_reserve(1)
+        .map_err(|_| filtered_node_allocation_error(governor))?;
+    rows.push(row);
+    Ok(())
+}
+
+pub(crate) fn filtered_node_allocation_error(
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory bytes".into(),
+        phase: crate::resource::ResourcePhase::QueryCandidates
+            .as_str()
+            .into(),
+        used: governor.memory_used().as_u64(),
+        requested: 1_024,
+        limit: governor.memory_limit().as_u64(),
+    }
+}
+
 /// Execute a physical one-hop plan.
 ///
 /// # Errors

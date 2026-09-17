@@ -141,7 +141,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "e64ce9c3065397513b22eb082aae23acba1dde3b028303e7beb4c3be2ad2848e",
+  "gql_implementation_sha256": "ff4b7512fc23a99e125be87a7e6d10831ca60b370c19dd77c03017faeeca660b",
   "gql_profile": {
     "assurance_profiles": {
       "read": {

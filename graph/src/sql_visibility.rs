@@ -267,6 +267,17 @@ pub(crate) fn ensure_graph_api_available() -> GraphResult<()> {
     VisibilityResolutionGuard::ensure_available()
 }
 
+/// Keep a resumable read's projection stable across source-policy callbacks.
+pub(crate) fn with_source_policy_guard<T>(f: impl FnOnce() -> GraphResult<T>) -> GraphResult<T> {
+    VisibilityResolutionGuard::ensure_available()?;
+    pgrx::pg_sys::PgTryBuilder::new(AssertUnwindSafe(|| {
+        let _guard = VisibilityResolutionGuard::activate();
+        f()
+    }))
+    .finally(VisibilityResolutionGuard::clear)
+    .execute()
+}
+
 #[cfg(test)]
 #[test]
 fn recursive_visibility_resolution_is_rejected() {

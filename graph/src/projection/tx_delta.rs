@@ -574,6 +574,16 @@ pub(crate) fn record_added_node_indexed(
     result
 }
 
+/// Inspect one transaction addition without copying its key or tenant payload.
+pub(crate) fn with_added_node_at<T>(position: usize, f: impl FnOnce(&AddedNode) -> T) -> Option<T> {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .and_then(|delta| delta.added_nodes.get(position).map(f))
+    })
+}
+
 /// Return transaction-local node primary keys for a table and tenant scope.
 pub(crate) fn added_node_keys(
     table_oid: u32,

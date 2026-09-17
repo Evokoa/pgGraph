@@ -15,6 +15,19 @@ pub(crate) struct NodeHydrator<'a> {
     lookups: HashMap<u32, SourceKeyLookup>,
 }
 
+/// A hydrated row whose memory reservation follows the value's lifetime.
+pub(crate) struct ScopedHydratedNode<'a> {
+    pub(crate) value: pgrx::JsonB,
+    pub(crate) workspace: crate::resource::ResourceLease<'a>,
+}
+
+impl ScopedHydratedNode<'_> {
+    fn retain(self) -> pgrx::JsonB {
+        self.workspace.retain_until_governor_drop();
+        self.value
+    }
+}
+
 impl<'a> NodeHydrator<'a> {
     pub(crate) fn new(
         governor: &'a crate::resource::ResourceGovernor,
@@ -32,6 +45,17 @@ impl<'a> NodeHydrator<'a> {
         table_oid: u32,
         node_id: &str,
     ) -> safety::GraphResult<Option<pgrx::JsonB>> {
+        Ok(self
+            .hydrate_scoped(table_oid, node_id)?
+            .map(ScopedHydratedNode::retain))
+    }
+
+    /// Hydrate a candidate without retaining rejected rows' memory charges.
+    pub(crate) fn hydrate_scoped(
+        &mut self,
+        table_oid: u32,
+        node_id: &str,
+    ) -> safety::GraphResult<Option<ScopedHydratedNode<'a>>> {
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             acl::check_table_acl(table_oid)
         }))?;
@@ -133,7 +157,9 @@ fn test_hydrate_node_after_lookup(
         .map_err(|error| {
             safety::GraphError::Internal(format!("source lookup barrier failed: {error}"))
         })?;
-        hydrate_node_with_lookup(node_id, &governor, &lookup)
+        let hydrated = hydrate_node_with_lookup(node_id, &governor, &lookup)?;
+        let retained = hydrated.map(ScopedHydratedNode::retain);
+        Ok::<_, safety::GraphError>(retained)
     }))
     .unwrap_or_else(|error| error.report())
 }
@@ -208,11 +234,11 @@ pub(crate) fn hydrate_node_governed_with_tables(
     NodeHydrator::new(governor, tables).hydrate(table_oid, node_id)
 }
 
-fn hydrate_node_with_lookup(
+fn hydrate_node_with_lookup<'a>(
     node_id: &str,
-    governor: &crate::resource::ResourceGovernor,
+    governor: &'a crate::resource::ResourceGovernor,
     lookup: &SourceKeyLookup,
-) -> safety::GraphResult<Option<pgrx::JsonB>> {
+) -> safety::GraphResult<Option<ScopedHydratedNode<'a>>> {
     let mut workspace = reserve_hydration_workspace(governor, 1, node_id.len())?;
     let table_name = &lookup.table_name;
     let predicate = lookup.scalar_predicate();
@@ -284,8 +310,7 @@ fn hydrate_node_with_lookup(
                 })
             })
         }))?;
-    workspace.retain_until_governor_drop();
-    Ok(hydrated)
+    Ok(hydrated.map(|value| ScopedHydratedNode { value, workspace }))
 }
 
 #[allow(dead_code, reason = "compatibility entry point")]

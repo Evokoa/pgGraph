@@ -69,6 +69,195 @@ fn bind_statement_query(query: &str) -> super::logical_plan::LogicalStatement {
     bind_statement(&ast, &fake_catalog()).unwrap()
 }
 
+fn filtered_node_plan(query: &str) -> super::physical_plan::PhysicalNodeScan {
+    let super::physical_plan::PhysicalStatement::NodeScan(plan) =
+        lower_statement(bind_statement_query(query))
+    else {
+        panic!("expected node scan");
+    };
+    plan
+}
+
+#[test]
+fn filtered_node_scan_preserves_stage_boundaries() {
+    assert!(
+        filtered_node_plan("MATCH (u:users) WHERE u.age = $age RETURN u.name")
+            .can_filter_scan_candidates()
+    );
+    for query in [
+        "MATCH (u:users) RETURN u.name",
+        "MATCH (u:users) WHERE u.id = 'u1' RETURN u.name",
+        "OPTIONAL MATCH (u:users) WHERE u.age = 7 RETURN u.name",
+        "MATCH (u:users) WHERE u.age = 7 RETURN DISTINCT u.name",
+        "MATCH (u:users) WHERE u.age = 7 RETURN count(*)",
+        "MATCH (u:users) WHERE u.age = 7 RETURN u.name ORDER BY u.name",
+        "MATCH (u:users) WHERE u.age = 7 RETURN u.name SKIP 1",
+        "MATCH (u:users) WHERE u.age = 7 RETURN u.name LIMIT 1",
+        "MATCH (u:users) WHERE u.age = 7 WITH DISTINCT u.name AS name RETURN name",
+    ] {
+        assert!(
+            !filtered_node_plan(query).can_filter_scan_candidates(),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn filtered_node_cursor_scans_beyond_match_cap_and_charges_rejected_work() {
+    use super::execute::{push_filtered_node_row, reserve_filtered_node_scan, NodeScanCursor};
+    crate::projection::tx_delta::clear_for_test();
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age = $age RETURN u.name");
+    let mut engine = Engine::new();
+    for i in 0..100_000 {
+        let idx = engine.node_store.add_node(10, format!("u{i}"));
+        engine.insert_table_membership(10, idx);
+    }
+    engine.built = true;
+    let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+    let visibility = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let _workspace = reserve_filtered_node_scan(&engine, &plan, &governor).unwrap();
+    let memory = governor.memory_used();
+    let params = QueryParams::from_iter([("age".into(), serde_json::json!(7))]);
+    let mut cursor = NodeScanCursor::new();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while let Some(row) = cursor.next(&engine, &plan, None, &context).unwrap() {
+        let hydrated = HydratedRows::from_iter([(
+            (10, row.node.node_id.clone()),
+            serde_json::json!({"age": i % 73}),
+        )]);
+        if super::value::node_candidate_matches(&row, &plan, &hydrated, &params).unwrap() {
+            push_filtered_node_row(&mut rows, row, &plan, &governor).unwrap();
+        }
+        i += 1;
+        assert_eq!(governor.memory_used(), memory);
+    }
+    assert_eq!(i, 100_000);
+    assert_eq!(governor.work_used().as_u64(), 100_000);
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.node.node_id)
+            .collect::<Vec<_>>(),
+        (0..100_000)
+            .filter(|i| i % 73 == 7)
+            .map(|i| format!("u{i}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn filtered_node_matches_keep_exact_hard_cap_boundaries() {
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age >= 0 RETURN u.name");
+    let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+    let mut rows = Vec::new();
+    for i in 0..10_000 {
+        super::execute::push_filtered_node_row(
+            &mut rows,
+            GqlNodeRow {
+                node: GqlNodeCoordinate {
+                    table_oid: 10,
+                    node_id: format!("u{i}"),
+                },
+                optional_null: false,
+            },
+            &plan,
+            &governor,
+        )
+        .unwrap();
+        if i == 9_998 {
+            assert_eq!(rows.len(), 9_999);
+        }
+    }
+    assert_eq!(rows.len(), 10_000);
+    let extra = rows[0].clone();
+    let error = super::execute::push_filtered_node_row(&mut rows, extra, &plan, &governor)
+        .expect_err("the 10,001st filtered match must fail");
+    assert!(matches!(error, GraphError::GqlExecution { .. }));
+    assert!(error
+        .to_string()
+        .contains("GQL result row cap exceeded (10000)"));
+    assert_eq!(rows.len(), 10_000);
+}
+
+#[test]
+fn filtered_node_cursor_obeys_visibility_tenants_and_transaction_deletes() {
+    crate::projection::tx_delta::clear_for_test();
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age >= 0 RETURN u.name");
+    let mut engine = engine_fixture();
+    engine.tenanted_table_oids.insert(10);
+    engine.insert_tenant_membership("tenant-a", 0);
+    engine.insert_tenant_membership("tenant-a", 1);
+    let added = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        Some("tenant-a"),
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    let deleted = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "deleted",
+        Some("tenant-a"),
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    crate::projection::tx_delta::record_deleted_node(deleted).unwrap();
+    crate::projection::tx_delta::record_added_node(10, "unindexed", Some("tenant-a")).unwrap();
+    crate::projection::tx_delta::record_added_node(10, "other-tenant", Some("tenant-b")).unwrap();
+    let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+    let visibility = crate::visibility::VisibilityScope::enforced_for_test(
+        [0].into_iter().collect(),
+        roaring::RoaringBitmap::new(),
+        roaring::RoaringBitmap::new(),
+    );
+    assert!(visibility.allows_node(added));
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let mut cursor = super::execute::NodeScanCursor::new();
+    let mut ids = Vec::new();
+    while let Some(row) = cursor
+        .next(&engine, &plan, Some("tenant-a"), &context)
+        .unwrap()
+    {
+        ids.push(row.node.node_id);
+    }
+    assert_eq!(ids, ["u2", "u3"]);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn filtered_node_cursor_checks_elapsed_between_hydration_work() {
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        ResourcePhase, RowCount, WorkUnits,
+    };
+    crate::projection::tx_delta::clear_for_test();
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age >= 0 RETURN u.name");
+    let engine = engine_fixture();
+    let governor = ResourceGovernor::new(ResourceLimits::new(
+        MemoryBudget::new(ByteCount::from_bytes(1_048_576)),
+        DiskBudget::UNLIMITED,
+        RowCount::UNLIMITED,
+        WorkUnits::UNLIMITED,
+        ElapsedBudget::new(std::time::Duration::ZERO),
+    ));
+    governor
+        .consume_work(ResourcePhase::QueryHydrate, WorkUnits::new(2))
+        .unwrap();
+    // Observe the monotonic deadline before testing the scan checkpoint.
+    while governor.check_elapsed(ResourcePhase::QueryHydrate).is_ok() {
+        std::hint::spin_loop();
+    }
+    let visibility = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let error = super::execute::NodeScanCursor::new()
+        .next(&engine, &plan, None, &context)
+        .expect_err("elapsed checks must not depend on the shared work-counter residue");
+    assert!(
+        matches!(error, GraphError::ResourceLimit { ref resource, .. } if resource == "elapsed microseconds")
+    );
+}
+
 #[test]
 fn binder_accepts_create_node_for_registered_label() {
     let ast =

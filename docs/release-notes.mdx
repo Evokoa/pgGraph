@@ -46,6 +46,11 @@ publication. PostgreSQL 14 through 18 remain the supported target matrix.
   their first source before expansion. Unrelated graph rows no longer exhaust
   that seeded expansion's cap. Residual predicates and the candidate cap remain
   enforced; broader property scans retain their documented limits.
+- Ordinary node-only GQL reads evaluate property predicates before retaining
+  matches, allowing selective reads across more than 10,000 source rows.
+  The 10,000-match cap and resource budgets remain enforced. Optional matches,
+  joins, paths, DISTINCT, aggregates, ordering and pagination retain their
+  [documented candidate limits](./known-issues#gql-candidate-limits-depend-on-the-query-shape).
 - Artifacts are isolated by database and validated against registered catalog
   identities. Default graphs cannot adopt another database's files.
 - Graph generations publish through PostgreSQL transactions. Transaction and

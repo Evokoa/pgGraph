@@ -1423,6 +1423,21 @@ pub(crate) fn filter_node_rows(
         .collect()
 }
 
+/// Evaluate one node candidate with the same semantics as final projection.
+pub(crate) fn node_candidate_matches(
+    row: &GqlNodeRow,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+) -> GraphResult<bool> {
+    predicate_matches(
+        plan.predicate.as_ref(),
+        &node_row_as_gql_row(row),
+        hydrated,
+        params,
+    )
+}
+
 /// Return relationship matches that satisfy the plan predicate.
 ///
 /// # Errors

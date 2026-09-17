@@ -121,20 +121,26 @@ PostgreSQL [removed SQL/PGQ from its PostgreSQL 19 release branch](https://githu
 on September 7, 2026. Future native integration has no committed target major;
 see the [Roadmap](./roadmap).
 
-### GQL property filters can reach the candidate cap before filtering
+### GQL candidate limits depend on the query shape
 
-GQL execution has a fixed 10,000-row candidate cap. A property-filtered node
-scan can reach this cap before evaluating its residual `WHERE` predicate,
-even when the final result would be small. Increasing `graph.max_nodes` or
-`graph.query_memory_mb` does not raise this cap. Queries that would need more
-candidates fail with SQLSTATE `22000` and diagnostic `PG017`; they do not
-silently return a filtered prefix.
+An ordinary node-only read with a `WHERE` predicate evaluates candidates before
+retaining up to 10,000 matching rows. Nonmatching source rows do not consume
+this retained-row cap, but scanning and hydration still use the query's work,
+memory and elapsed-time budgets.
+
+This incremental filtering does not apply to `OPTIONAL MATCH`, `DISTINCT`,
+aggregation, `ORDER BY`, `SKIP` or `LIMIT`. Those query shapes, joins and path
+expansions retain the 10,000-row candidate cap and can reach it before evaluating
+residual properties, even when the final result would be small. Increasing
+`graph.max_nodes` or `graph.query_memory_mb` does not raise the cap. Exceeding
+the applicable row cap fails with SQLSTATE `22000` and diagnostic `PG017`;
+queries do not silently return a filtered prefix.
 
 A supported primary-key equality can seed a node scan or the first mandatory
-source of a multi-pattern join before expansion. For broader property searches,
-use PostgreSQL source queries to select a bounded set of keys, then issue
-identity-seeded graph reads. Registered filter columns do not imply general
-GQL predicate pushdown.
+source of a multi-pattern join before expansion. For searches that exceed these
+limits, use PostgreSQL source queries to select a bounded set of keys, then
+issue identity-seeded graph reads. Registered filter columns do not imply
+general GQL predicate pushdown or indexed property evaluation.
 
 ## Resource Scope
 

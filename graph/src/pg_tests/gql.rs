@@ -1,4 +1,241 @@
 #[pg_test]
+fn gql_filtered_node_scan_matches_source_above_raw_cap() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "CREATE TABLE public.graph_test_filter_context_pgtest (
+            id bigint PRIMARY KEY, cohort integer NOT NULL,
+            score integer NOT NULL, name text NOT NULL, profile jsonb NOT NULL
+         );
+         INSERT INTO public.graph_test_filter_context_pgtest
+         SELECT i, i % 37, (i * 17) % 101, 'person-' || i,
+                CASE WHEN i % 2 = 0 THEN '{\"value\":null}'::jsonb ELSE '{}'::jsonb END
+         FROM generate_series(0, 11999) AS i;
+         SELECT graph.add_table('graph_test_filter_context_pgtest'::regclass,
+            id_column := 'id', columns := ARRAY['cohort', 'score', 'name', 'profile', 'profile.value']);
+         SELECT graph.add_filter_column('graph_test_filter_context_pgtest'::regclass, 'score');
+         SET graph.mutable_enabled = on;",
+    ).expect("prepare filtered node fixture failed");
+    for mode in ["csr_readonly", "mutable_overlay"] {
+        Spi::run(&format!("SELECT * FROM graph.build(mode := '{mode}')"))
+            .expect("build filtered node fixture failed");
+        // Retaining hydration for all 12,000 candidates exceeds this budget.
+        Spi::run("SET LOCAL graph.query_memory_mb = 32")
+            .expect("set filtered scan budget failed");
+        let equal = Spi::get_one::<bool>(
+            "WITH actual AS (
+                 SELECT jsonb_agg(row ORDER BY row->>'id') AS rows FROM graph.gql(
+                    'MATCH (a:graph_test_filter_context_pgtest)
+                     WHERE a.cohort = $cohort AND a.score >= $score
+                     RETURN a.id AS id, a.name AS name, a.score AS score',
+                    '{\"cohort\":7,\"score\":50}'::jsonb)
+             ), expected AS (
+                 SELECT jsonb_agg(to_jsonb(s) ORDER BY id::text) AS rows FROM (
+                    SELECT id, name, score FROM public.graph_test_filter_context_pgtest
+                    WHERE cohort = 7 AND score >= 50
+                 ) s
+             ) SELECT actual.rows = expected.rows FROM actual, expected",
+        ).expect("compare filtered source rows failed");
+        assert_eq!(equal, Some(true), "{mode}");
+        for (predicate, expected) in [
+            ("a.cohort = 7 AND a.profile.value IS NULL", 162_i64),
+            ("a.cohort = 7 AND a.profile.value = $value", 162),
+            ("a.cohort = $value", 0),
+        ] {
+            let count = Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM graph.gql({}, '{{\"value\":null}}'::jsonb)",
+                super::sql_literal(&format!(
+                    "MATCH (a:graph_test_filter_context_pgtest) WHERE {predicate} RETURN a.id AS id"
+                )),
+            )).expect("filtered null query failed");
+            assert_eq!(count, Some(expected), "{mode}: {predicate}");
+        }
+        let missing_parameter = "SELECT * FROM graph.gql(
+            'MATCH (a:graph_test_filter_context_pgtest) WHERE a.cohort = $missing RETURN a.id')";
+        assert!(sqlstate_for_error(missing_parameter).is_some());
+        assert!(sql_error_message(missing_parameter).unwrap().contains("missing GQL parameter"));
+        Spi::run("SET LOCAL graph.query_memory_mb = 256")
+            .expect("restore filtered scan budget failed");
+    }
+}
+
+#[pg_test]
+fn gql_filtered_node_scan_enforces_exact_match_cap() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "CREATE TABLE public.graph_test_filter_context_pgtest (
+            id integer PRIMARY KEY, score integer NOT NULL
+         );
+         INSERT INTO public.graph_test_filter_context_pgtest SELECT i, i FROM generate_series(1, 10001) i;
+         SELECT graph.add_table('graph_test_filter_context_pgtest'::regclass,
+            id_column := 'id', columns := ARRAY['score']);
+         SELECT * FROM graph.build();
+         SET LOCAL graph.query_memory_mb = 256;",
+    ).expect("prepare filtered cap fixture failed");
+    for cap in [9_999, 10_000] {
+        let equal = Spi::get_one::<bool>(&format!(
+            "WITH actual AS (
+                SELECT jsonb_agg(row ORDER BY (row->>'id')::int) AS rows FROM graph.gql(
+                    'MATCH (a:graph_test_filter_context_pgtest) WHERE a.score <= $cap RETURN a.id AS id',
+                    '{{\"cap\":{cap}}}'::jsonb)
+             ), expected AS (
+                SELECT jsonb_agg(jsonb_build_object('id', id) ORDER BY id) AS rows
+                FROM public.graph_test_filter_context_pgtest WHERE score <= {cap}
+             ) SELECT actual.rows = expected.rows FROM actual, expected",
+        )).expect("filtered cap exact comparison failed");
+        assert_eq!(equal, Some(true), "cap {cap}");
+    }
+    let statement = "SELECT * FROM graph.gql(
+        'MATCH (a:graph_test_filter_context_pgtest) WHERE a.score <= 10001 RETURN a.id AS id')";
+    assert_eq!(sqlstate_for_error(statement).as_deref(), Some("22000"));
+    assert_eq!(sql_error_detail(statement).as_deref(), Some("pgGraph diagnostic: PG017"));
+    assert!(sql_error_message(statement).unwrap().contains("row cap exceeded (10000)"));
+}
+
+#[pg_test]
+fn gql_filtered_node_hydration_reclaims_rejected_row_reservations() {
+    reset_and_create_fixtures();
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = repeat('x', 4096) WHERE id = 'u1'")
+        .expect("prepare hydration payload failed");
+    build_friendship_fixture_graph();
+    let (tables, _, _) = crate::catalog::read_catalog().expect("read hydration tables failed");
+    let oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+        "SELECT 'public.graph_test_users_pgtest'::regclass::oid",
+    ).unwrap().unwrap().to_u32();
+    let governor = crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+        crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(1_048_576)),
+    ));
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(&governor, &tables);
+    drop(hydrator.hydrate_scoped(oid, "u1").unwrap());
+    let metadata_memory = governor.memory_used();
+    for _ in 0..1_000 {
+        let row = hydrator.hydrate_scoped(oid, "u1").unwrap().unwrap();
+        assert_eq!(row.value.0["name"].as_str().unwrap().len(), 4_096);
+        assert!(governor.memory_used() > metadata_memory);
+        drop(row);
+        assert_eq!(governor.memory_used(), metadata_memory);
+    }
+    let retained = hydrator.hydrate(oid, "u1").unwrap().unwrap();
+    assert!(governor.memory_used() > metadata_memory);
+    assert_eq!(retained.0["name"].as_str().unwrap().len(), 4_096);
+    assert!(governor.memory_peak().as_u64() < 1_048_576);
+}
+
+#[pg_test]
+fn gql_filtered_node_scan_preserves_transaction_changes_and_rollback() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run("SET graph.mutable_enabled = on; SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build filtered transaction fixture failed");
+    Spi::run("SELECT * FROM graph.gql(
+        'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u')")
+        .expect("create filtered transaction node failed");
+    let query = "SELECT jsonb_agg(row ORDER BY row->>'id') FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest) WHERE u.age < 40 RETURN u.id AS id, u.name AS name')";
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(query).unwrap().unwrap().0,
+        serde_json::json!([{"id":"u1","name":"Alice"},{"id":"u3","name":"Cara"}]));
+    Spi::run("SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest {id: ''u2''}) SET u.age = 39 RETURN u');
+        SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) DETACH DELETE u RETURN u')")
+        .expect("mutate filtered transaction rows failed");
+    let expected = serde_json::json!([{"id":"u2","name":"Bob"},{"id":"u3","name":"Cara"}]);
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(query).unwrap().unwrap().0, expected);
+    Spi::run("DO $$ BEGIN
+        BEGIN
+            PERFORM * FROM graph.gql(
+                'CREATE (u:graph_test_users_pgtest {id: ''rolled-back'', name: ''Transient'', age: 20}) RETURN u');
+            IF (SELECT count(*) FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest) WHERE u.age < 40 RETURN u.id')) <> 3 THEN
+                RAISE check_violation;
+            END IF;
+            RAISE no_data_found;
+        EXCEPTION WHEN no_data_found THEN NULL;
+        END;
+    END $$")
+        .expect("filtered subtransaction rollback failed");
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(query).unwrap().unwrap().0, expected);
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM public.graph_test_users_pgtest WHERE age < 40")
+        .unwrap(), Some(2));
+    Spi::run("SET LOCAL graph.query_work_limit = 1").unwrap();
+    assert_eq!(sqlstate_for_error(query).as_deref(), Some("54000"));
+    Spi::run("SET LOCAL graph.query_work_limit = 10000000").unwrap();
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(query).unwrap().unwrap().0, expected);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_filtered_node_scan_preserves_rls_acl_and_policy_guard() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    create_error_sqlstate_helper();
+    create_error_detail_helper();
+    // PostgreSQL's exception block restores the security-definer policy frame
+    // after cancellation before the caller attempts RESET ROLE.
+    Spi::run("CREATE FUNCTION public.graph_filtered_cancellation_state(statement text)
+        RETURNS text LANGUAGE plpgsql AS $$
+        BEGIN
+            EXECUTE statement;
+            RETURN NULL;
+        EXCEPTION WHEN query_canceled THEN RETURN SQLSTATE;
+        END $$").expect("create filtered cancellation capture failed");
+    Spi::run("CREATE ROLE graph_filtered_scan_reader;
+        GRANT USAGE ON SCHEMA public, graph TO graph_filtered_scan_reader;
+        GRANT SELECT ON public.graph_test_users_pgtest, public.graph_test_friendships_pgtest
+            TO graph_filtered_scan_reader;
+        ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY filtered_scan_visible ON public.graph_test_users_pgtest
+            TO graph_filtered_scan_reader USING (age < 40);
+        SET ROLE graph_filtered_scan_reader")
+        .expect("configure filtered RLS reader failed");
+    let query = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest) WHERE u.age >= 0 RETURN u.id AS id, u.name AS name')";
+    let rows = Spi::get_one::<pgrx::JsonB>(&format!(
+        "SELECT jsonb_agg(row ORDER BY row->>'id') FROM ({query}) q"
+    )).unwrap().unwrap().0;
+    assert_eq!(rows, serde_json::json!([{"id":"u1","name":"Alice"}]));
+    Spi::run("RESET ROLE;
+        REVOKE SELECT ON public.graph_test_users_pgtest FROM graph_filtered_scan_reader;
+        SET ROLE graph_filtered_scan_reader").unwrap();
+    assert_eq!(p46_captured_sqlstate(query).as_deref(), Some("42501"));
+    Spi::run("RESET ROLE;
+        GRANT SELECT ON public.graph_test_users_pgtest TO graph_filtered_scan_reader;
+        CREATE SEQUENCE public.graph_filtered_policy_calls;
+        CREATE FUNCTION public.graph_filtered_policy_guard() RETURNS boolean
+        LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+        BEGIN
+            -- Eager visibility checks both rows for key sizes, then scans both.
+            -- The fifth policy invocation belongs to candidate hydration.
+            IF nextval('public.graph_filtered_policy_calls') > 4 THEN
+                IF current_setting('graph.test_filtered_callback', true) = 'reenter' THEN
+                    PERFORM * FROM graph.build();
+                ELSIF current_setting('graph.test_filtered_callback', true) = 'cancel' THEN
+                    RAISE EXCEPTION 'filtered hydration cancellation' USING ERRCODE = '57014';
+                END IF;
+            END IF;
+            RETURN true;
+        END $$;
+        ALTER POLICY filtered_scan_visible ON public.graph_test_users_pgtest
+            USING (public.graph_filtered_policy_guard());
+        SET graph.test_filtered_callback = 'reenter';
+        SET ROLE graph_filtered_scan_reader").unwrap();
+    assert_eq!(p46_captured_sqlstate(query).as_deref(), Some("55000"));
+    Spi::run("RESET ROLE").unwrap();
+    assert_eq!(Spi::get_one::<i64>("SELECT last_value FROM public.graph_filtered_policy_calls").unwrap(), Some(5));
+    assert_eq!(Spi::get_one::<bool>("SELECT graph._test_visibility_resolution_state_empty()").unwrap(), Some(true));
+    Spi::run("ALTER SEQUENCE public.graph_filtered_policy_calls RESTART WITH 1;
+        SET graph.test_filtered_callback = 'cancel'; SET ROLE graph_filtered_scan_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&format!(
+        "SELECT public.graph_filtered_cancellation_state({})", super::sql_literal(query)
+    )).unwrap().as_deref(), Some("57014"));
+    Spi::run("RESET ROLE").unwrap();
+    assert_eq!(Spi::get_one::<i64>("SELECT last_value FROM public.graph_filtered_policy_calls").unwrap(), Some(5));
+    assert_eq!(Spi::get_one::<bool>("SELECT graph._test_visibility_resolution_state_empty()").unwrap(), Some(true));
+    Spi::run("SET graph.test_filtered_callback = 'off'; SET ROLE graph_filtered_scan_reader").unwrap();
+    assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM ({query}) q")).unwrap(), Some(2));
+    Spi::run("RESET ROLE").unwrap();
+}
+
+#[pg_test]
 fn gql_unsupported_profile_corpus_has_stable_diagnostics() {
     let corpus: serde_json::Value = serde_json::from_str(include_str!(
         "../../../release/v1-gql-unsupported.json"

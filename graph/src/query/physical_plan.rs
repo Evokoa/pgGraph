@@ -721,6 +721,19 @@ impl PhysicalDetachDeleteNode {
 }
 
 impl PhysicalNodeScan {
+    /// Whether a read can filter candidates without crossing another row stage.
+    pub(crate) fn can_filter_scan_candidates(&self) -> bool {
+        self.predicate.is_some()
+            && self.identity_lookup.is_none()
+            && !self.optional
+            && !self.distinct
+            && self.distinct_stages.is_empty()
+            && !has_aggregate_return(&self.returns)
+            && self.order_by.is_empty()
+            && self.skip.is_none()
+            && self.limit.is_none()
+    }
+
     /// Table OID whose rows must be visible to the current SQL role.
     pub(crate) fn required_table_oid(&self) -> u32 {
         self.table_oid
