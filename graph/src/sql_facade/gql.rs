@@ -3210,13 +3210,23 @@ fn record_deleted_edge_delta(
         let engine = engine.borrow();
         let source = engine
             .resolve(plan.edge_source_table_oid, source_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.edge_source_table_oid, source_id, None, false,
+                )
+            })
             .ok_or_else(|| safety::GraphError::GqlExecution {
-                reason: format!("GQL DELETE source node `{source_id}` is not in the built graph"),
+                reason: format!("GQL DELETE source node `{source_id}` is not in the built graph or transaction delta"),
             })?;
         let target = engine
             .resolve(plan.edge_target_table_oid, target_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.edge_target_table_oid, target_id, None, false,
+                )
+            })
             .ok_or_else(|| safety::GraphError::GqlExecution {
-                reason: format!("GQL DELETE target node `{target_id}` is not in the built graph"),
+                reason: format!("GQL DELETE target node `{target_id}` is not in the built graph or transaction delta"),
             })?;
         let type_id = engine.edge_type_id(&plan.rel_type).ok_or_else(|| {
             safety::GraphError::GqlExecution {
@@ -5231,6 +5241,76 @@ fn test_recheck_delete_edge_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_relationship_delete_preserves_parallel_identity() {
+        use crate::projection::tx_delta;
+        for (source, target) in [(0, 3), (2, 1), (2, 3)] {
+            tx_delta::clear_for_test();
+            let mut engine = crate::engine::Engine::new();
+            for key in ["base-a", "base-b"] {
+                let index = engine.node_store.add_node(10, key.into());
+                engine.resolution_insert(10, key, index);
+            }
+            let type_id = engine.register_edge_type("friend").unwrap();
+            let previous = ENGINE.with(|cell| cell.replace(engine));
+            tx_delta::record_added_node_indexed(10, "new-a", None, 2).unwrap();
+            tx_delta::record_added_node_indexed(10, "new-b", None, 2).unwrap();
+            for identity in [1, 2] {
+                for (from, to, reversed) in [(source, target, false), (target, source, true)] {
+                    tx_delta::record_added_edge(
+                        from,
+                        tx_delta::DeltaEdge {
+                            target: to,
+                            type_id,
+                            schema_reversed: reversed,
+                            weight: None,
+                            relationship_id: Some(identity),
+                        },
+                    )
+                    .unwrap();
+                }
+            }
+            let plan = crate::query::physical_plan::PhysicalDeleteEdge {
+                source_var: "a".into(),
+                source_table_oid: 10,
+                source_label: "nodes".into(),
+                rel_type: "friend".into(),
+                rel_var: "r".into(),
+                direction: crate::query::logical_plan::BoundDirection::Out,
+                target_var: "b".into(),
+                target_table_oid: 10,
+                target_label: "nodes".into(),
+                edge_table_oid: 20,
+                edge_source_table_oid: 10,
+                edge_target_table_oid: 10,
+                edge_mapping_id: 1,
+                edge_source_key_columns: crate::builder::PrimaryKeySpec::from_columns(vec![
+                    "id".into()
+                ]),
+                source_column: "source".into(),
+                target_column: "target".into(),
+                bidirectional: true,
+                predicate: None,
+                returns: vec![],
+            };
+            let keys = ["base-a", "base-b", "new-a", "new-b"];
+            record_deleted_edge_delta(
+                &plan,
+                keys[usize::try_from(source).unwrap()],
+                keys[usize::try_from(target).unwrap()],
+                1,
+            )
+            .unwrap();
+            let (inserts, deletes) = tx_delta::edge_overlay(crate::types::TraversalDirection::Out);
+            assert_eq!(tx_delta::stats().added_edges, 2);
+            assert_eq!(inserts[&source], [(target, type_id, false, Some(2))]);
+            assert_eq!(inserts[&target], [(source, type_id, true, Some(2))]);
+            assert!(deletes.is_empty());
+            tx_delta::clear_for_test();
+            ENGINE.with(|cell| cell.replace(previous));
+        }
+    }
 
     #[test]
     fn detached_transaction_edges_cancel_both_overlay_orientations() {

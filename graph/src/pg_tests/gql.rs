@@ -7631,6 +7631,153 @@ fn build_transaction_detach_fixture(bidirectional: bool) {
         .expect("build transaction detach graph failed");
 }
 
+#[pg_test]
+fn gql_transaction_relationship_delete_source_and_rollback() {
+    assert_transaction_relationship_delete("u3", "u2", false);
+}
+
+#[pg_test]
+fn gql_transaction_relationship_delete_target_and_rollback() {
+    assert_transaction_relationship_delete("u1", "u3", false);
+}
+
+#[pg_test]
+fn gql_transaction_relationship_delete_recreated_reverse_and_rollback() {
+    assert_transaction_relationship_delete("u1", "u3", true);
+}
+
+fn assert_transaction_relationship_delete(source: &str, target: &str, reverse: bool) {
+    build_transaction_detach_fixture(reverse);
+    Spi::run("SELECT * FROM graph.gql(
+        'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN n');
+        SELECT * FROM graph.gql(
+        'CREATE (n:graph_test_users_pgtest {id: ''u4'', name: ''Dana'', age: 30}) RETURN n')").unwrap();
+    if reverse {
+        Spi::run("SELECT * FROM graph.gql(
+            'MATCH (n:graph_test_users_pgtest {id: ''u1''}) DETACH DELETE n RETURN n');
+            SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u1'', name: ''Replacement'', age: 55}) RETURN n')").unwrap();
+    }
+    for (id, from, to) in [("remove", source, target), ("keep", "u2", "u4")] {
+        let query = format!("MATCH (a:graph_test_users_pgtest {{id: '{from}'}}),
+            (b:graph_test_users_pgtest {{id: '{to}'}})
+            CREATE (a)-[r:friend {{id: '{id}'}}]->(b) RETURN r");
+        Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&query))).unwrap();
+    }
+    let before = transaction_detach_snapshot(reverse);
+    assert_eq!(before["nodes"], before["graph_nodes"]);
+    assert_eq!(before["edges"], before["graph_edges"]);
+    let (from, to) = if reverse { (target, source) } else { (source, target) };
+    let pattern = format!("MATCH (a:graph_test_users_pgtest {{id: '{from}'}})-[r:friend]->(b:graph_test_users_pgtest {{id: '{to}'}})");
+    let delete = format!("{pattern} DELETE r RETURN r");
+    Spi::run(&format!("DO $$ BEGIN BEGIN
+        PERFORM * FROM graph.gql({});
+        IF EXISTS (SELECT FROM public.graph_test_friendships_pgtest WHERE id = 'remove') THEN
+            RAISE check_violation;
+        END IF;
+        RAISE no_data_found;
+        EXCEPTION WHEN no_data_found THEN NULL; END; END $$", super::sql_literal(&delete))).unwrap();
+    assert_eq!(transaction_detach_snapshot(reverse), before);
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(&format!("SELECT row->'r' FROM graph.gql({}, hydrate := false)",
+        super::sql_literal(&delete))).unwrap().unwrap().0, serde_json::json!({
+            "_type":"friend",
+            "_start":{"table":"graph_test_users_pgtest","id":source},
+            "_end":{"table":"graph_test_users_pgtest","id":target},
+        }));
+    let after = transaction_detach_snapshot(reverse);
+    assert_eq!(after["nodes"], before["nodes"]);
+    assert_eq!(after["nodes"], after["graph_nodes"]);
+    let expected_edges: Vec<_> = before["edges"].as_array().unwrap().iter()
+        .filter(|edge| edge["id"] != "remove").cloned().collect();
+    assert_eq!(after["edges"], serde_json::json!(expected_edges));
+    assert_eq!(after["edges"], after["graph_edges"]);
+    assert_eq!(after["delta"][2], serde_json::json!(if reverse { 2 } else { 1 }));
+    assert_eq!(Spi::get_one::<i64>(&format!("SELECT count(*) FROM graph.gql({})",
+        super::sql_literal(&format!("{pattern} RETURN r")))).unwrap(), Some(0));
+    assert_eq!(sqlstate_for_error(&format!("SELECT * FROM graph.gql({})",
+        super::sql_literal(&delete))).as_deref(), Some("22000"));
+    assert_eq!(transaction_detach_snapshot(reverse), after);
+}
+
+#[pg_test]
+fn gql_transaction_relationship_delete_preserves_parallel_rows_and_permissions() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run("ALTER TABLE public.graph_test_users_pgtest ADD COLUMN tenant_id text NOT NULL DEFAULT 'tenant-a';
+        SET graph.mutable_enabled = on;
+        SELECT graph.add_table('graph_test_users_pgtest'::regclass, id_column := 'id',
+            columns := ARRAY['name', 'age'], tenant_column := 'tenant_id');
+        SELECT graph.add_edge('graph_test_friendships_pgtest'::regclass, 'user_id',
+            'graph_test_users_pgtest'::regclass, 'friend_id', 'friend', bidirectional := true);
+        SELECT * FROM graph.build(mode := 'mutable_overlay');
+        SET graph.tenant_setting = 'app.graph_relationship_delete_tenant';
+        SET graph.enforce_tenant_scope = on;
+        SET app.graph_relationship_delete_tenant = 'tenant-a';
+        SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN n');
+        SELECT * FROM graph.gql(
+            'CREATE (n:graph_test_users_pgtest {id: ''u4'', name: ''Dana'', age: 30}) RETURN n')").unwrap();
+    for (id, source, target) in [("remove", "u3", "u4"), ("parallel", "u3", "u4"), ("keep", "u1", "u2")] {
+        let query = format!("MATCH (a:graph_test_users_pgtest {{id: '{source}'}}),
+            (b:graph_test_users_pgtest {{id: '{target}'}})
+            CREATE (a)-[r:friend {{id: '{id}'}}]->(b) RETURN r");
+        Spi::run(&format!("SELECT * FROM graph.gql({})", super::sql_literal(&query))).unwrap();
+    }
+    let before = transaction_detach_snapshot(true);
+    assert_eq!(before["edges"], before["graph_edges"]);
+    Spi::run("CREATE ROLE graph_relationship_delete_reader;
+        GRANT USAGE ON SCHEMA graph, public TO graph_relationship_delete_reader;
+        GRANT SELECT, UPDATE ON public.graph_test_users_pgtest TO graph_relationship_delete_reader;
+        GRANT SELECT ON public.graph_test_friendships_pgtest TO graph_relationship_delete_reader;
+        ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY relationship_delete_nodes_select ON public.graph_test_users_pgtest FOR SELECT
+            TO graph_relationship_delete_reader USING (true);
+        CREATE POLICY relationship_delete_nodes_update ON public.graph_test_users_pgtest FOR UPDATE
+            TO graph_relationship_delete_reader USING (true);
+        CREATE POLICY relationship_delete_edges_select ON public.graph_test_friendships_pgtest FOR SELECT
+            TO graph_relationship_delete_reader USING (id <> 'parallel');
+        CREATE POLICY relationship_delete_edges_delete ON public.graph_test_friendships_pgtest FOR DELETE
+            TO graph_relationship_delete_reader USING (false);
+        SET ROLE graph_relationship_delete_reader").unwrap();
+    let delete = "SELECT * FROM graph.gql(
+        'MATCH (a:graph_test_users_pgtest {id: ''u4''})-[r:friend]->(b:graph_test_users_pgtest {id: ''u3''}) DELETE r RETURN r', hydrate := false)";
+    let capture = format!("SELECT public.graph_test_sqlstate({})", super::sql_literal(delete));
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("42501"));
+    Spi::run("RESET ROLE; GRANT DELETE ON public.graph_test_friendships_pgtest TO graph_relationship_delete_reader;
+        SET ROLE graph_relationship_delete_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("22000"));
+    Spi::run("RESET ROLE").unwrap();
+    assert_eq!(transaction_detach_snapshot(true), before);
+    Spi::run("ALTER POLICY relationship_delete_edges_delete ON public.graph_test_friendships_pgtest USING (id = 'remove');
+        ALTER POLICY relationship_delete_nodes_select ON public.graph_test_users_pgtest USING (id <> 'u3');
+        SET ROLE graph_relationship_delete_reader").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("22000"));
+    Spi::run("RESET ROLE; ALTER POLICY relationship_delete_nodes_select ON public.graph_test_users_pgtest USING (true);
+        SET ROLE graph_relationship_delete_reader; SET app.graph_relationship_delete_tenant = 'tenant-b'").unwrap();
+    assert_eq!(Spi::get_one::<String>(&capture).unwrap().as_deref(), Some("22000"));
+    Spi::run("RESET ROLE; SET app.graph_relationship_delete_tenant = 'tenant-a'").unwrap();
+    assert_eq!(transaction_detach_snapshot(true), before);
+    Spi::run("SET ROLE graph_relationship_delete_reader").unwrap();
+    assert_eq!(Spi::get_one::<pgrx::JsonB>(&format!("SELECT row->'r' FROM ({delete}) d"))
+        .unwrap().unwrap().0, serde_json::json!({
+            "_type":"friend",
+            "_start":{"table":"graph_test_users_pgtest","id":"u3"},
+            "_end":{"table":"graph_test_users_pgtest","id":"u4"},
+        }));
+    Spi::run("RESET ROLE").unwrap();
+    let after = transaction_detach_snapshot(true);
+    assert_eq!(after["nodes"], before["nodes"]);
+    assert_eq!(after["graph_nodes"], before["graph_nodes"]);
+    let expected_edges: Vec<_> = before["edges"].as_array().unwrap().iter()
+        .filter(|edge| edge["id"] != "remove").cloned().collect();
+    assert_eq!(after["edges"], serde_json::json!(expected_edges));
+    assert_eq!(after["edges"], after["graph_edges"]);
+    assert_eq!(after["delta"][2], serde_json::json!(4));
+    assert_eq!(Spi::get_one::<String>("SELECT string_agg(id, ',' ORDER BY id) FROM public.graph_test_friendships_pgtest")
+        .unwrap().as_deref(), Some("f1,keep,parallel"));
+}
+
 fn transaction_detach_snapshot(bidirectional: bool) -> serde_json::Value {
     Spi::get_one::<pgrx::JsonB>(&format!(
         "WITH expected_edges AS (

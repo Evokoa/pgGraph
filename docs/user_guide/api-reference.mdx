@@ -2038,6 +2038,11 @@ relationship `DELETE` is not part of this release's GQL subset. Before deleting
 the edge row, pgGraph locks the matched endpoint source rows and re-checks the
 matched GQL predicate against the current PostgreSQL rows.
 
+For relationship `DELETE`, `RETURN r` currently returns only the canonical
+`_type`, `_start`, and `_end` coordinates in registered schema direction.
+Deleted edge-row properties are unavailable in that return value, including
+with the default `hydrate := true`.
+
 `MATCH (n:label {...}) DETACH DELETE n RETURN ...` is supported for a single
 matched node. It requires a `mutable_overlay` projection, deletes registered
 incident edge-row relationships first, then deletes the PostgreSQL node row.

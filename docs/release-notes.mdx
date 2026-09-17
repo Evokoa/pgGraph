@@ -55,6 +55,8 @@ publication. PostgreSQL 14 through 18 remain the supported target matrix.
   incident transaction edges, including synthetic reverse edges. Recreating a
   deleted key resolves its current live transaction identity, preserving later
   GQL reads, relationship creation and rollback.
+- Mapped GQL relationship `DELETE` resolves transaction-created endpoints and
+  preserves parallel relationships, reverse orientations and rollback.
 - Artifacts are isolated by database and validated against registered catalog
   identities. Default graphs cannot adopt another database's files.
 - Graph generations publish through PostgreSQL transactions. Transaction and
