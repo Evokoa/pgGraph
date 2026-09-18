@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -98,6 +99,43 @@ class DatasetTests(unittest.TestCase):
         self.assertIn("'240210352'", deep_path.sql)
         self.assertIn("'240470265'", deep_path.sql)
         self.assertIn("max_depth := 48", deep_path.sql)
+
+    def test_panama_workload_is_stable_across_edge_scan_orders(self) -> None:
+        # Only the portable seed-selection SELECTs run in SQLite. The generated
+        # PostgreSQL graph queries are compared without executing them.
+        edges = [("z", "v"), ("z", "u"), ("a", "y"), ("a", "x"), ("low", "w")]
+        expected_workload = None
+        for reverse_rows in (False, True):
+            for reverse_scan in (False, True):
+                with self.subTest(reverse_rows=reverse_rows, reverse_scan=reverse_scan):
+                    connection = sqlite3.connect(":memory:")
+                    self.addCleanup(connection.close)
+                    connection.execute("ATTACH DATABASE ':memory:' AS panama")
+                    connection.execute(
+                        "CREATE TABLE panama.edges (start_id TEXT, end_id TEXT, rel_type TEXT)"
+                    )
+                    rows = reversed(edges) if reverse_rows else edges
+                    connection.executemany(
+                        "INSERT INTO panama.edges VALUES (?, ?, 'same_intermediary_as')",
+                        rows,
+                    )
+                    connection.execute(
+                        f"PRAGMA reverse_unordered_selects = {int(reverse_scan)}"
+                    )
+                    selected = []
+
+                    def select_identity(_container: str, sql: str) -> str:
+                        identity = connection.execute(sql).fetchone()[0]
+                        selected.append(identity)
+                        return identity
+
+                    with mock.patch.object(RUNNER, "scalar", side_effect=select_identity):
+                        queries = RUNNER.workload("panama", "test-container")
+
+                    self.assertEqual(selected[:2], ["a", "x"])
+                    if expected_workload is None:
+                        expected_workload = queries
+                    self.assertEqual(queries, expected_workload)
 
     def test_transform_deduplicates_identical_cross_category_nodes(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:

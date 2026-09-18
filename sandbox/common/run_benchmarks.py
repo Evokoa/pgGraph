@@ -1089,8 +1089,8 @@ def connect_benchmark(args: argparse.Namespace):
 
 def workload(dataset: str, container: str) -> list[WorkloadQuery]:
     if dataset == "panama":
-        seed = scalar(container, "SELECT start_id FROM panama.edges GROUP BY start_id ORDER BY count(*) DESC LIMIT 1;")
-        target = scalar(container, f"SELECT end_id FROM panama.edges WHERE start_id = {sql_literal(seed)} LIMIT 1;")
+        seed = scalar(container, "SELECT start_id FROM panama.edges GROUP BY start_id ORDER BY count(*) DESC, start_id LIMIT 1;")
+        target = scalar(container, f"SELECT end_id FROM panama.edges WHERE start_id = {sql_literal(seed)} ORDER BY end_id LIMIT 1;")
         gql_seed = scalar(container, "SELECT start_id FROM panama.edges WHERE rel_type = 'same_intermediary_as' ORDER BY start_id, end_id LIMIT 1;")
         gql_target = scalar(container, f"SELECT end_id FROM panama.edges WHERE rel_type = 'same_intermediary_as' AND start_id = {sql_literal(gql_seed)} ORDER BY end_id LIMIT 1;")
         gql_params = json.dumps({"seed": gql_seed, "target": gql_target})
