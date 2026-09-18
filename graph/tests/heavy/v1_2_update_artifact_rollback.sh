@@ -120,8 +120,8 @@ SQL
 install_tree "$ROOT_DIR" "$WORKDIR/package-1.2"
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
-ALTER EXTENSION graph UPDATE TO '1.2.0';
-SELECT 1 / CASE WHEN extversion = '1.2.0' THEN 1 ELSE 0 END
+ALTER EXTENSION graph UPDATE TO '1.2.1';
+SELECT 1 / CASE WHEN extversion = '1.2.1' THEN 1 ELSE 0 END
 FROM pg_extension WHERE extname = 'graph';
 DO $$
 DECLARE
@@ -170,6 +170,8 @@ BEGIN
     END IF;
 END
 $$;
+-- The 1.2.1 publication catalog requires rebuilding pre-upgrade artifacts.
+SELECT * FROM graph.build();
 SELECT 1 / CASE WHEN count(*) = 3 THEN 1 ELSE 0 END FROM graph.edge_types();
 SELECT 1 / CASE WHEN string_agg(node_id, ',' ORDER BY depth, node_id) = 'a,b' THEN 1 ELSE 0 END
 FROM graph.traverse(
