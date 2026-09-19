@@ -188,6 +188,15 @@ pub(crate) fn uses_fixed_snapshot() -> bool {
     unsafe { pg_sys::XactIsoLevel >= pg_sys::XACT_REPEATABLE_READ as i32 }
 }
 
+/// Whether reader housekeeping must leave PostgreSQL catalogs unchanged.
+/// Snapshot horizons protect active readers without a durable heartbeat.
+pub(crate) fn transaction_is_read_only() -> bool {
+    // SAFETY: PostgreSQL initializes this backend-local scalar before SQL
+    // entrypoints run. This reads it on the backend thread without retaining
+    // a reference or changing the transaction's read-only setting.
+    unsafe { pg_sys::XactReadOnly }
+}
+
 pub(crate) fn require_publication_snapshot() -> GraphResult<()> {
     if uses_fixed_snapshot() {
         return Err(GraphError::UnsupportedOperation {

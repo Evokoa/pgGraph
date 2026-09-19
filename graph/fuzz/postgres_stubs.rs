@@ -15,6 +15,9 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 pub static mut MyDatabaseId: u32 = 0;
 #[no_mangle]
 pub static mut XactIsoLevel: std::ffi::c_int = 0;
+// PostgreSQL declares XactReadOnly as C bool. Native fuzzing has no transaction.
+#[no_mangle]
+pub static mut XactReadOnly: bool = false;
 
 // PG17 declares IsUnderPostmaster as bool. Standalone loaders must not enter
 // PostgreSQL descriptor accounting. This symbol is linked only by fuzz targets.

@@ -4,6 +4,7 @@ Uses PGHOST, PGPORT and PGUSER. Creates fresh databases and retains them for
 inspection. Run after installing the extension without pg_test features.
 """
 
+import argparse
 import os
 import re
 import subprocess
@@ -292,7 +293,188 @@ def reset_transaction():
         assert reader.execute(QUERY) == "a,b"
 
 
+def housekeeping_state(session):
+    return session.execute("""
+SELECT jsonb_build_array(
+    (SELECT jsonb_agg(to_jsonb(g) ORDER BY graph_id, generation_id, backend_pid, database_oid)
+     FROM graph._projection_generations g),
+    (SELECT jsonb_agg(to_jsonb(w) ORDER BY graph_id, backend_pid, database_oid)
+     FROM graph._sync_watermarks w));
+""")
+
+
+def assert_read_diagnostics(session):
+    for function in ("status", "sync_health", "projection_status", "sync_retention"):
+        try:
+            result = session.execute("SELECT count(*) FROM graph." + function + "();")
+        except RuntimeError as error:
+            raise AssertionError(f"{function} failed: {error}") from error
+        assert result == "1", function
+
+
+def read_only_published_generations():
+    for mode in ("csr_readonly", "mutable_overlay"):
+        database = create_database("readonly_" + mode)
+        with Session(database) as writer:
+            writer.execute("SET graph.mutable_enabled = on; SET graph.persist_on_build = on; "
+                           "SELECT * FROM graph.build(mode := '" + mode + "');")
+            for isolation in ("READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"):
+                # Expired rows must remain untouched by diagnostic reads.
+                writer.execute("""
+INSERT INTO graph._projection_generations (generation_id, backend_pid, database_oid, expires_at)
+SELECT 1, -4242, oid, now() - interval '1 hour'
+FROM pg_database WHERE datname = current_database()
+ON CONFLICT DO NOTHING;
+INSERT INTO graph._sync_watermarks (backend_pid, database_oid, expires_at)
+SELECT -4242, oid, now() - interval '1 hour'
+FROM pg_database WHERE datname = current_database()
+ON CONFLICT DO NOTHING;
+""")
+                with Session(database) as reader:
+                    before = housekeeping_state(writer)
+                    reader.execute("SET default_transaction_read_only = on;")
+                    reader.execute("BEGIN ISOLATION LEVEL " + isolation + ";")
+                    assert reader.execute(QUERY) == "a,b", (mode, isolation, "cold")
+                    assert reader.execute(QUERY) == "a,b", (mode, isolation, "resident")
+                    assert reader.execute("SELECT string_agg(node_id, ',' ORDER BY step) FROM graph.shortest_path('n'::regclass, 'a', 'n'::regclass, 'b');") == "a,b"
+                    assert reader.execute("SELECT row #>> '{v,_id,id}' FROM graph.gql('MATCH (v:n {id: ''b''}) RETURN v', hydrate := false);") == "b"
+                    assert_read_diagnostics(reader)
+                    reader.execute("COMMIT;")
+                    assert housekeeping_state(writer) == before, (mode, isolation, "RO catalog write")
+
+                    reader.execute("SET default_transaction_read_only = off;")
+                    # A read-only transaction must not suppress later writable housekeeping.
+                    assert reader.execute(QUERY) == "a,b"
+                    assert_read_diagnostics(reader)
+                    assert reader.execute("""
+SELECT EXISTS (SELECT 1 FROM graph._projection_generations WHERE backend_pid = pg_backend_pid())
+   AND EXISTS (SELECT 1 FROM graph._sync_watermarks WHERE backend_pid = pg_backend_pid())
+   AND NOT EXISTS (SELECT 1 FROM graph._projection_generations WHERE backend_pid = -4242)
+   AND NOT EXISTS (SELECT 1 FROM graph._sync_watermarks WHERE backend_pid = -4242);
+""") == "t"
+                    before = housekeeping_state(writer)
+                    reader.execute("BEGIN READ ONLY;")
+                    assert reader.execute(QUERY) == "a,b"
+                    assert_read_diagnostics(reader)
+                    reader.execute("COMMIT;")
+                    assert housekeeping_state(writer) == before, "RO refreshed an existing heartbeat"
+        print("Read-only published generation:", mode, flush=True)
+
+
+def read_only_csr_replay():
+    database = create_database("readonly_replay")
+    with Session(database) as writer, Session(database) as reader:
+        writer.execute("SET graph.persist_on_build = on; SELECT * FROM graph.build(mode := 'csr_readonly');")
+        reader.execute("BEGIN READ ONLY;")
+        assert reader.execute(QUERY) == "a,b"
+        writer.execute("INSERT INTO e(src, dst) VALUES ('a', 'c');")
+        # READ COMMITTED catches up using a backend-local CSR overlay, without publication.
+        assert reader.execute(QUERY) == "a,b,c"
+        assert_read_diagnostics(reader)
+        reader.execute("COMMIT;")
+        assert reader.execute(QUERY) == "a,b,c"
+    for isolation in ("REPEATABLE READ", "SERIALIZABLE"):
+        with Session(database) as writer, Session(database) as reader:
+            writer.execute("DELETE FROM e WHERE dst = 'c'; SELECT * FROM graph.build(mode := 'csr_readonly');")
+            reader.execute("BEGIN ISOLATION LEVEL " + isolation + " READ ONLY;")
+            assert reader.execute(QUERY) == "a,b"
+            writer.execute("INSERT INTO e(src, dst) VALUES ('a', 'c');")
+            assert reader.execute(QUERY) == "a,b", isolation
+            reader.execute("COMMIT; BEGIN READ ONLY;")
+            assert reader.execute(QUERY) == "a,b,c", isolation
+            reader.execute("COMMIT;")
+    print("Read-only CSR replay and fixed-snapshot isolation passed", flush=True)
+
+
+def read_only_snapshot_retention():
+    database = create_database("readonly_retention")
+    with Session(database) as writer, Session(database) as reader:
+        writer.execute("SET graph.persist_on_build = on; SELECT * FROM graph.build();")
+        reader.execute("BEGIN READ ONLY;")
+        assert reader.execute(QUERY) == "a,b"
+        reader.execute("DECLARE old_source CURSOR FOR SELECT count(*) FROM e;")
+        writer.execute("INSERT INTO e(src, dst) VALUES ('a', 'c'); SELECT * FROM graph.build();")
+        writer.execute("SET graph.projection_retention_generations = 1;")
+        assert writer.execute("SELECT deleted_files FROM graph.projection_gc();") == "0"
+        assert_retention_blocked(writer, "generation_visibility")
+        assert reader.execute("FETCH ALL FROM old_source;") == "1"
+        reader.execute("CLOSE old_source;")
+        # An ordinary RC statement adopts the new generation after the old cursor.
+        assert reader.execute(QUERY) == "a,b,c"
+        reader.execute("COMMIT;")
+        # Read-only use created no heartbeat to pin the obsolete generation.
+        assert int(writer.execute("SELECT deleted_files FROM graph.projection_gc();")) > 0
+        reader.execute("BEGIN READ ONLY;")
+        assert reader.execute(QUERY) == "a,b,c"
+        reader.execute("COMMIT;")
+    print("Read-only snapshot retention and generation refresh passed", flush=True)
+
+
+def read_only_mutable_pending_requires_write():
+    database = create_database("readonly_pending")
+    with Session(database) as writer, Session(database) as reader:
+        writer.execute("SET graph.mutable_enabled = on; SET graph.persist_on_build = on; "
+                       "SELECT * FROM graph.build(mode := 'mutable_overlay'); "
+                       "INSERT INTO e(src, dst) VALUES ('a', 'c');")
+        reader.execute("SET graph.mutable_enabled = on; BEGIN READ ONLY;")
+        reader.execute("""
+DO $$ BEGIN
+  BEGIN
+    PERFORM * FROM graph.traverse('n'::regclass, 'a', 1);
+    RAISE EXCEPTION 'pending durable ingestion unexpectedly succeeded read-only';
+  EXCEPTION WHEN read_only_sql_transaction THEN NULL;
+  END;
+END $$;
+""")
+        reader.execute("ROLLBACK;")
+        writer.execute("SELECT * FROM graph.ingest_projection();")
+        reader.execute("BEGIN READ ONLY;")
+        assert reader.execute(QUERY) == "a,b,c"
+        reader.execute("COMMIT;")
+    print("Read-only mutable pending ingestion remains rejected", flush=True)
+
+
+def read_only_rls():
+    database = create_database("readonly_rls")
+    role = "pggraph_ro_" + uuid.uuid4().hex[:12]
+    with Session(database) as writer, Session(database) as reader:
+        writer.execute("CREATE ROLE " + role + " NOLOGIN;")
+        writer.execute("GRANT USAGE ON SCHEMA graph TO " + role + "; "
+                       "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graph TO " + role + "; "
+                       "GRANT SELECT ON n, e TO " + role + ";")
+        writer.execute("ALTER TABLE n ENABLE ROW LEVEL SECURITY; "
+                       "CREATE POLICY visible_nodes ON n FOR SELECT TO " + role + " USING (id <> 'b'); "
+                       "SET graph.persist_on_build = on; SELECT * FROM graph.build();")
+        reader.execute("SET ROLE " + role + "; BEGIN READ ONLY;")
+        assert reader.execute(QUERY) == "a", "nonowner traversal disclosed a hidden node"
+        assert reader.execute("SELECT count(*) FROM graph.traverse('n'::regclass, 'b', 0, hydrate := false);") == "0"
+        assert reader.execute("SELECT count(*) FROM graph.traverse('n'::regclass, 'a', 0, hydrate := true);") == "1"
+        assert reader.execute("SELECT count(*) FROM graph.status();") == "1"
+        for function in ("projection_status", "sync_retention"):
+            reader.execute("DO $$ BEGIN BEGIN PERFORM * FROM graph." + function + "(); "
+                           "RAISE EXCEPTION 'reader accessed admin diagnostics'; "
+                           "EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        reader.execute("ROLLBACK; RESET ROLE;")
+        assert reader.execute(QUERY) == "a,b"
+    print("Read-only nonowner and selective RLS passed", flush=True)
+
+
+def read_only_transactions():
+    read_only_published_generations()
+    read_only_csr_replay()
+    read_only_snapshot_retention()
+    read_only_rls()
+    read_only_mutable_pending_requires_write()
+    print("Read-only transaction regressions passed", flush=True)
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--read-only-only", action="store_true", help="run the read-only transaction cases")
+    args = parser.parse_args()
+    read_only_transactions()
+    if args.read_only_only:
+        raise SystemExit(0)
     first_build_rollback()
     publication_cannot_be_forged()
     resident_generation_refresh()

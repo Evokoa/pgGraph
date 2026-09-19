@@ -355,6 +355,24 @@ Rebuild with `graph.build()` when:
 | `.pggraph` format version changed | Version 5, earlier, and future artifacts fail closed and must be rebuilt |
 | Corruption is detected | Loader rejects bad magic, CRC, offset, bounds, or section content |
 
+## Read-only transactions
+
+On a primary server, READ ONLY transactions can query an available published
+generation and call `graph.status()`, `graph.sync_health()`,
+`graph.projection_status()`, and `graph.sync_retention()` with their existing
+role privileges. Reader heartbeat updates and expired-heartbeat cleanup are
+deferred until a writable transaction;
+PostgreSQL's active snapshot horizon still protects required history. READ
+COMMITTED statements can adopt a newer committed generation, while REPEATABLE
+READ and SERIALIZABLE retain their snapshot-visible generation.
+
+This does not provide standby support or make durable maintenance read-only.
+Pending sync for a persisted `mutable_overlay` graph can require durable
+ingestion, which needs a writable transaction. Apply that maintenance in a
+writable session before querying the resulting generation in READ ONLY mode;
+required pending sync is not silently skipped. A `csr_readonly` graph can replay
+supported pending sync into its backend-local overlay in a READ ONLY transaction.
+
 ## Reset
 
 Builds and other durable generation publishers require READ COMMITTED.

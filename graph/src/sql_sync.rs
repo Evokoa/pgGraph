@@ -4273,9 +4273,12 @@ const SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS: i64 = 10_000;
 /// `sync_log_retention_floor` does not treat this backend as gone.
 #[cfg(not(test))]
 pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
-    if crate::projection::publication::uses_fixed_snapshot() {
+    if crate::projection::publication::uses_fixed_snapshot()
+        || crate::projection::publication::transaction_is_read_only()
+    {
         // Snapshot-local progress must not replace a backend's newer durable
         // heartbeat. The native horizon retains the required generation/log.
+        // Read-only transactions cannot persist reader housekeeping either.
         return Ok(());
     }
     let caller_oid = crate::catalog::current_role_oid()?;
@@ -4385,6 +4388,10 @@ pub(crate) fn record_sync_watermark_heartbeat_direct(
 /// backend that disconnected without cleanup stops blocking pruning once
 /// its heartbeat's `expires_at` has passed.
 pub(crate) fn expire_stale_sync_watermarks() -> safety::GraphResult<()> {
+    if crate::projection::publication::transaction_is_read_only() {
+        // Retention diagnostics already exclude expired rows.
+        return Ok(());
+    }
     Spi::get_one::<bool>("SELECT graph._expire_sync_watermarks_for_current_role()").map_err(
         |err| {
             safety::GraphError::Internal(format!(

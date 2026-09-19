@@ -1264,9 +1264,10 @@ impl ProjectionGenerationHeartbeat {
 
 #[cfg(not(test))]
 pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
-    if super::publication::uses_fixed_snapshot() {
+    if super::publication::uses_fixed_snapshot() || super::publication::transaction_is_read_only() {
         // The native snapshot horizon protects this generation. Updating a
         // newer heartbeat row from an imported snapshot would serialize-fail.
+        // Read-only transactions cannot persist reader housekeeping either.
         return Ok(());
     }
     validate_status(&manifest.validation_status)?;
@@ -1735,6 +1736,10 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
 
 #[cfg(not(test))]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    if super::publication::transaction_is_read_only() {
+        // Readers already exclude expired rows without deleting them.
+        return Ok(());
+    }
     pgrx::Spi::get_one::<bool>("SELECT graph._expire_projection_heartbeats_for_current_role()")
         .map_err(|err| {
             GraphError::Internal(format!("projection heartbeat expiration failed: {err}"))

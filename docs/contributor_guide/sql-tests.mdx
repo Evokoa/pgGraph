@@ -123,3 +123,8 @@ behavioral coverage.
 | Transaction lifecycle, sync, crash recovery, backup/restore, package, Docker, upgrade, concurrency | Heavy SQL scripts |
 | PostgreSQL-major compatibility | `run_pg_matrix.sh` or `run_pg_matrix_docker.sh` |
 | Release-gate synthetic fixture | `synthetic_release.rs` for pgrx coverage, `synthetic_release_smoke.sh` for shell/client coverage |
+
+`generation_transactions.py --read-only-only` selects production-feature checks
+for read-only published-generation loads, diagnostic housekeeping, CSR replay,
+snapshot isolation, and generation retention. The default run includes these
+cases with the existing publication and pruning regressions.
