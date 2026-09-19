@@ -20,11 +20,10 @@ sys.path.insert(0, str(PLAYGROUND_DIR))
 from catalog import query_catalog  # noqa: E402
 
 
-# The container also runs a periodic scheduled-maintenance worker, which can
-# transiently hold the same build lock graph.build() needs. sandbox/common/
-# run_benchmarks.py already retries around this exact collision; mirror that
-# here since the whole setup script (which starts with the idempotent
-# graph.reset()) is safe to retry wholesale.
+# Graph maintenance and source-table activity can transiently hold locks that
+# graph.build() needs. Retry PG006 as sandbox/common/run_benchmarks.py does;
+# the whole setup script (which starts with the idempotent graph.reset()) is
+# safe to retry wholesale.
 GRAPH_BUSY_DIAGNOSTIC = "pgGraph diagnostic: PG006"
 GRAPH_BUILD_WAIT_SECONDS = 600
 
@@ -214,8 +213,8 @@ def run_psql_with_busy_retry(
                 raise
             delay = min(5, 1 + attempt)
             print(
-                f"playground release gate hit transient scheduled-maintenance "
-                f"contention; retrying in {delay}s...",
+                f"playground release gate hit transient graph maintenance or "
+                f"source-lock contention; retrying in {delay}s...",
                 file=sys.stderr,
                 flush=True,
             )
