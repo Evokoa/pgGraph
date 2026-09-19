@@ -1983,10 +1983,13 @@ relationship variable. Properties map to ordinary edge-row columns; endpoint
 columns and a registered dynamic label column are filled from the graph pattern
 and cannot be supplied as user properties. For dynamic relationship
 label-column mappings, the GQL relationship type is written into the registered
-label column and must already exist in the built graph's dynamic label
-registry. After all statement triggers finish, pgGraph re-reads the edge row by
-its registered source key. If a trigger side effect removes or changes that key,
-either registered endpoint, or the registered dynamic label, pgGraph raises
+label column. A previously unseen type is registered in the transaction-local
+label registry, subject to the relationship-type limits. Reads in the same
+transaction can return and filter by that type, and rollback discards its
+transaction-local registration. After all statement triggers finish, pgGraph
+re-reads the edge row by its registered source key. If a trigger side effect
+removes or changes that key, either registered endpoint, or the registered
+dynamic label, pgGraph raises
 SQLSTATE `22000` with diagnostic `PG017` and rolls back the source insert rather
 than recording graph coordinates for different topology. Ordinary property
 changes are returned from the final source row.
