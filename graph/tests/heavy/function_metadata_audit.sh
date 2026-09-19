@@ -69,6 +69,7 @@ allowed_security_definer AS (
         ('_record_projection_heartbeat_for_current_role', ''),
         ('_require_selected_graph_privilege_for_current_role', 'privilege text'),
         ('_selected_graph_id_for_current_role', ''),
+        ('_sync_retention_catalog_for_current_role', ''),
         ('add_edge', 'from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text'),
         ('add_edge_to_graph', 'graph_name text, from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text, graph_tenant text, graph_namespace text'),
         ('add_table', 'table_name oid, id_column text, columns text[], tenant_column text'),
