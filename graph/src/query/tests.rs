@@ -69,6 +69,195 @@ fn bind_statement_query(query: &str) -> super::logical_plan::LogicalStatement {
     bind_statement(&ast, &fake_catalog()).unwrap()
 }
 
+fn filtered_node_plan(query: &str) -> super::physical_plan::PhysicalNodeScan {
+    let super::physical_plan::PhysicalStatement::NodeScan(plan) =
+        lower_statement(bind_statement_query(query))
+    else {
+        panic!("expected node scan");
+    };
+    plan
+}
+
+#[test]
+fn filtered_node_scan_preserves_stage_boundaries() {
+    assert!(
+        filtered_node_plan("MATCH (u:users) WHERE u.age = $age RETURN u.name")
+            .can_filter_scan_candidates()
+    );
+    for query in [
+        "MATCH (u:users) RETURN u.name",
+        "MATCH (u:users) WHERE u.id = 'u1' RETURN u.name",
+        "OPTIONAL MATCH (u:users) WHERE u.age = 7 RETURN u.name",
+        "MATCH (u:users) WHERE u.age = 7 RETURN DISTINCT u.name",
+        "MATCH (u:users) WHERE u.age = 7 RETURN count(*)",
+        "MATCH (u:users) WHERE u.age = 7 RETURN u.name ORDER BY u.name",
+        "MATCH (u:users) WHERE u.age = 7 RETURN u.name SKIP 1",
+        "MATCH (u:users) WHERE u.age = 7 RETURN u.name LIMIT 1",
+        "MATCH (u:users) WHERE u.age = 7 WITH DISTINCT u.name AS name RETURN name",
+    ] {
+        assert!(
+            !filtered_node_plan(query).can_filter_scan_candidates(),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn filtered_node_cursor_scans_beyond_match_cap_and_charges_rejected_work() {
+    use super::execute::{push_filtered_node_row, reserve_filtered_node_scan, NodeScanCursor};
+    crate::projection::tx_delta::clear_for_test();
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age = $age RETURN u.name");
+    let mut engine = Engine::new();
+    for i in 0..100_000 {
+        let idx = engine.node_store.add_node(10, format!("u{i}"));
+        engine.insert_table_membership(10, idx);
+    }
+    engine.built = true;
+    let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+    let visibility = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let _workspace = reserve_filtered_node_scan(&engine, &plan, &governor).unwrap();
+    let memory = governor.memory_used();
+    let params = QueryParams::from_iter([("age".into(), serde_json::json!(7))]);
+    let mut cursor = NodeScanCursor::new();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while let Some(row) = cursor.next(&engine, &plan, None, &context).unwrap() {
+        let hydrated = HydratedRows::from_iter([(
+            (10, row.node.node_id.clone()),
+            serde_json::json!({"age": i % 73}),
+        )]);
+        if super::value::node_candidate_matches(&row, &plan, &hydrated, &params).unwrap() {
+            push_filtered_node_row(&mut rows, row, &plan, &governor).unwrap();
+        }
+        i += 1;
+        assert_eq!(governor.memory_used(), memory);
+    }
+    assert_eq!(i, 100_000);
+    assert_eq!(governor.work_used().as_u64(), 100_000);
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.node.node_id)
+            .collect::<Vec<_>>(),
+        (0..100_000)
+            .filter(|i| i % 73 == 7)
+            .map(|i| format!("u{i}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn filtered_node_matches_keep_exact_hard_cap_boundaries() {
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age >= 0 RETURN u.name");
+    let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+    let mut rows = Vec::new();
+    for i in 0..10_000 {
+        super::execute::push_filtered_node_row(
+            &mut rows,
+            GqlNodeRow {
+                node: GqlNodeCoordinate {
+                    table_oid: 10,
+                    node_id: format!("u{i}"),
+                },
+                optional_null: false,
+            },
+            &plan,
+            &governor,
+        )
+        .unwrap();
+        if i == 9_998 {
+            assert_eq!(rows.len(), 9_999);
+        }
+    }
+    assert_eq!(rows.len(), 10_000);
+    let extra = rows[0].clone();
+    let error = super::execute::push_filtered_node_row(&mut rows, extra, &plan, &governor)
+        .expect_err("the 10,001st filtered match must fail");
+    assert!(matches!(error, GraphError::GqlExecution { .. }));
+    assert!(error
+        .to_string()
+        .contains("GQL result row cap exceeded (10000)"));
+    assert_eq!(rows.len(), 10_000);
+}
+
+#[test]
+fn filtered_node_cursor_obeys_visibility_tenants_and_transaction_deletes() {
+    crate::projection::tx_delta::clear_for_test();
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age >= 0 RETURN u.name");
+    let mut engine = engine_fixture();
+    engine.tenanted_table_oids.insert(10);
+    engine.insert_tenant_membership("tenant-a", 0);
+    engine.insert_tenant_membership("tenant-a", 1);
+    let added = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        Some("tenant-a"),
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    let deleted = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "deleted",
+        Some("tenant-a"),
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    crate::projection::tx_delta::record_deleted_node(deleted).unwrap();
+    crate::projection::tx_delta::record_added_node(10, "unindexed", Some("tenant-a")).unwrap();
+    crate::projection::tx_delta::record_added_node(10, "other-tenant", Some("tenant-b")).unwrap();
+    let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+    let visibility = crate::visibility::VisibilityScope::enforced_for_test(
+        [0].into_iter().collect(),
+        roaring::RoaringBitmap::new(),
+        roaring::RoaringBitmap::new(),
+    );
+    assert!(visibility.allows_node(added));
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let mut cursor = super::execute::NodeScanCursor::new();
+    let mut ids = Vec::new();
+    while let Some(row) = cursor
+        .next(&engine, &plan, Some("tenant-a"), &context)
+        .unwrap()
+    {
+        ids.push(row.node.node_id);
+    }
+    assert_eq!(ids, ["u2", "u3"]);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn filtered_node_cursor_checks_elapsed_between_hydration_work() {
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        ResourcePhase, RowCount, WorkUnits,
+    };
+    crate::projection::tx_delta::clear_for_test();
+    let plan = filtered_node_plan("MATCH (u:users) WHERE u.age >= 0 RETURN u.name");
+    let engine = engine_fixture();
+    let governor = ResourceGovernor::new(ResourceLimits::new(
+        MemoryBudget::new(ByteCount::from_bytes(1_048_576)),
+        DiskBudget::UNLIMITED,
+        RowCount::UNLIMITED,
+        WorkUnits::UNLIMITED,
+        ElapsedBudget::new(std::time::Duration::ZERO),
+    ));
+    governor
+        .consume_work(ResourcePhase::QueryHydrate, WorkUnits::new(2))
+        .unwrap();
+    // Observe the monotonic deadline before testing the scan checkpoint.
+    while governor.check_elapsed(ResourcePhase::QueryHydrate).is_ok() {
+        std::hint::spin_loop();
+    }
+    let visibility = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let error = super::execute::NodeScanCursor::new()
+        .next(&engine, &plan, None, &context)
+        .expect_err("elapsed checks must not depend on the shared work-counter residue");
+    assert!(
+        matches!(error, GraphError::ResourceLimit { ref resource, .. } if resource == "elapsed microseconds")
+    );
+}
+
 #[test]
 fn binder_accepts_create_node_for_registered_label() {
     let ast =
@@ -1480,6 +1669,72 @@ fn binder_accepts_optional_relationship_match() {
 }
 
 #[test]
+fn optional_identity_seed_is_restricted_before_null_extension() {
+    let mut engine = engine_fixture();
+    engine.register_edge_type("friend").unwrap();
+    let plan = lower(bind_query(
+        "OPTIONAL MATCH (u:users {id: 'u2'})<-[r:friend]-(v:users)
+         RETURN u.id AS source, r, v.id AS target ORDER BY target",
+    ));
+    let rows = execute(&engine, &plan, None).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the physical identity lookup must restrict seeds"
+    );
+    assert_eq!(rows[0].source.node_id, "u2");
+    assert!(rows[0].target.is_none());
+    let projected =
+        project_rows(rows, &plan, &hydrated_fixture(), &QueryParams::new(), true).unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "u2", "r": null, "target": null})]
+    );
+}
+
+#[test]
+fn identity_seed_lookup_precedes_unrelated_expansion_row_cap() {
+    let mut engine = Engine::new();
+    let cap = super::physical_plan::MAX_GQL_RESULT_ROWS;
+    let mut sources = Vec::new();
+    for index in 0..=cap {
+        let key = format!("seed-{index}");
+        let node = engine.node_store.add_node(10, key.clone());
+        engine.resolution_insert(10, &key, node);
+        engine.insert_table_membership(10, node);
+        sources.push(node);
+    }
+    let target = engine.node_store.add_node(20, "c1".to_string());
+    engine.resolution_insert(20, "c1", target);
+    engine.insert_table_membership(20, target);
+    let rel_type = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        sources
+            .into_iter()
+            .map(|source| RawEdge {
+                source,
+                target,
+                type_id: rel_type,
+                weight: None,
+                schema_reversed: false,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+    let plan = lower(bind_query(&format!(
+        "MATCH (u:users)-[:works_at]->(c:companies)
+         WHERE id(u) = 'seed-{cap}' RETURN c"
+    )));
+    let rows = execute(&engine, &plan, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source.node_id, format!("seed-{cap}"));
+    assert_eq!(rows[0].target.as_ref().unwrap().node_id, "c1");
+}
+
+#[test]
 fn binder_accepts_node_only_optional_match() {
     let ast = crate::gql::parse_statement("OPTIONAL MATCH (u:users) RETURN u").unwrap();
     let plan = bind_statement(&ast, &fake_catalog()).unwrap();
@@ -2022,6 +2277,174 @@ fn multi_pattern_join_orders_before_windowing() {
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0]["source"], "Ada");
     assert_eq!(projected[0]["peer"], "Linus");
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_precedes_unrelated_raw_row_cap() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (c)<-[:works_at]-(v:users) \
+         WHERE u.id = 'seed-101' AND v.name = 'chosen' \
+         RETURN u.id AS source, v.id AS peer",
+    );
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) = lower_statement(statement)
+    else {
+        panic!("expected physical join read plan");
+    };
+    let mut engine = Engine::new();
+    let mut hydrated = HydratedRows::new();
+    let mut sources = Vec::new();
+    for index in 0..102 {
+        let key = format!("seed-{index}");
+        let node = engine.node_store.add_node(10, key.clone());
+        engine.resolution_insert(10, &key, node);
+        engine.insert_table_membership(10, node);
+        hydrated.insert(
+            (10, key.clone()),
+            serde_json::json!({"id": key, "name": if index == 0 { "chosen" } else { "other" }}),
+        );
+        sources.push(node);
+    }
+    let target = engine.node_store.add_node(20, "company".into());
+    engine.resolution_insert(20, "company", target);
+    engine.insert_table_membership(20, target);
+    let type_id = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        sources
+            .into_iter()
+            .map(|source| RawEdge {
+                source,
+                target,
+                type_id,
+                weight: None,
+                schema_reversed: false,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+
+    let rows = execute_join(&engine, &physical, None).unwrap();
+    assert_eq!(rows.len(), 102, "only the bound source should expand");
+    let projected =
+        project_join_rows(rows, &physical, &hydrated, &QueryParams::new(), false).unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "seed-101", "peer": "seed-0"})]
+    );
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_respects_parameters_and_visibility() {
+    let super::physical_plan::PhysicalStatement::JoinRead(plan) =
+        lower_statement(bind_statement_query(
+            "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+             WHERE u.id = $seed RETURN u.id AS source, v.id AS peer",
+        ))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let engine = engine_fixture();
+    let execute = |params: &QueryParams, visibility: &crate::visibility::VisibilityScope| {
+        let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+        let context = crate::visibility::QueryExecutionContext::new(&governor, visibility);
+        super::execute::execute_join_in_context(&engine, &plan, None, params, &context)
+    };
+    let unrestricted = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let params = QueryParams::from_iter([("seed".into(), serde_json::json!("u1"))]);
+    let rows = execute(&params, &unrestricted).unwrap();
+    assert_eq!(
+        project_join_rows(rows, &plan, &hydrated_fixture(), &params, false).unwrap(),
+        vec![serde_json::json!({"source": "u1", "peer": "u1"})]
+    );
+    for seed in [serde_json::json!("missing"), serde_json::Value::Null] {
+        let params = QueryParams::from_iter([("seed".into(), seed)]);
+        assert!(execute(&params, &unrestricted).unwrap().is_empty());
+    }
+    assert!(matches!(
+        execute(&QueryParams::new(), &unrestricted),
+        Err(GraphError::GqlParameter { .. })
+    ));
+    for hidden_node in [0, 2] {
+        let hidden = crate::visibility::VisibilityScope::enforced_for_test(
+            [hidden_node].into_iter().collect(),
+            roaring::RoaringBitmap::new(),
+            roaring::RoaringBitmap::new(),
+        );
+        assert!(execute(&params, &hidden).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_preserves_transaction_nodes_and_deletes() {
+    crate::projection::tx_delta::clear_for_test();
+    let super::physical_plan::PhysicalStatement::JoinRead(plan) =
+        lower_statement(bind_statement_query(
+            "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+             WHERE id(u) = 'u3' AND id(u) <> id(v)
+             RETURN u.id AS source, v.id AS peer",
+        ))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let engine = engine_fixture();
+    let source = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    crate::projection::tx_delta::record_added_edge(
+        source,
+        crate::projection::tx_delta::DeltaEdge {
+            target: 2,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
+            schema_reversed: false,
+            weight: None,
+            relationship_id: None,
+        },
+    )
+    .unwrap();
+    let rows = execute_join(&engine, &plan, None).unwrap();
+    let mut hydrated = hydrated_fixture();
+    hydrated.insert((10, "u3".into()), serde_json::json!({"id": "u3"}));
+    assert_eq!(
+        project_join_rows(rows, &plan, &hydrated, &QueryParams::new(), false).unwrap(),
+        vec![serde_json::json!({"source": "u3", "peer": "u1"})]
+    );
+    crate::projection::tx_delta::record_deleted_node(source).unwrap();
+    assert!(execute_join(&engine, &plan, None).unwrap().is_empty());
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn multi_pattern_join_identity_seed_requires_mandatory_conjunctive_primary_key() {
+    for query in [
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE u.id = 'u1' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE u.id = 'u1' OR u.id = 'u2' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE NOT u.id = 'u1' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE u.name = 'Ada' RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies), (c)<-[:works_at]-(v:users)
+         WHERE v.id = 'u1' RETURN u",
+    ] {
+        let super::physical_plan::PhysicalStatement::JoinRead(plan) =
+            lower_statement(bind_statement_query(query))
+        else {
+            panic!("expected physical join read plan");
+        };
+        assert!(plan.source_identity_lookup.is_none(), "{query}");
+        assert_eq!(
+            execute_join(&engine_fixture(), &plan, None).unwrap().len(),
+            2
+        );
+    }
 }
 
 #[test]
@@ -5279,6 +5702,127 @@ fn executor_node_scan_reads_graph_and_transaction_nodes() {
 }
 
 #[test]
+fn detached_transaction_identity_reuse_selects_only_live_generation() {
+    use crate::projection::tx_delta;
+
+    for key in ["u1", "u3"] {
+        tx_delta::clear_for_test();
+        let engine = engine_fixture();
+        let initial = engine.resolve(10, key).unwrap_or_else(|| {
+            tx_delta::record_added_node_indexed(10, key, None, engine.node_store.node_count())
+                .unwrap()
+        });
+        tx_delta::record_deleted_node(initial).unwrap();
+        for _ in 0..2 {
+            let replacement =
+                tx_delta::record_added_node_indexed(10, key, None, engine.node_store.node_count())
+                    .unwrap();
+            assert_ne!(replacement, initial);
+            assert_eq!(engine.resolve(10, key), None);
+            assert_eq!(
+                tx_delta::resolve_added_node(10, key, None, false),
+                Some(replacement)
+            );
+            assert_eq!(tx_delta::added_node_indexes(10, None, false), [replacement]);
+            assert_eq!(tx_delta::added_node_keys(10, None, false), [key]);
+            for present in [true, false] {
+                let mut hidden = roaring::RoaringBitmap::new();
+                if !present {
+                    hidden.insert(replacement);
+                }
+                let visibility = crate::visibility::VisibilityScope::enforced_for_test(
+                    hidden,
+                    roaring::RoaringBitmap::new(),
+                    roaring::RoaringBitmap::new(),
+                );
+                for query in [
+                    format!("MATCH (u:users) WHERE u.id = '{key}' RETURN u"),
+                    "MATCH (u:users) RETURN u".to_owned(),
+                ] {
+                    let plan = filtered_node_plan(&query);
+                    let governor =
+                        crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+                    let context =
+                        crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+                    let rows = super::execute::execute_node_scan_in_context(
+                        &engine,
+                        &plan,
+                        None,
+                        &QueryParams::new(),
+                        &context,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        rows.iter().filter(|row| row.node.node_id == key).count(),
+                        usize::from(present)
+                    );
+                }
+            }
+            tx_delta::record_deleted_node(replacement).unwrap();
+            assert_eq!(engine.resolve(10, key), None);
+            assert_eq!(tx_delta::resolve_added_node(10, key, None, false), None);
+            assert!(tx_delta::added_node_keys(10, None, false).is_empty());
+            assert!(tx_delta::added_node_indexes(10, None, false).is_empty());
+            assert!(tx_delta::added_node_by_index(replacement).is_some());
+        }
+    }
+    tx_delta::clear_for_test();
+}
+
+#[test]
+fn detached_transaction_nodes_stay_absent_from_all_node_scan_shapes() {
+    crate::projection::tx_delta::clear_for_test();
+    let engine = engine_fixture();
+    let added = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .unwrap();
+    crate::projection::tx_delta::record_deleted_node(added).unwrap();
+    let unrestricted = crate::visibility::VisibilityScope::unrestricted_for_test();
+    let enforced = crate::visibility::VisibilityScope::enforced_for_test(
+        roaring::RoaringBitmap::new(),
+        roaring::RoaringBitmap::new(),
+        roaring::RoaringBitmap::new(),
+    );
+    for visibility in [&unrestricted, &enforced] {
+        for query in [
+            "MATCH (u:users) WHERE u.id = 'u3' RETURN u",
+            "OPTIONAL MATCH (u:users) WHERE u.id = 'u3' RETURN u",
+            "MATCH (u:users) RETURN u",
+        ] {
+            let plan = filtered_node_plan(query);
+            let governor = crate::resource::query_governor(crate::resource::ByteCount::ZERO);
+            let context = crate::visibility::QueryExecutionContext::new(&governor, visibility);
+            let rows = super::execute::execute_node_scan_in_context(
+                &engine,
+                &plan,
+                None,
+                &QueryParams::new(),
+                &context,
+            )
+            .unwrap();
+            if plan.optional {
+                assert_eq!(rows.len(), 1);
+                assert!(rows[0].optional_null);
+            } else if plan.identity_lookup.is_some() {
+                assert!(rows.is_empty());
+            } else {
+                assert_eq!(
+                    rows.iter()
+                        .map(|row| row.node.node_id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["u1", "u2"]
+                );
+            }
+        }
+    }
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
 fn executor_node_scan_hides_unscoped_transaction_nodes_under_tenant_scope() {
     crate::projection::tx_delta::clear_for_test();
     let ast = crate::gql::parse_statement("MATCH (u:users) RETURN u").unwrap();
@@ -5367,6 +5911,26 @@ fn executor_traverses_transaction_created_node_entry_points() {
             .target
             .as_ref()
             .is_some_and(|target| target.node_id == "c1")));
+    let identity_plan = lower(bind_query(
+        "MATCH (u:users {id: 'u3'})-[:works_at]->(c:companies)
+         RETURN u.id AS source, c.id AS target",
+    ));
+    let identity_rows = execute(&engine, &identity_plan, None).unwrap();
+    assert_eq!(identity_rows.len(), 1);
+    let mut hydrated = hydrated_fixture();
+    hydrated.insert((10, "u3".to_string()), serde_json::json!({"id": "u3"}));
+    let projected = project_rows(
+        identity_rows,
+        &identity_plan,
+        &hydrated,
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "u3", "target": "c1"})]
+    );
     crate::projection::tx_delta::clear_for_test();
 }
 
@@ -5389,14 +5953,27 @@ fn executor_allows_transaction_created_nodes_outside_traversal_scope() {
 fn executor_allows_unrelated_transaction_created_nodes_excluded_by_source_id() {
     crate::projection::tx_delta::clear_for_test();
     let physical = lower(bind_query(
-        "MATCH (u:users {id: 'u1'})-[:works_at]->(c:companies) RETURN u, c",
+        "MATCH (u:users {id: 'u1'})-[:works_at]->(c:companies)
+         RETURN u.id AS source, c.id AS target",
     ));
     let engine = engine_fixture();
     crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
 
     let rows = execute(&engine, &physical, None).unwrap();
 
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        projected,
+        vec![serde_json::json!({"source": "u1", "target": "c1"})]
+    );
     crate::projection::tx_delta::clear_for_test();
 }
 
@@ -5413,7 +5990,16 @@ fn executor_allows_tx_nodes_excluded_by_contradictory_source_ids() {
 
     let rows = execute(&engine, &physical, None).unwrap();
 
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+    assert!(projected.is_empty());
     crate::projection::tx_delta::clear_for_test();
 }
 

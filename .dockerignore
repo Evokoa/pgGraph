@@ -2,8 +2,8 @@
 .reference
 .agents
 .codex
-.env
-**/.env
+.env*
+**/.env*
 .venv
 **/.venv
 target

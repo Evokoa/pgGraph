@@ -18,15 +18,26 @@ RUN_V1_UPDATE_ARTIFACT_ROLLBACK="${RUN_V1_UPDATE_ARTIFACT_ROLLBACK:-0}"
 RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK="${RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK:-0}"
 PROFILE_TIMEOUT_SECONDS="${PROFILE_TIMEOUT_SECONDS:-600}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-DOCKERFILE="$ROOT_DIR/graph/tests/heavy/Dockerfile.pg-matrix"
-V1_SOURCE_ARCHIVE="$ROOT_DIR/.pggraph-v1.0-source.tar.gz"
-V1_1_SOURCE_ARCHIVE="$ROOT_DIR/.pggraph-v1.1-source.tar.gz"
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ]]; then
+  echo "PostgreSQL release matrix requires a clean tracked worktree and index" >&2
+  exit 2
+fi
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-matrix.XXXXXX")"
+V1_SOURCE_ARCHIVE="$WORKDIR/pggraph-v1.0-source.tar.gz"
+V1_1_SOURCE_ARCHIVE="$WORKDIR/pggraph-v1.1-source.tar.gz"
 
 cleanup() {
-  rm -f "$V1_SOURCE_ARCHIVE" "${V1_SOURCE_ARCHIVE}."*
-  rm -f "$V1_1_SOURCE_ARCHIVE" "${V1_1_SOURCE_ARCHIVE}."*
+  rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
+
+# Contract tests verify historical evidence ancestry. Supply only public source
+# history, without copying local Git configuration into the image.
+SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+mkdir -p "$WORKDIR/history" "$WORKDIR/source"
+git -C "$ROOT_DIR" bundle create "$WORKDIR/history/source-history.bundle" HEAD
+git -C "$ROOT_DIR" archive "$SOURCE_COMMIT" | tar -x -C "$WORKDIR/source"
+DOCKERFILE="$WORKDIR/source/graph/tests/heavy/Dockerfile.pg-matrix"
 
 v1_source_args=()
 if [[ "$RUN_V1_UPDATE_ARTIFACT_ROLLBACK" == "1" ]]; then
@@ -50,6 +61,8 @@ if [[ "$RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK" == "1" ]]; then
 fi
 
 docker build \
+  --build-context "source_history=$WORKDIR/history" \
+  --build-arg "SOURCE_COMMIT=${SOURCE_COMMIT}" \
   ${v1_source_args[@]+"${v1_source_args[@]}"} \
   ${v1_1_source_args[@]+"${v1_1_source_args[@]}"} \
   --build-arg "PG_VERSIONS=${PG_VERSIONS}" \
@@ -69,6 +82,6 @@ docker build \
   --build-arg "PROFILE_TIMEOUT_SECONDS=${PROFILE_TIMEOUT_SECONDS}" \
   -f "$DOCKERFILE" \
   -t "$IMAGE" \
-  "$ROOT_DIR"
+  "$WORKDIR/source"
 
 echo "Docker PostgreSQL matrix passed for versions: $PG_VERSIONS"

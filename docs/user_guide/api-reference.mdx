@@ -376,11 +376,13 @@ RETURNS TABLE (
 )
 ```
 
-Reports sizing estimates for the current backend's active engine. The immutable
-artifact snapshot and backend-private heap are multiplied by
-`concurrent_backends`, with a minimum of one. The `*_shared_mb` columns remain
-for 1.x compatibility and currently return zero. This is an operator sizing
-aid, not a live connection counter or cluster-wide hard cap.
+Reports sizing estimates for the current backend's active engine. Private heap
+and private fallback snapshots are multiplied by `concurrent_backends`, with a
+minimum of one. The shared columns report Linux sealed base bytes, counted once
+in the estimate. This assumes all backends share one base; concurrent cold
+loads, different generations or different roots can require additional copies.
+Zero shared bytes means no sealed base is loaded. This is a sizing estimate,
+not a live connection counter or cluster-wide hard cap.
 
 ## Named Graph Metadata
 
@@ -765,6 +767,28 @@ whether a graph is cold, missing an artifact, blocked by quota, or already
 loaded. Only graphs for which the caller has read access are returned. Artifact
 and count fields describe physical state and are not RLS-filtered.
 
+### `graph.sync_retention()`
+
+```sql
+graph.sync_retention()
+RETURNS TABLE (
+  eligible_prune_floor bigint,
+  prune_blocker text,
+  retained_graph_rows bigint,
+  database_sync_log_bytes bigint,
+  active_sync_watermark_backends int
+)
+```
+
+Admin-only retention diagnostic for the selected graph. An available floor is
+inclusive and `prune_blocker` is `NULL`; otherwise the floor is `NULL` and the
+blocker identifies why pruning is suppressed. The result is advisory and does
+not acquire the writer lock or perform pruning. See
+[sync-log retention](./sync-and-maintenance#sync-log-retention) for blocker values.
+The exact row count covers the selected graph's registered sources and can scan
+a large log. Bytes cover the database-wide sync-log relation, indexes, and TOAST,
+including other graphs' rows. Heartbeats are counted without being refreshed.
+
 ### `graph.sync_health()`
 
 ```sql
@@ -806,8 +830,11 @@ RETURNS TABLE (
 ```
 
 Reports the sync and compaction signals most useful to schedulers and external
-monitors. Use `apply_sync_recommended` to decide when a lightweight replay is
-useful for a writable backend-local engine, and `maintenance_recommended` to
+monitors. Requires read access to the selected graph, including for named-graph
+readers without extension ownership. Counts describe physical projection and
+sync state, not RLS-filtered query results. Use `apply_sync_recommended` to decide
+when a lightweight replay is useful for a writable backend-local engine, and
+`maintenance_recommended` to
 decide when overlay/read-only/rebuild state should be folded back into the base
 graph. The `durable_*_recommended` columns mirror `graph.projection_status()`
 for projection ingestion, compaction, GC, and persisted repair pressure without
@@ -926,9 +953,10 @@ For FK-style edges, `to_column` must exist on the target table.
 
 Many-to-many junction tables use edge-table mode. For example,
 `graph.add_edge('public.follows', 'follower', 'public.users', 'followee', ...)`
-registers `follows.follower -> follows.followee`. `to_table` is the preferred
-target node table when it is registered; otherwise endpoint resolution falls
-back across the registered node tables. Use the target table primary-key
+registers `follows.follower -> follows.followee`. `to_table` is the exact
+target node table; missing targets omit the relationship. Source foreign keys
+must identify one registered single-column node identifier. Without a source
+foreign key, only a unique match across registered nodes resolves. Use the target table primary-key
 column, such as `'id'`, only for FK-style edges from a registered source node
 table.
 
@@ -1955,10 +1983,13 @@ relationship variable. Properties map to ordinary edge-row columns; endpoint
 columns and a registered dynamic label column are filled from the graph pattern
 and cannot be supplied as user properties. For dynamic relationship
 label-column mappings, the GQL relationship type is written into the registered
-label column and must already exist in the built graph's dynamic label
-registry. After all statement triggers finish, pgGraph re-reads the edge row by
-its registered source key. If a trigger side effect removes or changes that key,
-either registered endpoint, or the registered dynamic label, pgGraph raises
+label column. A previously unseen type is registered in the transaction-local
+label registry, subject to the relationship-type limits. Reads in the same
+transaction can return and filter by that type, and rollback discards its
+transaction-local registration. After all statement triggers finish, pgGraph
+re-reads the edge row by its registered source key. If a trigger side effect
+removes or changes that key, either registered endpoint, or the registered
+dynamic label, pgGraph raises
 SQLSTATE `22000` with diagnostic `PG017` and rolls back the source insert rather
 than recording graph coordinates for different topology. Ordinary property
 changes are returned from the final source row.
@@ -2012,6 +2043,11 @@ that identity after the delete. Endpoint nodes are not deleted. Undirected
 relationship `DELETE` is not part of this release's GQL subset. Before deleting
 the edge row, pgGraph locks the matched endpoint source rows and re-checks the
 matched GQL predicate against the current PostgreSQL rows.
+
+For relationship `DELETE`, `RETURN r` currently returns only the canonical
+`_type`, `_start`, and `_end` coordinates in registered schema direction.
+Deleted edge-row properties are unavailable in that return value, including
+with the default `hydrate := true`.
 
 `MATCH (n:label {...}) DETACH DELETE n RETURN ...` is supported for a single
 matched node. It requires a `mutable_overlay` projection, deletes registered

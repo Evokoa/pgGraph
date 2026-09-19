@@ -192,6 +192,29 @@ fn memory_profile_counts_persisted_snapshot_per_backend() {
     .unwrap_or(0);
     assert_eq!(loaded_count, 1);
 
+    let (base_bytes, shared_bytes, heap_bytes) = crate::ENGINE.with(|e| {
+        let engine = e.borrow();
+        let base = engine
+            .base_snapshot
+            .as_ref()
+            .expect("persisted load must retain validated base ownership");
+        assert_eq!(
+            engine._mmap.as_ref().expect("mapped base missing").len(),
+            base.bytes()
+        );
+        (
+            base.bytes(),
+            base.shared_bytes(),
+            engine.estimated_heap_bytes(),
+        )
+    });
+    assert!(base_bytes > 0);
+    // The loaded capability reports its actual sealed/private backing. Linux
+    // may legitimately fall back to private bytes when sharing is unavailable.
+    assert!(shared_bytes == 0 || shared_bytes == base_bytes);
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(shared_bytes, 0);
+
     let (private_mb, shared_mb, instance_private_mb, instance_shared_mb, instance_total_mb) =
         Spi::connect(|client| {
             let rows = client
@@ -218,9 +241,17 @@ fn memory_profile_counts_persisted_snapshot_per_backend() {
         .expect("memory_profile row read failed");
 
     assert!(private_mb > 0.0);
-    assert_eq!(shared_mb, 0.0);
+    const MIB: f64 = 1_048_576.0;
+    assert_eq!(shared_mb, shared_bytes as f64 / MIB);
+    let expected_private_bytes = if shared_bytes == 0 {
+        heap_bytes + base_bytes
+    } else {
+        heap_bytes
+    };
+    assert_eq!(private_mb, expected_private_bytes as f64 / MIB);
+    assert_eq!(private_mb + shared_mb, (heap_bytes + base_bytes) as f64 / MIB);
     assert_eq!(shared_mb, instance_shared_mb);
-    assert!(instance_private_mb >= private_mb * 4.0);
+    assert_eq!(instance_private_mb, private_mb * 4.0);
     assert!((instance_total_mb - (instance_private_mb + instance_shared_mb)).abs() < 0.000001);
 
     let clamped_backends = Spi::get_one::<i32>(
@@ -847,7 +878,73 @@ fn add_filter_column_rejects_non_numeric_columns() {
         .expect("table oid was NULL");
 
     let result = super::validate_numeric_column(table_oid as u32, "note");
-    assert!(result.is_err());
+    assert!(matches!(result, Err(super::safety::GraphError::InvalidFilter { .. })));
+}
+
+#[pg_test]
+fn filter_column_validation_classifies_missing_columns_as_invalid_input() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_bad_pgtest ADD COLUMN props jsonb;
+         SELECT graph.add_table('graph_test_bad_pgtest'::regclass, 'id');
+         SELECT graph.create_graph('filter_validation')",
+    )
+    .expect("prepare filter validation graphs failed");
+
+    for column in ["missing", "props.w", "props", "note"] {
+        for function in [
+            "graph.add_filter_column(",
+            "graph.add_filter_column_to_graph('filter_validation', ",
+        ] {
+            let statement = format!(
+                "SELECT {function}'graph_test_bad_pgtest'::regclass, '{column}', 'numeric')"
+            );
+            assert_eq!(sqlstate_for_error(&statement).as_deref(), Some("22023"));
+            assert_eq!(
+                sql_error_detail(&statement).as_deref(),
+                Some("pgGraph diagnostic: PG005")
+            );
+        }
+    }
+}
+
+#[pg_test]
+fn registered_jsonb_paths_support_triggered_insert_update_and_delete() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest ADD COLUMN props jsonb;
+         SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id',
+             ARRAY['props.w', 'props.nested.value']);
+         SET graph.sync_mode = 'trigger';
+         SELECT * FROM graph.build();
+         INSERT INTO public.graph_test_users_pgtest(id, name, props)
+             VALUES ('json-path', 'Path', '{\"w\":1,\"nested\":{\"value\":\"first\"}}');
+         UPDATE public.graph_test_users_pgtest
+             SET props = '{\"w\":2,\"nested\":{\"value\":\"second\"}}'
+             WHERE id = 'json-path'",
+    )
+    .expect("registered JSONB paths must not block source writes");
+    assert_eq!(
+        Spi::get_one::<String>(
+            "SELECT properties->>'props.nested.value'
+             FROM graph._sync_log WHERE pk = 'json-path' AND op = 'U'
+             ORDER BY id DESC LIMIT 1"
+        )
+        .expect("read nested sync property failed"),
+        Some("\"second\"".into())
+    );
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest SET props = NULL WHERE id = 'json-path';
+         DELETE FROM public.graph_test_users_pgtest WHERE id = 'json-path'",
+    )
+    .expect("NULL properties and deletes must remain writable");
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT count(*) FROM graph._sync_log WHERE pk = 'json-path' AND op = 'D'"
+        )
+        .expect("read delete sync event failed"),
+        Some(1)
+    );
 }
 
 #[pg_test]

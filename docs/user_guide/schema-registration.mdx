@@ -145,16 +145,20 @@ SELECT graph.add_edge(
 );
 ```
 
-The builder first tries table-specific endpoint resolution. If needed, it falls
-back to resolving the endpoint primary-key value across registered tables,
-ordered by table OID. Prefer unambiguous primary keys across graph tables.
+Endpoints with a known node table resolve only within that table. For an edge
+table, a single-column source foreign key must reference the registered node
+identifier. Ambiguous or composite source foreign keys are rejected. Without
+a source foreign key, the source value resolves only when exactly one
+registered node has that identifier; ambiguous values are omitted.
+Target foreign keys must reference the registered target identifier too.
+FK-style relationships from registered node tables require `to_column` to name
+that identifier. Alternate-key and composite foreign keys are not translated.
 
 Junction tables use this same edge-table form. For a table such as
 `public.follows(follower, followee)`, register `from_column := 'follower'` and
-`to_column := 'followee'`. `to_table` is the preferred target node table when
-that table is registered; otherwise endpoint resolution falls back across the
-registered node tables. `to_column` still names the target endpoint column on
-the junction table, not the node table primary-key column.
+`to_column := 'followee'`. `to_table` is the exact target node table. A missing
+target omits the relationship. `to_column` names the target endpoint column on
+the junction table.
 
 ## Dynamic Edge Labels
 

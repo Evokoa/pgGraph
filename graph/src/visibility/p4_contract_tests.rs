@@ -324,7 +324,7 @@ fn targeted_weighted_paths_freeze_heap_and_tie_order_before_migration() {
     for required in [
         "weighted_paths_lazy_match_eager_rls_ties_filters_and_metadata",
         "weighted_paths_lazy_durable_segments_match_eager",
-        "weighted_paths_durable_unseen_dynamic_label_remains_pg018",
+        "weighted_paths_durable_new_label_honors_changed_relationship_policy",
         "weighted_paths_pending_edge_overlay_remains_pg018",
         "weighted_paths_tx_node_state_falls_back_eager",
         "weighted_paths_lazy_resource_identity_cancellation_and_retry",

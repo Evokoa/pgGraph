@@ -811,14 +811,10 @@ fn format_shortest_path_rows(
             requested: output_bytes.as_u64(),
             limit: governor.memory_limit().as_u64(),
         })?;
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, tables);
     for step in steps {
         let node = if hydrate {
-            crate::sql_hydration::hydrate_node_governed_with_tables(
-                step.node_table.0,
-                &step.node_id,
-                governor,
-                tables,
-            )?
+            hydrator.hydrate(step.node_table.0, &step.node_id)?
         } else {
             None
         };

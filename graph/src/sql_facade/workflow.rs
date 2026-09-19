@@ -377,6 +377,7 @@ fn find_related(
         let mut rows = Vec::new();
         reserve_workflow_vector(&mut workspace, &mut rows, page_len)
             .unwrap_or_else(|err| err.report());
+        let mut hydrator = crate::sql_hydration::NodeHydrator::new(&governor, &query_start.tables);
         for (
             idx,
             (
@@ -399,13 +400,9 @@ fn find_related(
             .enumerate()
         {
             workflow_step(&governor, 1).unwrap_or_else(|err| err.report());
-            let node = crate::sql_hydration::hydrate_node_governed_with_tables(
-                node_table.to_u32(),
-                &node_id,
-                &governor,
-                &query_start.tables,
-            )
-            .unwrap_or_else(|err| err.report());
+            let node = hydrator
+                .hydrate(node_table.to_u32(), &node_id)
+                .unwrap_or_else(|err| err.report());
             let readable_path =
                 readable_path_governed(&path, &edge_path, &governor, &mut workspace)
                     .unwrap_or_else(|err| err.report());

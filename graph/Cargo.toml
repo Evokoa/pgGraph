@@ -1,6 +1,6 @@
 [package]
 name = "graph"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 rust-version = "1.96"
 description = "Sub-millisecond graph traversal for PostgreSQL"
@@ -23,7 +23,7 @@ pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
-pg_test = []
+pg_test = ["development"]
 fuzzing = []
 development = []
 benchmarks = []
@@ -93,3 +93,6 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.186"

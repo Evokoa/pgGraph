@@ -261,7 +261,8 @@ fn publish_base_chunk_rewrite_inner(
     let generation_id = previous
         .generation_id
         .checked_add(1)
-        .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))?;
+        .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))?
+        .max(super::recovery::next_rebuild_generation_id(root)?);
     let mut rewritten = Vec::new();
     rewritten
         .try_reserve_exact(dirty_ranges.len())
@@ -356,7 +357,7 @@ fn publish_base_chunk_rewrite_inner(
         now_unix_micros()?,
     );
     manifest.previous_generation_id = Some(previous.generation_id);
-    manifest.inherit_operation_timestamps(previous);
+    manifest.inherit_generation_metadata(previous);
     match reason {
         BaseChunkRewriteReason::None => {}
         BaseChunkRewriteReason::Compaction => manifest.mark_compaction(),

@@ -74,6 +74,19 @@ fn collect_projection_garbage_with_active_generation_ids(
     let _publication_lock = store.acquire_publication_lock()?;
     let manifests = load_valid_manifests(root)?;
     let current_generation = store.current_generation_id()?;
+    #[cfg(not(test))]
+    if super::publication::historical_generations_required(root)? {
+        return Ok(ProjectionGcSummary {
+            valid_generations_scanned: manifests.len(),
+            retained_generations: manifests.iter().map(|m| m.generation_id).collect(),
+            active_generations: active_generation_ids,
+            obsolete_candidates: 0,
+            protected_candidates: 0,
+            deleted_files: 0,
+            deleted_bytes: 0,
+            deleted_manifests: 0,
+        });
+    }
     let retained_generations = retained_generation_ids(&manifests, config, current_generation);
     let valid_generation_ids = manifests
         .iter()

@@ -444,6 +444,8 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("owner graph_privileges failed")
     .unwrap_or(0);
+    Spi::run("SELECT graph.set_current_graph('secure_graph', namespace := 'app')")
+        .expect("select secure graph as owner failed");
 
     Spi::run("SET ROLE graph_phase7_builder").expect("set builder role failed");
     let builder_nodes = Spi::get_one::<i64>(
@@ -452,7 +454,29 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("builder build_graph failed")
     .unwrap_or(0);
+    let builder_head_before = Spi::get_one::<pgrx::JsonB>(
+        "SELECT graph._published_generation_for_current_role()",
+    ).expect("builder head lookup failed");
+    let builder_cancellation = Spi::get_one::<bool>(
+        "SELECT graph._test_publication_error_after_arming()",
+    ).expect("publication cancellation probe failed");
+    let builder_head_after = Spi::get_one::<pgrx::JsonB>(
+        "SELECT graph._published_generation_for_current_role()",
+    ).expect("builder head lookup after cancellation failed");
+    let builder_traverse_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 1)",
+    );
+    let builder_publish_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._publish_generation_for_current_role()",
+    );
     Spi::run("RESET ROLE").expect("reset builder role failed");
+    Spi::run("REVOKE SELECT ON public.graph_test_users_pgtest FROM graph_phase7_builder")
+        .expect("revoke builder source access failed");
+    Spi::run("SET ROLE graph_phase7_builder").expect("set builder without source failed");
+    let builder_without_source_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.build_graph('secure_graph', force_persist := true, graph_namespace := 'app')",
+    );
+    Spi::run("RESET ROLE").expect("reset builder without source failed");
 
     Spi::run("SET ROLE graph_phase7_admin").expect("set graph admin role failed");
     let admin_unloaded = Spi::get_one::<bool>(
@@ -486,6 +510,9 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("reader set_current_graph failed")
     .expect("reader selected graph missing");
+    let reader_publish_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._publish_generation_for_current_role()",
+    );
     let reader_traverse_sqlstate = sqlstate_for_prepared_helper(
         "SELECT * FROM graph.traverse(
             'graph_test_users_pgtest'::regclass,
@@ -558,6 +585,12 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     Spi::run("RESET ROLE").expect("reset reader role failed");
 
     Spi::run("SET ROLE graph_phase7_no_graph").expect("set no_graph role failed");
+    let no_graph_metadata_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._published_generation_for_current_role()",
+    );
+    let no_graph_publish_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._publish_generation_for_current_role()",
+    );
     let no_graph_sqlstate =
         sqlstate_for_prepared_helper("SELECT * FROM graph.set_current_graph('secure_graph', namespace := 'app')");
     let hidden_loaded_rows = Spi::get_one::<i64>(
@@ -618,6 +651,8 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     assert_eq!(admin_projection_sqlstate, None);
     assert_eq!(admin_build_resource_sqlstate, None);
     assert_eq!(no_graph_sqlstate, Some("22023".to_string()));
+    assert_eq!(no_graph_metadata_sqlstate.as_deref(), Some("22023"));
+    assert_eq!(no_graph_publish_sqlstate.as_deref(), Some("22023"));
     assert_eq!(hidden_loaded_rows, 0);
     assert_eq!(hidden_runtime_rows, 0);
     assert_eq!(hidden_status_sqlstate, Some("22023".to_string()));
@@ -629,6 +664,13 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     assert_eq!(reader_resource_sqlstate, Some("42501".to_string()));
     assert_eq!(reader_generation_sqlstate, Some("42501".to_string()));
     assert_eq!(builder_nodes, 2);
+    assert_eq!(builder_cancellation, Some(false));
+    assert!(builder_head_before.is_some());
+    assert_eq!(builder_head_before.map(|value| value.0), builder_head_after.map(|value| value.0));
+    assert_eq!(builder_traverse_sqlstate.as_deref(), Some("42501"));
+    assert_eq!(builder_publish_sqlstate.as_deref(), Some("42501"));
+    assert_eq!(builder_without_source_sqlstate.as_deref(), Some("42501"));
+    assert_eq!(reader_publish_sqlstate.as_deref(), Some("42501"));
     assert!(admin_unloaded);
     assert_eq!(admin_loaded_nodes, 2);
 }
@@ -1923,8 +1965,10 @@ fn persisted_named_graphs_use_distinct_artifact_roots() {
     let path_a = crate::persistence::graph_file_path_for(&graph_a).expect("persist_a path failed");
     let path_b = crate::persistence::graph_file_path_for(&graph_b).expect("persist_b path failed");
 
-    assert!(crate::persistence::persisted_graph_exists(&path_a).expect("persist_a presence"));
-    assert!(crate::persistence::persisted_graph_exists(&path_b).expect("persist_b presence"));
+    assert!(crate::projection::publication::authorized_artifact_path(&graph_a)
+        .expect("persist_a presence").is_some_and(|path| path.is_file()));
+    assert!(crate::projection::publication::authorized_artifact_path(&graph_b)
+        .expect("persist_b presence").is_some_and(|path| path.is_file()));
     assert_ne!(path_a, path_b);
     assert_eq!(
         path_a

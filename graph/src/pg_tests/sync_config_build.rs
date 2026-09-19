@@ -56,6 +56,78 @@ fn trigger_sync_adds_edge_overlay_after_explicit_apply_sync() {
 }
 
 #[pg_test]
+fn trigger_sync_preserves_dotted_label_columns_and_json_property_paths() {
+    reset_and_create_fixtures();
+    Spi::run(
+        r#"ALTER TABLE public.graph_test_friendships_pgtest
+               ADD COLUMN "rel.type" text NOT NULL DEFAULT 'base';
+           ALTER TABLE public.graph_test_users_pgtest
+               ADD COLUMN rel jsonb NOT NULL DEFAULT '{"type": 0}',
+               ADD COLUMN "rel.type" text NOT NULL DEFAULT 'literal-node-value';
+           SELECT graph.add_table(
+               'graph_test_users_pgtest'::regclass,
+               id_column := 'id', columns := ARRAY['rel.type']);
+           SELECT graph.add_edge(
+               'graph_test_friendships_pgtest'::regclass, 'user_id',
+               'graph_test_users_pgtest'::regclass, 'friend_id',
+               'fallback', bidirectional := false, label_column := 'rel.type');
+           SET graph.sync_mode = 'trigger';
+           SELECT * FROM graph.build()"#,
+    )
+    .expect("build dotted label and JSON property fixture failed");
+
+    for (write_sql, operation, expected_label, expected_property) in [
+        (
+            r#"INSERT INTO public.graph_test_users_pgtest (id, name, rel)
+                   VALUES ('dotted-node', 'Dotted', '{"type": 7}');
+               INSERT INTO public.graph_test_friendships_pgtest
+                   (id, user_id, friend_id, "rel.type")
+                   VALUES ('dotted-edge', 'dotted-node', 'u1', 'inserted.kind')"#,
+            "I",
+            "inserted.kind",
+            "7",
+        ),
+        (
+            r#"UPDATE public.graph_test_users_pgtest SET rel = '{"type": 9}'
+                   WHERE id = 'dotted-node';
+               UPDATE public.graph_test_friendships_pgtest SET "rel.type" = 'updated.kind'
+                   WHERE id = 'dotted-edge'"#,
+            "U",
+            "updated.kind",
+            "9",
+        ),
+    ] {
+        Spi::run(write_sql).expect("write dotted label and JSON property failed");
+        let label_property = Spi::get_one::<String>(&format!(
+            "SELECT properties->>'rel.type' FROM graph._sync_log
+             WHERE table_oid = 'graph_test_friendships_pgtest'::regclass
+               AND pk = 'dotted-edge' AND op = '{operation}'
+             ORDER BY id DESC LIMIT 1"
+        ))
+        .expect("read literal label capture failed");
+        assert_eq!(label_property.as_deref(), Some(expected_label));
+        let node_property = Spi::get_one::<String>(&format!(
+            "SELECT properties->>'rel.type' FROM graph._sync_log
+             WHERE table_oid = 'graph_test_users_pgtest'::regclass
+               AND pk = 'dotted-node' AND op = '{operation}'
+             ORDER BY id DESC LIMIT 1"
+        ))
+        .expect("read JSON property capture failed");
+        assert_eq!(node_property.as_deref(), Some(expected_property));
+
+        Spi::run("SELECT * FROM graph.apply_sync()").expect("apply dotted label sync failed");
+        let actual_paths = Spi::get_one::<String>(
+            "SELECT string_agg(node_id || ':' || (edge_path->>0), ',' ORDER BY node_id)
+             FROM graph.traverse('graph_test_users_pgtest'::regclass, 'dotted-node', 1,
+                                direction := 'out', hydrate := false)
+             WHERE depth = 1",
+        )
+        .expect("traverse synced dotted label failed");
+        assert_eq!(actual_paths, Some(format!("u1:{expected_label}")));
+    }
+}
+
+#[pg_test]
 fn sync_mode_trigger_installs_and_manual_removes_graph_triggers() {
     reset_and_create_fixtures();
     Spi::run(
@@ -247,6 +319,80 @@ fn setup_sync_log_retention_fixture() {
 }
 
 #[pg_test]
+fn sync_retention_reports_generation_protection_and_scoped_volume() {
+    setup_sync_log_retention_fixture();
+    Spi::run("INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('retained', 'Retained')")
+        .expect("create retained sync row failed");
+    // A row for an unrelated source must not inflate the selected graph count.
+    Spi::run("INSERT INTO graph._sync_log (op, table_oid, table_name, pk) VALUES ('I', 'graph_test_friendships_pgtest'::regclass, 'graph_test_friendships_pgtest', 'unrelated')")
+        .expect("create unrelated diagnostic row failed");
+    let row = Spi::get_one::<pgrx::JsonB>("SELECT to_jsonb(r) FROM graph.sync_retention() r")
+        .expect("retention diagnostics failed")
+        .expect("retention row missing");
+    assert!(row.0["eligible_prune_floor"].is_null());
+    assert_eq!(row.0["prune_blocker"], "generation_visibility");
+    assert_eq!(row.0["retained_graph_rows"], 1);
+    assert!(row.0["database_sync_log_bytes"].as_i64().unwrap_or_default() > 0);
+    assert_eq!(
+        Spi::get_one::<bool>("SELECT sync_log_retention_floor IS NULL AND NOT sync_log_prune_recommended FROM graph.sync_health()")
+            .expect("sync health failed"),
+        Some(true)
+    );
+}
+
+#[pg_test]
+fn sync_retention_reports_shared_sources_before_generation_protection() {
+    setup_sync_log_retention_fixture();
+    Spi::run("SELECT graph.create_graph('retention_consumer'); SELECT graph.add_table_to_graph('retention_consumer', 'graph_test_users_pgtest'::regclass, 'id')")
+        .expect("register shared source failed");
+    assert_eq!(
+        Spi::get_one::<String>("SELECT prune_blocker FROM graph.sync_retention()")
+            .expect("retention diagnostics failed")
+            .as_deref(),
+        Some("shared_source")
+    );
+    let diagnostics = crate::sql_sync::sync_watermark_diagnostics(Some(100), 100_000)
+        .expect("watermark diagnostics failed");
+    assert!(diagnostics.eligibility.floor().is_none());
+    assert!(!diagnostics.prune_recommended);
+}
+
+#[pg_test]
+fn sync_retention_reports_alternate_roots_before_generation_protection() {
+    setup_sync_log_retention_fixture();
+    Spi::run("INSERT INTO graph._projection_heads (graph_id, artifact_root, generation_id, manifest_checksum) SELECT graph_id, '/retention-diagnostic-alternate-root', 1, 'unused' FROM graph._graphs WHERE graph_name = 'default'")
+        .expect("register alternate root failed");
+    assert_eq!(
+        Spi::get_one::<String>("SELECT prune_blocker FROM graph.sync_retention()")
+            .expect("retention diagnostics failed")
+            .as_deref(),
+        Some("alternate_artifact_root")
+    );
+    let diagnostics = crate::sql_sync::sync_watermark_diagnostics(Some(100), 100_000)
+        .expect("watermark diagnostics failed");
+    assert!(diagnostics.eligibility.floor().is_none());
+    assert!(!diagnostics.prune_recommended);
+}
+
+#[pg_test]
+fn sync_retention_rejects_non_admin_before_reading_volume() {
+    reset_and_create_fixtures();
+    Spi::run("CREATE ROLE graph_retention_diagnostic_reader; GRANT USAGE ON SCHEMA graph TO graph_retention_diagnostic_reader")
+        .expect("create restricted role failed");
+    create_error_sqlstate_helper();
+    Spi::run("SET ROLE graph_retention_diagnostic_reader").expect("set role failed");
+    let state = sqlstate_for_prepared_helper("SELECT * FROM graph.sync_retention()");
+    Spi::run("RESET ROLE").expect("reset role failed");
+    assert_eq!(state.as_deref(), Some("42501"));
+    Spi::run("GRANT CREATE ON SCHEMA graph TO graph_retention_diagnostic_reader; SET ROLE graph_retention_diagnostic_reader")
+        .expect("grant graph administration failed");
+    let allowed = Spi::get_one::<bool>("SELECT retained_graph_rows = 0 AND prune_blocker = 'no_registered_sources' FROM graph.sync_retention()")
+        .expect("authorized graph administrator diagnostics failed");
+    Spi::run("RESET ROLE").expect("reset administrator role failed");
+    assert_eq!(allowed, Some(true));
+}
+
+#[pg_test]
 fn sync_health_reports_retention_diagnostics_columns() {
     setup_sync_log_retention_fixture();
 
@@ -282,7 +428,7 @@ fn sync_health_reports_retention_diagnostics_columns() {
 }
 
 #[pg_test]
-fn maintenance_prunes_sync_log_when_this_backend_is_the_only_heartbeat() {
+fn maintenance_retains_sync_log_until_publication_commits() {
     setup_sync_log_retention_fixture();
 
     Spi::run(
@@ -302,9 +448,9 @@ fn maintenance_prunes_sync_log_when_this_backend_is_the_only_heartbeat() {
         .expect("sync log count query failed")
         .unwrap_or(-1);
 
-    assert!(
-        after_prune < before_prune,
-        "maintenance should prune applied rows when this backend is the only heartbeat: before={before_prune} after={after_prune}"
+    assert_eq!(
+        after_prune, before_prune,
+        "the surrounding test transaction can still roll back the publication"
     );
 }
 
@@ -356,7 +502,7 @@ fn maintenance_does_not_prune_past_a_lagging_backend_heartbeat() {
 }
 
 #[pg_test]
-fn expired_backend_heartbeat_does_not_block_pruning() {
+fn expired_backend_heartbeat_does_not_override_transaction_retention() {
     setup_sync_log_retention_fixture();
 
     Spi::run(
@@ -393,9 +539,9 @@ fn expired_backend_heartbeat_does_not_block_pruning() {
         .expect("sync log count query failed")
         .unwrap_or(-1);
 
-    assert!(
-        after_prune < before_prune,
-        "an expired heartbeat must not block pruning: before={before_prune} after={after_prune}"
+    assert_eq!(
+        after_prune, before_prune,
+        "expired graph heartbeats cannot authorize pruning before publication commits"
     );
 }
 
@@ -429,6 +575,14 @@ fn stale_replay_position_fails_closed_after_a_prune() {
     Spi::run("SELECT * FROM graph.maintenance(concurrently := false)")
         .expect("maintenance failed");
 
+    // This transaction cannot commit a prune. Install a completed-prune
+    // metadata fixture to exercise the stale-position diagnostic separately;
+    // generation_transactions.py verifies real reclamation across commits.
+    let completed_floor = crate::ENGINE.with(|engine| engine.borrow().applied_sync_id);
+    Spi::run_with_args(
+        "UPDATE graph._graphs SET sync_log_pruned_before_id = $1 WHERE graph_name = 'default'",
+        &[completed_floor.into()],
+    ).expect("install completed prune metadata failed");
     let pruned_before_id = Spi::get_one::<i64>(
         "SELECT sync_log_pruned_before_id FROM graph._graphs WHERE graph_name = 'default'",
     )
@@ -436,7 +590,7 @@ fn stale_replay_position_fails_closed_after_a_prune() {
     .unwrap_or(0);
     assert!(
         pruned_before_id > intermediate_applied_sync_id,
-        "maintenance must have pruned past the intermediate watermark: pruned_before_id={pruned_before_id} intermediate={intermediate_applied_sync_id}"
+        "completed prune metadata must exceed the intermediate watermark"
     );
 
     // Roll this backend's own applied_sync_id back to simulate resuming
@@ -901,15 +1055,15 @@ fn replacement_faults_preserve_or_reconcile_the_published_generation() {
     assert_eq!(
         Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
             .expect("post-publication recovery status failed"),
-        Some(2),
-        "status must reconcile to generation B after publication"
+        Some(1),
+        "a failed statement must roll publication back to generation A"
     );
     let generation_b = Spi::get_one::<i64>(
         "SELECT manifest_generation FROM graph.projection_status()",
     )
     .expect("generation B query failed")
     .expect("generation B missing");
-    assert!(generation_b > generation_a);
+    assert_eq!(generation_b, generation_a);
     Spi::run("SET graph.low_memory_build = off").expect("restore low memory build failed");
     Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
 }

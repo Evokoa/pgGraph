@@ -124,10 +124,11 @@ SELECT *
 FROM graph.memory_profile(concurrent_backends := 8);
 ```
 
-The result includes each backend's immutable artifact snapshot in private
-memory, then projects an instance total for the supplied backend count. The
-shared-memory columns remain present for 1.x compatibility and currently
-return zero.
+The result separates private state from Linux sealed base bytes. The instance
+estimate assumes the supplied backends share one sealed base, when available.
+Concurrent cold loads, different generations and different roots may hold
+additional copies. Private fallback snapshots are counted once per backend.
+The runtime limit remains a conservative per-backend logical residency limit.
 
 Load, query, sync, compaction, and analytics operations also reserve their
 workspaces before growing large graph-owned structures. Their effective memory
@@ -189,7 +190,7 @@ policy for `hot` graphs that already have persisted artifacts.
 Default graph artifact root and compatibility path:
 
 ```text
-$PGDATA/graph/00000000-0000-0000-0000-000000000001/
+$PGDATA/graph/database-<database_oid>/00000000-0000-0000-0000-000000000001/
   main.pggraph                                      logical compatibility path
   projection-current.json                          current-generation pointer
   projection-generation-<generation>.json          immutable manifest

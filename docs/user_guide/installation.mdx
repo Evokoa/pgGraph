@@ -7,6 +7,10 @@ still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
 the release support matrix.
 
 <Callout type="info">
+This checkout prepares the pgGraph 1.2.1 stability candidate, not yet tagged or
+published. Build from source to evaluate it. Package commands below target the
+previous 1.2.0 release; upgrading to the candidate requires rebuilding each
+graph as described in [release notes](/release-notes).
 Official pgGraph 1.2.0 packages support PostgreSQL 14 through 18.
 </Callout>
 
@@ -351,9 +355,19 @@ Calls that omit a named graph target the 1.0 default graph.
 ### Artifact Path Migration
 
 Each graph has an artifact root at
-`$PGDATA/<graph.data_dir>/<graph_id>/`. The `graph_id` is the stable directory
+`$PGDATA/<graph.data_dir>/database-<database_oid>/<graph_id>/`. The database OID
+isolates databases that use the same default graph ID. The `graph_id` is the directory
 key; graph name and namespace stay in PostgreSQL catalogs rather than the
 filesystem path.
+
+When adopting this layout from an installation that stored artifacts directly
+under `<graph.data_dir>/<graph_id>/`, reconnect application sessions and rebuild
+each graph from its registered PostgreSQL tables. Use `graph.build()` for the
+default graph and `graph.build_graph()` for named graphs. Old artifacts are
+left in place and are never loaded or migrated automatically, because they may
+belong to another database. A database restored under a different OID also
+requires a rebuild. Rebuilding with trigger sync enabled regenerates sync
+functions, including corrected expressions for registered dotted JSONB paths.
 
 `main.pggraph` remains the logical compatibility path and the fallback for a
 legacy store without projection metadata. Current persisted builds write an

@@ -451,5 +451,99 @@
     "date": "2026-08-20",
     "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
     "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Validate canonical edge source identities without changing SQL signatures",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-10",
+    "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
+    "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Reject foreign key targets that differ from registered node identities",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-10",
+    "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
+    "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Add transaction-visible generation publication and snapshot-aware reclamation while preserving existing public query signatures.",
+    "changed_sections": [
+      "internal_sql_functions"
+    ],
+    "date": "2026-09-10",
+    "new_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655",
+    "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Add administrator sync_retention diagnostic without changing sync_health ABI",
+    "changed_sections": [
+      "public_sql_functions",
+      "sql_profile",
+      "sql_schema",
+      "sql_signatures"
+    ],
+    "date": "2026-09-10",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "2b4475516f359269d6248713ba9707f3c66e61858a9ed6ad88a544f9b9692655"
+  },
+  {
+    "acknowledgement": "Apply physical source identity before eager GQL expansion and preserve OPTIONAL residual predicates; SQL signatures are unchanged",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-11",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
+  },
+  {
+    "acknowledgement": "2026-09-12-source-identity-join-review",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-12",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
+  },
+  {
+    "acknowledgement": "bounded-node-filtering",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-17",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
+  },
+  {
+    "acknowledgement": "transaction-node-detach",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-17",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
+  },
+  {
+    "acknowledgement": "transaction-relationship-delete",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-09-17",
+    "new_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
+  },
+  {
+    "acknowledgement": "sync-health-reader-catalog-mediation",
+    "changed_sections": [
+      "internal_sql_functions",
+      "sql_schema"
+    ],
+    "date": "2026-09-18",
+    "new_schema_sha256": "825fc697d4b6ce6ebec52e904cc167260f58172be4d8fce6f672c1e66a06411b",
+    "previous_schema_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
   }
 ]

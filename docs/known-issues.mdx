@@ -1,5 +1,9 @@
 # Known Issues
 
+pgGraph 1.2.1 is a stability candidate, not yet tagged or published. The
+selective-RLS exact-result, 1M and 10M evidence is retained for the stated
+fixtures and resource envelopes.
+
 This page lists known user-visible limitations in pgGraph 1.2. See
 [Release Notes](./release-notes) for resolved issues and
 [Roadmap](./roadmap) for planned expansion.
@@ -38,11 +42,22 @@ the eager PostgreSQL visibility oracle. Large policy-scoped graphs can therefore
 spend work proportional to the visible source set and may reach
 `statement_timeout` even when the final result is small.
 
-The eager route is a correctness-preserving fallback, not an authorization
-bypass. Use bounded targeted queries where possible, keep PostgreSQL source-key
-indexes current, and set an explicit `statement_timeout`. Treat this as a
-current performance limitation unless later release notes publish broader
-scale evidence.
+The eager route preserves caller authorization. Use bounded targeted queries
+where possible, keep PostgreSQL source-key indexes current, and set an explicit
+`statement_timeout`. The candidate's retained
+[1M measurements](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md),
+[10M measurements](../release/evidence/engine/2026-09-12-p5-selective-rls-10m/README.md)
+and [exact-result comparisons](../release/evidence/engine/2026-09-11-selective-rls-exact/README.md)
+cover their stated fixtures and query shapes. The 10M run reached its 6 GiB
+container ceiling with memory reclamation and no OOM on a 12 GiB outer VM;
+an earlier build attempt on an approximately 8 GiB VM failed with a global OOM
+before query sampling. These measurements are not a latency SLA.
+
+Visibility metrics count returned policy rows rather than all PostgreSQL rows
+examined. GQL predicates, ordering and returned properties can require source
+hydration even with `hydrate := false`; zero repeated read rechecks does not
+mean zero source SQL. Governor memory measurements are not process RSS or a
+cluster-wide memory limit.
 
 ### Tenant scope requires the session-setting path under enforcement
 
@@ -100,8 +115,31 @@ profile and does not claim full openCypher support. Unsupported constructs fail
 with a stable SQLSTATE and actionable guidance rather than being interpreted
 with approximate semantics.
 
-SQL/PGQ `GRAPH_TABLE` and PostgreSQL 19 integration are not part of the current
-PostgreSQL 14–18 contract.
+SQL/PGQ `GRAPH_TABLE` is not part of pgGraph's PostgreSQL 14–18 contract.
+PostgreSQL [removed SQL/PGQ from its PostgreSQL 19 release branch](https://github.com/postgres/postgres/commit/2b9e1aff4d3d933ae8ee377fef22c2af9c7797e8)
+on September 7, 2026. Future native integration has no committed target major;
+see the [Roadmap](./roadmap).
+
+### GQL candidate limits depend on the query shape
+
+An ordinary node-only read with a `WHERE` predicate evaluates candidates before
+retaining up to 10,000 matching rows. Nonmatching source rows do not consume
+this retained-row cap, but scanning and hydration still use the query's work,
+memory and elapsed-time budgets.
+
+This incremental filtering does not apply to `OPTIONAL MATCH`, `DISTINCT`,
+aggregation, `ORDER BY`, `SKIP` or `LIMIT`. Those query shapes, joins and path
+expansions retain the 10,000-row candidate cap and can reach it before evaluating
+residual properties, even when the final result would be small. Increasing
+`graph.max_nodes` or `graph.query_memory_mb` does not raise the cap. Exceeding
+the applicable row cap fails with SQLSTATE `22000` and diagnostic `PG017`;
+queries do not silently return a filtered prefix.
+
+A supported primary-key equality can seed a node scan or the first mandatory
+source of a multi-pattern join before expansion. For searches that exceed these
+limits, use PostgreSQL source queries to select a bounded set of keys, then
+issue identity-seeded graph reads. Registered filter columns do not imply
+general GQL predicate pushdown or indexed property evaluation.
 
 ## Resource Scope
 

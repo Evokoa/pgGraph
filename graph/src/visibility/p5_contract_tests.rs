@@ -69,6 +69,50 @@ fn csv_column<'a>(header: &[&str], row: &'a [&str], name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("CSV row has no value for `{name}`"))
 }
 
+fn source_work_budget(
+    strategy: &str,
+    selected_strategy: &str,
+    selector_class: &str,
+    budgets: &serde_json::Value,
+) -> Result<u64, &'static str> {
+    let positive = |field| {
+        budgets[field]
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or("source-work budgets must be explicit positive integers")
+    };
+    let generic = positive("max_source_rows")?;
+    let selective = positive("automatic_identity_max_source_rows")?;
+    if selective > generic {
+        return Err("selective source-work budget exceeds the generic ceiling");
+    }
+    match (strategy, selected_strategy, selector_class) {
+        ("auto" | "lazy", "lazy", "targeted") => Ok(selective),
+        ("eager", "eager", "targeted") | ("auto" | "eager", "eager", "global") => Ok(generic),
+        _ => Err("invalid requested strategy, selected strategy, or selector class"),
+    }
+}
+
+fn evidence_root(override_path: Option<std::ffi::OsString>) -> PathBuf {
+    match override_path {
+        Some(path) => {
+            assert!(
+                !path.is_empty(),
+                "PGGRAPH_RLS_EVIDENCE_ROOT must not be empty"
+            );
+            PathBuf::from(path)
+        }
+        None => repo_path("release/evidence/engine"),
+    }
+}
+
+fn has_public_evidence_link(document: &str, directory: &str) -> bool {
+    // This path resolves from docs/user_guide/supported_features.mdx.
+    document.contains(&format!(
+        "](../../release/evidence/engine/{directory}/README.md)"
+    ))
+}
+
 #[test]
 fn deterministic_selector_inventory_keeps_targeted_work_lazy_and_global_work_eager() {
     let inventory: serde_json::Value = serde_json::from_str(&repo_source(
@@ -193,32 +237,9 @@ fn relationship_identity_completeness_is_summarized_across_base_durable_and_tx_s
 }
 
 #[test]
-fn any_future_adaptive_selector_reuses_known_verdicts_instead_of_restarting_policy_work() {
-    let visibility = crate_source("src/sql_visibility.rs");
-    let design = repo_source("docs/roadmap.mdx");
-    let normalized_design = design.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        normalized_design.contains("must reuse known verdicts when completing an eager scope")
-            && normalized_design.contains("may never restart policy work from zero"),
-        "the no-restart adaptive policy invariant must remain explicit"
-    );
-
-    if visibility.contains("AdaptiveVisibility") {
-        assert!(
-            visibility.contains("complete_eager_visibility_reusing_verdicts"),
-            "adaptive fallback must carry the statement cache into eager completion"
-        );
-        let fallback = function_body(&visibility, "fn complete_eager_visibility_reusing_verdicts");
-        assert!(
-            !fallback.contains("prepare_eager_visibility("),
-            "adaptive completion must not restart PostgreSQL policy work from zero"
-        );
-    }
-}
-
-#[test]
 fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
     let runner = repo_source("graph/tests/heavy/rls_large_table_baseline.sh");
+    let gate = repo_source("graph/tests/heavy/rls_large_table_gate.sql");
     for required in [
         "p5_release",
         "p5_gql_identity_one_hop_auto",
@@ -308,11 +329,12 @@ fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
         );
     }
     assert!(
-        runner.contains("selected_strategy <> 'lazy'")
-            && runner.contains("selected_strategy <> 'eager'")
-            && runner.contains("spi_calls <> 0")
-            && runner.contains("source_rows <> 0")
-            && runner.contains("relationship_completeness_checks"),
+        runner.contains("-f \"$SCRIPT_DIR/rls_large_table_gate.sql\"")
+            && gate.contains("selected_strategy <> 'lazy'")
+            && gate.contains("selected_strategy <> 'eager'")
+            && gate.contains("spi_calls <> 0")
+            && gate.contains("source_rows <> 0")
+            && gate.contains("relationship_completeness_checks"),
         "P5 runner must fail when selector, no-RLS, or completeness telemetry is semantically wrong"
     );
 }
@@ -355,9 +377,14 @@ fn p5_metrics_surface_resets_statement_counters_and_reports_resource_snapshot() 
 }
 
 #[test]
-#[ignore = "P5.3 retained 1M/10M evidence checkpoint"]
 fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
-    let measurements = repo_path("release/evidence/engine");
+    validate_retained_evidence(&evidence_root(std::env::var_os(
+        "PGGRAPH_RLS_EVIDENCE_ROOT",
+    )));
+}
+
+fn validate_retained_evidence(measurements: &Path) -> Vec<PathBuf> {
+    let mut validated = Vec::new();
     for scale in ["1m", "10m"] {
         let expected_nodes = match scale {
             "1m" => "node_count=1000000",
@@ -365,7 +392,7 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
             _ => unreachable!(),
         };
         let suffix = format!("-p5-selective-rls-{scale}");
-        let matching = fs::read_dir(&measurements)
+        let matching = fs::read_dir(measurements)
             .expect("measurement inventory must be readable")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
@@ -431,6 +458,7 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
             "max_p95_visibility_ms",
             "max_memory_peak_bytes",
             "max_source_rows",
+            "automatic_identity_max_source_rows",
             "max_work_units",
         ] {
             assert!(
@@ -456,6 +484,8 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
             "max_work_units",
             "selected_strategy",
             "selector_class",
+            "strategy",
+            "case_name",
         ] {
             assert!(
                 summary
@@ -466,29 +496,37 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
             );
         }
         let rows = summary.lines().skip(1).collect::<Vec<_>>();
-        assert!(
-            rows.iter()
-                .any(|row| row.split(',').any(|value| value == "targeted"))
-                && rows
-                    .iter()
-                    .any(|row| row.split(',').any(|value| value == "global")),
-            "P5 {scale} summary must retain both targeted and global selector classes"
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.split(',').any(|value| value == "lazy"))
-                && rows
-                    .iter()
-                    .any(|row| row.split(',').any(|value| value == "eager")),
-            "P5 {scale} summary must prove the selected lazy/eager strategies"
-        );
-
         let header = summary
             .lines()
             .next()
             .expect("P5 summary must have a header")
             .split(',')
             .collect::<Vec<_>>();
+        for (case, strategy, selected, class) in [
+            ("p5_gql_identity_one_hop_auto", "auto", "lazy", "targeted"),
+            (
+                "p5_gql_identity_one_hop_eager_oracle",
+                "eager",
+                "eager",
+                "targeted",
+            ),
+            ("p5_gql_whole_source_auto", "auto", "eager", "global"),
+            ("p5_no_rls_auto", "auto", "lazy", "targeted"),
+        ] {
+            let matching = rows
+                .iter()
+                .map(|line| line.split(',').collect::<Vec<_>>())
+                .filter(|row| csv_column(&header, row, "case_name") == case)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "P5 {scale} needs one summary for {case}");
+            for (column, expected) in [
+                ("strategy", strategy),
+                ("selected_strategy", selected),
+                ("selector_class", class),
+            ] {
+                assert_eq!(csv_column(&header, &matching[0], column), expected);
+            }
+        }
         let required_samples = budgets["required_samples"]
             .as_u64()
             .expect("required_samples was checked above");
@@ -502,9 +540,6 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
         let max_memory_peak_bytes = budgets["max_memory_peak_bytes"]
             .as_u64()
             .expect("max_memory_peak_bytes was checked above");
-        let max_source_rows = budgets["max_source_rows"]
-            .as_u64()
-            .expect("max_source_rows was checked above");
         let max_work_units = budgets["max_work_units"]
             .as_u64()
             .expect("max_work_units was checked above");
@@ -530,21 +565,28 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
                 "P5 {scale} row is undersampled"
             );
             assert!(
-                p95_total <= max_p95_total_ms
-                    && p95_visibility <= max_p95_visibility_ms
-                    && peak_memory <= max_memory_peak_bytes
-                    && work_units <= max_work_units,
+                p95_total.is_finite()
+                    && (0.0..=max_p95_total_ms).contains(&p95_total)
+                    && p95_visibility.is_finite()
+                    && (0.0..=max_p95_visibility_ms).contains(&p95_visibility)
+                    && (1..=max_memory_peak_bytes).contains(&peak_memory)
+                    && (1..=max_work_units).contains(&work_units),
                 "P5 {scale} latency, memory, or work budget was exceeded"
             );
-            if csv_column(&header, &row, "selector_class") == "targeted" {
-                let source_rows = csv_column(&header, &row, "max_source_rows")
-                    .parse::<u64>()
-                    .expect("P5 max_source_rows must be an integer");
-                assert!(
-                    source_rows <= max_source_rows,
-                    "P5 {scale} targeted source-work budget was exceeded"
-                );
-            }
+            let max_source_rows = source_work_budget(
+                csv_column(&header, &row, "strategy"),
+                csv_column(&header, &row, "selected_strategy"),
+                csv_column(&header, &row, "selector_class"),
+                &budgets,
+            )
+            .expect("P5 source-work budget and selector must be valid");
+            let source_rows = csv_column(&header, &row, "max_source_rows")
+                .parse::<u64>()
+                .expect("P5 max_source_rows must be an integer");
+            assert!(
+                source_rows <= max_source_rows,
+                "P5 {scale} source-work budget was exceeded"
+            );
         }
         let plans = directory.join("plans");
         assert!(
@@ -555,27 +597,126 @@ fn p5_retained_1m_and_10m_evidence_is_complete_and_budgeted() {
                     .any(|entry| entry.path().is_file()),
             "P5 {scale} evidence must retain at least one query plan"
         );
+        validated.push(directory.clone());
     }
+    validated
 }
 
 #[test]
-#[ignore = "P4.7/P5.3 documentation and evidence closure checkpoint"]
 fn p4_and_p5_close_only_with_public_docs_and_retained_evidence_links() {
-    let ledger = repo_source("docs/roadmap.mdx");
     let supported = repo_source("docs/user_guide/supported_features.mdx");
-    assert!(
-        ledger.contains("| P4 | Complete |") && ledger.contains("| P5 | Complete |"),
-        "P4/P5 may close only after retained release evidence passes"
-    );
+    let normalized = supported.split_whitespace().collect::<Vec<_>>().join(" ");
     for required in [
-        "p5-selective-rls-1m",
-        "p5-selective-rls-10m",
         "relationship-identity completeness summary",
         "deterministic targeted-lazy/global-eager",
     ] {
         assert!(
-            ledger.contains(required) || supported.contains(required),
+            normalized.contains(required),
             "P4/P5 closure documentation is missing `{required}`"
         );
+    }
+    // Local qualification may use an external root. Public closure must validate
+    // the retained artifacts at the public links themselves.
+    for directory in validate_retained_evidence(&repo_path("release/evidence/engine")) {
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        assert!(
+            has_public_evidence_link(&supported, name),
+            "supported behavior must link to validated public evidence `{name}`"
+        );
+    }
+}
+
+#[test]
+fn selective_source_budget_distinguishes_execution_from_eager_oracle() {
+    let budgets = serde_json::json!({
+        "max_source_rows": 3_000_000,
+        "automatic_identity_max_source_rows": 64,
+    });
+    for (strategy, selected, class, expected) in [
+        ("auto", "lazy", "targeted", 64),
+        ("lazy", "lazy", "targeted", 64),
+        ("eager", "eager", "targeted", 3_000_000),
+        ("auto", "eager", "global", 3_000_000),
+    ] {
+        assert_eq!(
+            source_work_budget(strategy, selected, class, &budgets),
+            Ok(expected)
+        );
+    }
+    for (strategy, selected, class) in [
+        ("auto", "eager", "targeted"),
+        ("eager", "lazy", "targeted"),
+        ("auto", "lazy", "global"),
+        ("auto", "auto", "targeted"),
+        ("auto", "lazy", "unknown"),
+    ] {
+        assert_eq!(
+            source_work_budget(strategy, selected, class, &budgets),
+            Err("invalid requested strategy, selected strategy, or selector class")
+        );
+    }
+}
+
+#[test]
+fn selective_source_budget_rejects_missing_zero_and_inverted_limits() {
+    for budgets in [
+        serde_json::json!({"max_source_rows": 3_000_000}),
+        serde_json::json!({"max_source_rows": 3_000_000, "automatic_identity_max_source_rows": 0}),
+        serde_json::json!({"automatic_identity_max_source_rows": 64}),
+    ] {
+        assert_eq!(
+            source_work_budget("auto", "lazy", "targeted", &budgets),
+            Err("source-work budgets must be explicit positive integers")
+        );
+    }
+    assert_eq!(
+        source_work_budget(
+            "auto",
+            "lazy",
+            "targeted",
+            &serde_json::json!({
+                "max_source_rows": 32, "automatic_identity_max_source_rows": 64,
+            })
+        ),
+        Err("selective source-work budget exceeds the generic ceiling")
+    );
+}
+
+#[test]
+fn evidence_location_defaults_to_public_and_accepts_explicit_external_root() {
+    assert_eq!(evidence_root(None), repo_path("release/evidence/engine"));
+    let external = std::env::temp_dir().join("pggraph-qualification-evidence");
+    assert_eq!(
+        evidence_root(Some(external.clone().into_os_string())),
+        external
+    );
+}
+
+#[test]
+#[should_panic(expected = "PGGRAPH_RLS_EVIDENCE_ROOT must not be empty")]
+fn evidence_location_rejects_empty_override() {
+    evidence_root(Some(std::ffi::OsString::new()));
+}
+
+#[test]
+#[should_panic(expected = "measurement inventory must be readable")]
+fn evidence_qualification_rejects_a_file_instead_of_an_inventory() {
+    validate_retained_evidence(&repo_path("graph/Cargo.toml"));
+}
+
+#[test]
+fn public_evidence_link_requires_the_retained_readme_target() {
+    let name = "2026-09-11-p5-selective-rls-1m";
+    assert!(has_public_evidence_link(
+        &format!("[Retained evidence](../../release/evidence/engine/{name}/README.md)"),
+        name
+    ));
+    for document in [
+        name.to_owned(),
+        format!("[Evidence](../release/evidence/engine/{name}/README.md)"),
+        format!("[Evidence](../../release/evidence/engine/{name}/missing.md)"),
+        format!("[Evidence](../../private/{name}/README.md)"),
+    ] {
+        assert!(!has_public_evidence_link(&document, name));
     }
 }

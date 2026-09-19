@@ -7,7 +7,7 @@ source "${PGGRAPH_ROOT}/scripts/lib/pggraph-common.sh"
 
 if [[ "${1:-}" == "--help" ]]; then
   cat <<'EOF'
-Usage: run_release_gate.sh [--tier pr|nightly|rc|full-matrix] [runner options]
+Usage: run_release_gate.sh [--tier pr|nightly|local-validation|rc|full-matrix] [runner options]
 
 With no arguments, runs the stable 1.x environment-variable interface.
 With --tier, delegates to scripts/run_release.py and writes JSON evidence.
@@ -63,6 +63,7 @@ RUN_ALPHA_TO_V1_FIXTURE="${RUN_ALPHA_TO_V1_FIXTURE:-1}"
 
 PYTHONDONTWRITEBYTECODE=1 python3 ../scripts/check_script_inventory.py
 PYTHONDONTWRITEBYTECODE=1 python3 ../scripts/check_unsafe_allowlist.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ../scripts/tests -p 'test_*.py'
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground \
   python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'
 
@@ -107,6 +108,7 @@ fi
 
 if [[ "$RUN_BOUNDARY" == "1" ]]; then
   DBNAME="${DB_PREFIX}_boundary" ./tests/heavy/run_sqlstate_acl_boundary.sh
+  DB_PREFIX="${DB_PREFIX}_stability" bash ./tests/heavy/stability_regressions.sh
 fi
 
 if [[ "$RUN_BACKUP_RESTORE" == "1" ]]; then
@@ -138,7 +140,7 @@ if [[ "$RUN_PLAYGROUND" == "1" ]]; then
   PGGRAPH_PLAYGROUND_YES="${PGGRAPH_PLAYGROUND_YES:-1}" \
     PGGRAPH_REBUILD_IMAGE=1 \
     PGGRAPH_RECREATE_CONTAINER=1 \
-    ./tests/heavy/playground_release_gate.sh
+    ./tests/heavy/playground_release_gate.sh --all-modes
 fi
 
 if [[ "$RUN_PGBENCH" == "1" ]]; then

@@ -1,4 +1,99 @@
 #[pg_test]
+fn durable_ingestion_reuses_validated_base_for_new_labels() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id');
+        SELECT graph.add_edge('graph_test_friendships_pgtest'::regclass,
+            'user_id', 'graph_test_users_pgtest'::regclass, 'friend_id',
+            'fallback', false, label_column := 'id');
+        SET graph.persist_on_build = on;
+        SET graph.mutable_enabled = on;
+        SET graph.sync_mode = 'trigger';
+        SELECT * FROM graph.build(mode := 'mutable_overlay');")
+        .expect("build reusable base fixture");
+    let before = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
+    Spi::run("INSERT INTO graph_test_friendships_pgtest(id,user_id,friend_id)
+        VALUES ('reuse-new-label','u1','u2');
+        SELECT * FROM graph.ingest_projection();")
+        .expect("ingest new relationship label");
+    let after = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
+    assert!(std::rc::Rc::ptr_eq(&before, &after));
+    assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM graph.edge_types()
+        WHERE label = 'reuse-new-label'").unwrap(), Some(1));
+    Spi::run("INSERT INTO graph_test_friendships_pgtest(id,user_id,friend_id)
+        VALUES ('reuse-second-label','u1','u2');
+        SELECT * FROM graph.ingest_projection();")
+        .expect("ingest into an existing cumulative dictionary");
+    let second = crate::ENGINE.with(|engine| engine.borrow().base_snapshot.clone()).unwrap();
+    assert!(std::rc::Rc::ptr_eq(&before, &second));
+    let query = "SELECT string_agg(row #>> '{r,id}', ',' ORDER BY row #>> '{r,id}')
+        FROM (VALUES ('reuse-new-label'), ('reuse-second-label')) AS labels(label),
+        LATERAL graph.gql(format(
+          'MATCH (u:graph_test_users_pgtest)-[r]->(v:graph_test_users_pgtest)
+           WHERE r.id = %L RETURN u, r, v', labels.label), hydrate := true)";
+    assert_eq!(Spi::get_one::<String>(query).unwrap().as_deref(),
+        Some("reuse-new-label,reuse-second-label"));
+    Spi::run("SELECT graph.unload_graph('default'); SET graph.auto_load = on;")
+        .expect("reload cumulative identities");
+    assert_eq!(Spi::get_one::<String>(query).unwrap().as_deref(),
+        Some("reuse-new-label,reuse-second-label"));
+}
+
+#[pg_test]
+fn sync_capture_cancellation_releases_session_fence() {
+    let canceled = pgrx::pg_sys::PgTryBuilder::new(|| {
+        crate::sync_capture::capture(|| {
+            pgrx::ereport!(ERROR, pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                "injected sync capture cancellation");
+            #[allow(unreachable_code)]
+            Ok(())
+        }).expect("capture setup failed");
+        false
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| true)
+    .execute();
+    assert!(canceled);
+    assert_eq!(Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid()
+         AND locktype = 'advisory' AND mode = 'ExclusiveLock'
+         AND classid = $1::oid AND objid = $2::oid AND objsubid = 2",
+        &[crate::sync::SYNC_WRITER_LOCK_CLASS.into(), crate::sync::SYNC_WRITER_LOCK_KEY.into()],
+    ).expect("inspect capture lock cleanup"), Some(0));
+    assert_eq!(Spi::get_one::<i32>("SELECT 1").expect("snapshot stack remains usable"), Some(1));
+}
+
+#[pg_test]
+fn missing_catalog_provenance_cannot_be_loaded_through_compaction() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id');
+              SET graph.persist_on_build = on;
+              SELECT * FROM graph.build();")
+        .expect("build provenance fixture");
+    let path = crate::persistence::graph_file_path().unwrap();
+    let root = crate::persistence::projection_manifest_root(&path);
+    let store = crate::projection::manifest::ProjectionManifestStore::new(root);
+    let mut legacy = store.load_latest_current().unwrap().unwrap();
+    legacy.previous_generation_id = Some(legacy.generation_id);
+    legacy.generation_id += 1;
+    legacy.version = 3;
+    legacy.catalog_fingerprint = None;
+    store.publish(&legacy).unwrap();
+    Spi::run("SELECT graph.unload_graph('default'); SET graph.auto_load = on").unwrap();
+    Spi::run("DO $$ BEGIN
+      BEGIN
+        PERFORM * FROM graph.projection_compact();
+        RAISE EXCEPTION 'legacy compaction installed an unverified graph';
+      EXCEPTION WHEN SQLSTATE 'XX000' THEN NULL;
+      END;
+      BEGIN
+        PERFORM * FROM graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 1);
+        RAISE EXCEPTION 'legacy graph was accepted after compaction';
+      EXCEPTION WHEN SQLSTATE 'XX000' THEN NULL;
+      END;
+    END $$;")
+        .expect("legacy provenance must fail closed");
+}
+
+#[pg_test]
 fn adaptive_edge_types_above_v6_roundtrip_and_filter_exactly() {
     reset_and_create_fixtures();
     Spi::run(
@@ -317,7 +412,7 @@ fn topology_query_entry_points_run_as_invoker() {
            JOIN pg_catalog.pg_namespace AS namespace
              ON namespace.oid = proc.pronamespace
           WHERE namespace.nspname = 'graph'
-            AND proc.proname IN ('traverse', 'connected_components', 'component_stats')
+            AND proc.proname IN ('traverse', 'connected_components', 'component_stats', 'sync_health')
             AND proc.prosecdef",
     )
     .expect("read topology function security metadata failed")
@@ -331,6 +426,7 @@ fn topology_query_entry_points_run_as_invoker() {
             AND proc.proname IN (
                 '_selected_graph_id_for_current_role',
                 '_active_generation_count_for_current_role',
+                '_sync_retention_catalog_for_current_role',
                 '_enforce_loaded_graph_quota_for_current_role',
                 '_require_selected_graph_privilege_for_current_role',
                 '_graph_id_for_current_role_with_privilege',
@@ -714,7 +810,12 @@ fn edge_buffer_overflow_reserves_high_fanout_row_before_mutation() {
             .expect("child-1 sync id query failed")
             .unwrap_or(0);
 
-    assert!(sql_raises("SELECT * FROM graph.apply_sync()"));
+    // Inspect row reservation before a PostgreSQL error abort invalidates the
+    // replayed cache. The client regression separately covers abort recovery.
+    assert!(matches!(
+        crate::sql_sync::apply_sync_internal(),
+        Err(crate::safety::GraphError::EdgeBufferFull { .. })
+    ));
     let (read_only, edge_buffer_used, node_count_after, applied_sync_id) = Spi::connect(|client| {
         let result = client
             .select(
@@ -948,7 +1049,7 @@ fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
     Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
-    Spi::run("SET graph.sync_mode = 'manual'").expect("set sync_mode failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
     clear_graph_catalog_for_test();
     Spi::run("DROP TABLE IF EXISTS public.graph_test_mmap_sync_pgtest CASCADE")
         .expect("drop mmap sync table failed");
@@ -1011,25 +1112,6 @@ fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
              VALUES ('child', 'root', 'Child')",
     )
     .expect("insert child source row failed");
-    Spi::run(
-        "INSERT INTO graph._sync_log (
-                op,
-                table_oid,
-                table_name,
-                new_pk,
-                properties,
-                new_row
-             )
-             VALUES (
-                'I',
-                'public.graph_test_mmap_sync_pgtest'::regclass,
-                'public.graph_test_mmap_sync_pgtest',
-                'child',
-                '{\"name\":\"Child\",\"parent_id\":\"root\"}'::jsonb,
-                '{\"id\":\"child\",\"name\":\"Child\",\"parent_id\":\"root\"}'::jsonb
-             )",
-    )
-    .expect("insert child sync log failed");
     let inserts = Spi::get_one::<i64>("SELECT inserts_applied FROM graph.apply_sync()")
         .expect("apply mmap insert sync failed")
         .unwrap_or(0);
@@ -1061,15 +1143,6 @@ fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
 
     Spi::run("TRUNCATE public.graph_test_mmap_sync_pgtest")
         .expect("truncate mmap sync source table failed");
-    Spi::run(
-        "INSERT INTO graph._sync_log (op, table_oid, table_name)
-             VALUES (
-                'T',
-                'public.graph_test_mmap_sync_pgtest'::regclass,
-                'public.graph_test_mmap_sync_pgtest'
-             )",
-    )
-    .expect("insert truncate sync log failed");
     Spi::run("SELECT * FROM graph.apply_sync()").expect("apply mmap truncate sync failed");
     let remaining = Spi::get_one::<i64>(
         "SELECT (
@@ -2509,7 +2582,7 @@ fn projection_repair_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
-fn projection_gc_sql_deletes_obsolete_files_after_retention() {
+fn projection_gc_sql_retains_files_until_publication_commits() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
     reset_and_create_fixtures();
@@ -2586,13 +2659,10 @@ fn projection_gc_sql_deletes_obsolete_files_after_retention() {
     store.publish(&current).expect("current manifest publishes");
 
     let deleted = Spi::get_one::<bool>(
-        "SELECT valid_generations_scanned = 2
-                AND retained_generations = ARRAY[9100002]::bigint[]
-                AND active_generations = ARRAY[]::bigint[]
-                AND obsolete_candidates = 1
-                AND protected_candidates = 0
-                AND deleted_files = 2
-                AND deleted_bytes > 3
+        "SELECT 9100001 = ANY(retained_generations)
+                AND 9100002 = ANY(retained_generations)
+                AND deleted_files = 0
+                AND deleted_bytes = 0
          FROM graph.projection_gc()",
     )
     .expect("projection_gc SQL call failed")
@@ -2602,12 +2672,13 @@ fn projection_gc_sql_deletes_obsolete_files_after_retention() {
         .unwrap_or(-1);
 
     assert!(deleted);
-    assert!(!old_segment.exists());
+    assert!(old_segment.exists());
     assert!(current_segment.exists());
     assert_eq!(repeated_deleted, 0);
 
     for path in [
         &base_path,
+        &old_segment,
         &current_segment,
         &old_manifest_path,
         &current_manifest_path,
@@ -2807,6 +2878,7 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
             dirty_source_count: 2,
             dirty_edge_count: 1,
         });
+    manifest.catalog_fingerprint = store.load_latest_current().unwrap().unwrap().catalog_fingerprint;
     store.publish(&manifest).expect("chunk manifest publishes");
     std::fs::write(&chunk_path, b"corrupt chunk").expect("chunk corruption writes");
 

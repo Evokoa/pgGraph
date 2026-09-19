@@ -17,8 +17,13 @@ import verify_release_evidence
 
 
 class ReleaseMetadataTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.candidate_version = json.loads(
+            validate_release.read_text("release/maturity.json")
+        )["candidate_version"]
+
     def test_current_candidate_metadata_agrees(self) -> None:
-        validate_release.validate_version_metadata("1.2.0")
+        validate_release.validate_version_metadata(self.candidate_version)
 
     def test_candidate_version_mismatch_fails(self) -> None:
         original = validate_release.read_text
@@ -31,12 +36,38 @@ class ReleaseMetadataTests(unittest.TestCase):
         with patch.object(validate_release, "read_text", side_effect=read_text):
             stderr = StringIO()
             with redirect_stderr(stderr), self.assertRaises(SystemExit) as failure:
-                validate_release.validate_version_metadata("1.2.0")
+                validate_release.validate_version_metadata(self.candidate_version)
             self.assertEqual(failure.exception.code, 1)
             self.assertIn("candidate_version", stderr.getvalue())
 
     def test_release_dependencies_are_immutable(self) -> None:
         validate_release.validate_release_dependencies()
+
+    def test_matrix_allows_scratch_and_prior_internal_stages(self) -> None:
+        validate_release.validate_matrix_base_images(
+            "# Optional source-history context\n"
+            "FROM scratch AS source_history\n"
+            f"FROM --platform=$BUILDPLATFORM rust:1.96@sha256:{'a' * 64} AS builder\n"
+            "FROM builder AS tests\n"
+            "FROM 1 AS package\n"
+        )
+
+    def test_matrix_rejects_every_unpinned_external_base(self) -> None:
+        pinned = f"FROM rust:1.96@sha256:{'a' * 64} AS builder\n"
+        for source in (
+            "FROM scratch AS source_history\nFROM rust:latest\n",
+            pinned + "FROM postgres:17 AS runtime\n",
+            pinned + "FROM missing_stage AS tests\n",
+            pinned + "FROM 9 AS tests\n",
+            pinned + "FROM --platform=$BUILDPLATFORM ${RUNTIME_IMAGE}\n",
+            "FROM scratch AS source_history\n",
+            "# no build stages\n",
+            pinned + "FROM rust:latest AS\n",
+        ):
+            with self.subTest(source=source):
+                with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as failure:
+                    validate_release.validate_matrix_base_images(source)
+                self.assertEqual(failure.exception.code, 1)
 
     def test_unqualified_dockerfile_base_image_fails(self) -> None:
         original = validate_release.read_text

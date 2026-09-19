@@ -56,6 +56,8 @@ pggraph_sha256() {
 
 pggraph_validate_disposable_cluster() {
   local database_name="$1"
+  # A gate may validate its connection before creating the owned test database.
+  local connection_database="${2:-$database_name}"
   local token="${PGGRAPH_DISPOSABLE_CLUSTER_TOKEN:-}"
   local sentinel="${PGGRAPH_DISPOSABLE_CLUSTER_SENTINEL:-}"
   local pgdata_logical pgdata_real sentinel_real connected_real postgres_pid postgres_command
@@ -83,7 +85,7 @@ pggraph_validate_disposable_cluster() {
       ;;
   esac
 
-  connected_real="$(psql -X -qAt -v ON_ERROR_STOP=1 -d "$database_name" -c "SHOW data_directory")"
+  connected_real="$(psql -X -qAt -v ON_ERROR_STOP=1 -d "$connection_database" -c "SHOW data_directory")"
   connected_real="$(cd "$connected_real" && pwd -P)"
   if [[ "$connected_real" != "$pgdata_real" ]]; then
     pggraph_die "connected PostgreSQL data directory does not match PGDATA"

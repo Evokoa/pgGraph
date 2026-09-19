@@ -313,6 +313,12 @@ pub(crate) struct PreparedRebuiltBaseManifest {
 }
 
 impl PreparedRebuiltBaseManifest {
+    /// Attach the fingerprint captured by the coherent PostgreSQL source scan.
+    pub(crate) fn with_catalog_fingerprint(mut self, fingerprint: u64) -> Self {
+        self.manifest.catalog_fingerprint = Some(fingerprint);
+        self
+    }
+
     /// Borrow the exact manifest that must be validated before publication.
     pub(crate) const fn manifest(&self) -> &ProjectionManifest {
         &self.manifest
@@ -446,7 +452,7 @@ pub(crate) fn prepare_generation_specific_rebuilt_base_manifest(
     );
     manifest.previous_generation_id = plan.predecessor_generation;
     if let Some(previous) = plan.previous.as_ref() {
-        manifest.inherit_operation_timestamps(previous);
+        manifest.inherit_generation_metadata(previous);
         manifest.obsolete_files = previous.obsolete_files.clone();
         append_superseded_projection_files(
             &plan.root,
@@ -554,7 +560,7 @@ pub(crate) fn publish_rebuilt_base_manifest(
     );
     if let Some(previous) = previous.as_ref() {
         manifest.previous_generation_id = Some(previous.generation_id);
-        manifest.inherit_operation_timestamps(previous);
+        manifest.inherit_generation_metadata(previous);
         manifest.obsolete_files = previous.obsolete_files.clone();
         append_superseded_projection_files(
             &root,

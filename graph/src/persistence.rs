@@ -2,8 +2,9 @@
 //!
 //! The `.pggraph` file is the on-disk representation of the graph engine.
 //! It is written atomically (write to `<path>.tmp` then rename) and
-//! loaded into an immutable anonymous mapping for typed access to the base
-//! graph arrays.
+//! loaded into an immutable mapping for typed access to the base graph arrays.
+//! Manifest-backed Linux loads can share sealed snapshots; other loads use
+//! private anonymous snapshots.
 //!
 //! ## File Format
 //!
@@ -30,9 +31,9 @@
 //!
 //! When loaded via `load_graph_file()`:
 //! - **NodeStore** (`is_active`, `table_oids`, primary-key offsets/bytes):
-//!   backed by a backend-local immutable mapping
+//!   backed by an immutable mapping
 //! - **Forward and inbound EdgeStore** arrays are backed by the same
-//!   backend-local immutable mapping
+//!   immutable mapping
 //! - **ResolutionIndex**: mapped, zero-copy within the backend, binary search
 //! - the bounded edge type registry is decoded into backend-local metadata
 //! - relationship identity descriptors and key bytes remain mapped
@@ -42,12 +43,20 @@
 use std::fs;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 
-use memmap2::{Mmap, MmapMut};
+use memmap2::Mmap;
+
+mod snapshot_cache;
+
+#[cfg(all(target_os = "linux", not(test), feature = "development"))]
+pub(crate) fn arm_snapshot_test_cancel(registry: bool) {
+    snapshot_cache::arm_test_cancel(registry);
+}
 
 use crate::config;
 use crate::edge_store::{EdgeStore, EdgeTypeWidth, MmapEdgeArrayParts, MmapEdgeArrays};
@@ -133,6 +142,64 @@ struct MappedGraphArtifact {
     mmap: Arc<Mmap>,
     layout: ValidatedGraphLayout,
     token: ValidatedMappedGraphToken,
+}
+
+/// Validated immutable base bytes, reusable without copying mutable engine state.
+#[derive(Debug)]
+pub(crate) struct ValidatedBaseSnapshot {
+    path: PathBuf,
+    source_stamp: Option<SnapshotSourceStamp>,
+    mmap: Arc<Mmap>,
+    snapshot: snapshot_cache::Snapshot,
+    layout: ValidatedGraphLayout,
+    flags: u32,
+    body_crc: u32,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+struct SnapshotSourceStamp {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+fn snapshot_source_stamp(metadata: &fs::Metadata) -> Option<SnapshotSourceStamp> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(SnapshotSourceStamp {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            bytes: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+impl ValidatedBaseSnapshot {
+    pub(crate) fn bytes(&self) -> usize {
+        self.mmap.len()
+    }
+
+    pub(crate) fn shared_bytes(&self) -> usize {
+        if self.snapshot.is_shareable() {
+            self.bytes()
+        } else {
+            0
+        }
+    }
+
+    fn matches(&self, path: &Path, stamp: Option<&SnapshotSourceStamp>) -> bool {
+        self.path == path && stamp.is_some() && self.source_stamp.as_ref() == stamp
+    }
 }
 
 impl MappedGraphArtifact {
@@ -2190,12 +2257,12 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 /// - Immutable filter values, text dictionaries, and relationship identities
 ///   stay mapped; only bounded filter and edge-label metadata is decoded.
 ///
-/// Each backend copies the artifact into an anonymous read-only mapping before
-/// creating typed views. This prevents same-inode writes or truncation by
-/// another process from invalidating Rust references. Derived metadata and
-/// mutable overlays remain per-backend allocations.
+/// Manifest-backed Linux loads can share a sealed memfd copy. Other loads use
+/// private anonymous read-only memory. Both prevent source-inode writes or
+/// truncation from invalidating Rust references. Derived metadata and mutable
+/// overlays remain per-backend allocations.
 pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
-    load_graph_file_internal(path, None, crate::resource::ByteCount::ZERO)
+    load_graph_file_internal(path, None, crate::resource::ByteCount::ZERO, None)
 }
 
 /// Load while accounting for private state retained until validation finishes.
@@ -2203,7 +2270,7 @@ pub(crate) fn load_graph_file_with_residency(
     path: &Path,
     resident: crate::resource::ByteCount,
 ) -> GraphResult<Engine> {
-    load_graph_file_internal(path, None, resident)
+    load_graph_file_internal(path, None, resident, None)
 }
 
 /// Load a graph artifact against an unpublished projection candidate.
@@ -2216,13 +2283,56 @@ pub(crate) fn load_graph_file_with_projection_candidate_and_residency(
     candidate: &ProjectionManifest,
     resident: crate::resource::ByteCount,
 ) -> GraphResult<Engine> {
-    load_graph_file_internal(path, Some(candidate), resident)
+    load_graph_file_internal(path, Some(candidate), resident, None)
+}
+
+/// Reuse only validated immutable base bytes; rebuild all generation-local state.
+pub(crate) fn load_graph_file_reusing_base(
+    path: &Path,
+    candidate: Option<&ProjectionManifest>,
+    resident: crate::resource::ByteCount,
+    base: Option<&Rc<ValidatedBaseSnapshot>>,
+) -> GraphResult<Engine> {
+    load_graph_file_internal(path, candidate, resident, base)
 }
 
 fn load_graph_file_internal(
     path: &Path,
     projection_candidate: Option<&ProjectionManifest>,
     resident: crate::resource::ByteCount,
+    reusable: Option<&Rc<ValidatedBaseSnapshot>>,
+) -> GraphResult<Engine> {
+    let mut shared_hit = false;
+    let result = load_graph_file_attempt(
+        path,
+        projection_candidate,
+        resident,
+        reusable,
+        true,
+        &mut shared_hit,
+    );
+    if result.is_err() && shared_hit {
+        // Discovery hints cannot make an otherwise valid source unreadable.
+        load_graph_file_attempt(
+            path,
+            projection_candidate,
+            resident,
+            reusable,
+            false,
+            &mut false,
+        )
+    } else {
+        result
+    }
+}
+
+fn load_graph_file_attempt(
+    path: &Path,
+    projection_candidate: Option<&ProjectionManifest>,
+    resident: crate::resource::ByteCount,
+    reusable: Option<&Rc<ValidatedBaseSnapshot>>,
+    allow_shared_cache: bool,
+    shared_hit: &mut bool,
 ) -> GraphResult<Engine> {
     ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
     let manifest_root = projection_manifest_root(path);
@@ -2239,17 +2349,89 @@ fn load_graph_file_internal(
         (None, Some(manifest)) => manifest_root.join(&manifest.base_artifact_path),
         _ => path.to_path_buf(),
     };
-    let path = artifact_path.as_path();
+    let projection = pinned_manifest.as_ref().map(|manifest| {
+        if projection_candidate.is_some() {
+            ResolvedProjection::Candidate(manifest)
+        } else {
+            ResolvedProjection::Published(manifest)
+        }
+    });
+    let (mut engine, base) = load_resolved_graph_artifact(
+        ResolvedArtifactLoad {
+            path: &artifact_path,
+            manifest_root: &manifest_root,
+            projection,
+            resident,
+            reusable,
+            allow_shared_cache,
+        },
+        shared_hit,
+    )?;
+
+    let storage_mode = base.snapshot.mode().as_str();
+    #[cfg(not(test))]
+    pgrx::debug1!("graph snapshot storage mode: {storage_mode}");
+    #[cfg(test)]
+    let _ = storage_mode;
+    if let Err(error) = base.snapshot.advertise() {
+        #[cfg(not(test))]
+        pgrx::debug1!("graph snapshot cache advertisement unavailable: {error}");
+        #[cfg(test)]
+        let _ = error;
+    }
+    engine.base_snapshot = Some(base);
+    Ok(engine)
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedProjection<'a> {
+    Published(&'a ProjectionManifest),
+    Candidate(&'a ProjectionManifest),
+}
+
+impl<'a> ResolvedProjection<'a> {
+    fn manifest(self) -> &'a ProjectionManifest {
+        match self {
+            Self::Published(manifest) | Self::Candidate(manifest) => manifest,
+        }
+    }
+}
+
+struct ResolvedArtifactLoad<'a> {
+    path: &'a Path,
+    manifest_root: &'a Path,
+    projection: Option<ResolvedProjection<'a>>,
+    resident: crate::resource::ByteCount,
+    reusable: Option<&'a Rc<ValidatedBaseSnapshot>>,
+    allow_shared_cache: bool,
+}
+
+/// Decode already resolved artifact bytes without selecting a publication.
+fn load_resolved_graph_artifact(
+    input: ResolvedArtifactLoad<'_>,
+    shared_hit: &mut bool,
+) -> GraphResult<(Engine, Rc<ValidatedBaseSnapshot>)> {
+    let ResolvedArtifactLoad {
+        path,
+        manifest_root,
+        projection,
+        resident,
+        reusable,
+        allow_shared_cache,
+    } = input;
+    let pinned_manifest = projection.map(ResolvedProjection::manifest);
 
     let mut file = fs::File::open(path)
         .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
 
-    let file_len = usize::try_from(
-        file.metadata()
-            .map_err(|e| GraphError::Internal(format!("Cannot stat {}: {}", path.display(), e)))?
-            .len(),
-    )
-    .map_err(|_| GraphError::Internal("graph artifact is too large for this platform".into()))?;
+    let source_metadata = file.metadata().map_err(|error| {
+        GraphError::Internal(format!("Cannot stat {}: {error}", path.display()))
+    })?;
+    let source_stamp = snapshot_source_stamp(&source_metadata);
+    let reusable = reusable.filter(|base| base.matches(path, source_stamp.as_ref()));
+    let file_len = usize::try_from(source_metadata.len()).map_err(|_| {
+        GraphError::Internal("graph artifact is too large for this platform".into())
+    })?;
     if file_len < 8 {
         return Err(GraphError::CorruptFile {
             reason: "file too small for graph artifact preamble".to_string(),
@@ -2259,113 +2441,153 @@ fn load_graph_file_internal(
     let file_bytes = crate::resource::ByteCount::from_usize(file_len)
         .ok_or_else(|| GraphError::Internal("graph artifact size does not fit u64".to_string()))?;
     let _snapshot_memory = load_governor
-        .reserve_memory(crate::resource::ResourcePhase::LoadMetadata, file_bytes)
+        .reserve_memory(
+            crate::resource::ResourcePhase::LoadMetadata,
+            if reusable.is_some() {
+                crate::resource::ByteCount::ZERO
+            } else {
+                file_bytes
+            },
+        )
         .map_err(crate::safety::resource_limit_error)?;
-    let mut snapshot = MmapMut::map_anon(file_len)
-        .map_err(|e| GraphError::Internal(format!("anonymous mmap failed: {}", e)))?;
-    file.read_exact(&mut snapshot)
-        .map_err(|e| GraphError::Internal(format!("Cannot snapshot {}: {}", path.display(), e)))?;
-    let mmap = Arc::new(
-        snapshot
-            .make_read_only()
-            .map_err(|e| GraphError::Internal(format!("read-only mmap failed: {}", e)))?,
-    );
+    let base = if let Some(base) = reusable {
+        Rc::clone(base)
+    } else {
+        let cache_key = source_stamp.as_ref().and_then(|stamp| {
+            fs::canonicalize(path)
+                .ok()
+                .and_then(|canonical| serde_json::to_string(&(canonical, stamp)).ok())
+        });
+        let snapshot = if let Some(key) =
+            cache_key.filter(|_| allow_shared_cache && pinned_manifest.is_some())
+        {
+            snapshot_cache::load_snapshot(
+                &mut file,
+                &manifest_root.join(".snapshot-cache"),
+                &key,
+                file_len,
+            )
+        } else {
+            snapshot_cache::copy_private_snapshot(&mut file, file_len)
+        }
+        .map_err(|error| {
+            GraphError::Internal(format!("Cannot snapshot {}: {error}", path.display(),))
+        })?;
+        *shared_hit = snapshot.is_shared_hit();
+        let mmap = Arc::clone(snapshot.mmap());
 
-    // Validate header
-    if &mmap[0..4] != MAGIC {
-        return Err(GraphError::CorruptFile {
-            reason: "invalid magic bytes".to_string(),
-        });
-    }
-    if file_len < HEADER_SIZE {
-        return Err(GraphError::CorruptFile {
-            reason: "file too small for graph artifact header".to_string(),
-        });
-    }
-    let version = read_u32_at(&mmap, 4);
-    let edge_type_width = decode_edge_type_width(version, &mmap[..HEADER_SIZE])?;
-    if read_u32_at(&mmap, 8) as usize != HEADER_SIZE
-        || read_u32_at(&mmap, 28) as usize != NUM_SECTIONS
-    {
-        return Err(GraphError::CorruptFile {
-            reason: "invalid graph artifact header or section count".into(),
-        });
-    }
-    if mmap[480..HEADER_SIZE].iter().any(|&byte| byte != 0) {
-        return Err(GraphError::CorruptFile {
-            reason: format!("v{version} header reserved bytes must be zero"),
-        });
-    }
-    let stored_header_crc = read_u32_at(&mmap, HEADER_CRC_OFFSET);
-    let mut header = [0u8; HEADER_SIZE];
-    header.copy_from_slice(&mmap[..HEADER_SIZE]);
-    header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].fill(0);
-    let computed_header_crc = crc32fast::hash(&header);
-    if stored_header_crc != computed_header_crc {
-        return Err(GraphError::CorruptFile {
+        // Validate header
+        if &mmap[0..4] != MAGIC {
+            return Err(GraphError::CorruptFile {
+                reason: "invalid magic bytes".to_string(),
+            });
+        }
+        if file_len < HEADER_SIZE {
+            return Err(GraphError::CorruptFile {
+                reason: "file too small for graph artifact header".to_string(),
+            });
+        }
+        let version = read_u32_at(&mmap, 4);
+        let edge_type_width = decode_edge_type_width(version, &mmap[..HEADER_SIZE])?;
+        if read_u32_at(&mmap, 8) as usize != HEADER_SIZE
+            || read_u32_at(&mmap, 28) as usize != NUM_SECTIONS
+        {
+            return Err(GraphError::CorruptFile {
+                reason: "invalid graph artifact header or section count".into(),
+            });
+        }
+        if mmap[480..HEADER_SIZE].iter().any(|&byte| byte != 0) {
+            return Err(GraphError::CorruptFile {
+                reason: format!("v{version} header reserved bytes must be zero"),
+            });
+        }
+        let stored_header_crc = read_u32_at(&mmap, HEADER_CRC_OFFSET);
+        let mut header = [0u8; HEADER_SIZE];
+        header.copy_from_slice(&mmap[..HEADER_SIZE]);
+        header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].fill(0);
+        let computed_header_crc = crc32fast::hash(&header);
+        if stored_header_crc != computed_header_crc {
+            return Err(GraphError::CorruptFile {
             reason: format!(
                 "header CRC32 mismatch: stored={stored_header_crc:#x}, computed={computed_header_crc:#x}"
             ),
         });
-    }
-    let body_len =
-        usize::try_from(read_u64_at(&mmap, 32)).map_err(|_| GraphError::CorruptFile {
-            reason: "v6 body length exceeds usize".into(),
-        })?;
-    if body_len != file_len - HEADER_SIZE {
-        return Err(GraphError::CorruptFile {
-            reason: format!(
-                "v6 body length mismatch: header={body_len}, actual={}",
-                file_len - HEADER_SIZE
-            ),
-        });
-    }
-    let stored_crc = read_u32_at(&mmap, BODY_CRC_OFFSET);
-    let computed_crc = crc32fast::hash(&mmap[HEADER_SIZE..]);
-    if stored_crc != computed_crc {
-        return Err(GraphError::CorruptFile {
-            reason: format!(
-                "body CRC32 mismatch: stored={stored_crc:#x}, computed={computed_crc:#x}"
-            ),
-        });
-    }
+        }
+        let body_len =
+            usize::try_from(read_u64_at(&mmap, 32)).map_err(|_| GraphError::CorruptFile {
+                reason: "v6 body length exceeds usize".into(),
+            })?;
+        if body_len != file_len - HEADER_SIZE {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "v6 body length mismatch: header={body_len}, actual={}",
+                    file_len - HEADER_SIZE
+                ),
+            });
+        }
+        let stored_crc = read_u32_at(&mmap, BODY_CRC_OFFSET);
+        let computed_crc = crc32fast::hash(&mmap[HEADER_SIZE..]);
+        if stored_crc != computed_crc {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "body CRC32 mismatch: stored={stored_crc:#x}, computed={computed_crc:#x}"
+                ),
+            });
+        }
 
-    let flags = read_u32_at(&mmap, 12);
-    let node_count = read_u32_at(&mmap, 16);
-    let forward_edge_count = read_u32_at(&mmap, 20);
-    let inbound_edge_count = read_u32_at(&mmap, 24);
-    let mut sections = [SectionDescriptor::default(); NUM_SECTIONS];
-    for (idx, descriptor) in sections.iter_mut().enumerate() {
-        let start = SECTION_DESCRIPTORS_OFFSET + idx * SECTION_DESCRIPTOR_SIZE;
-        descriptor.offset = read_u64_at(&mmap, start);
-        descriptor.len = read_u64_at(&mmap, start + 8);
-    }
+        let flags = read_u32_at(&mmap, 12);
+        let node_count = read_u32_at(&mmap, 16);
+        let forward_edge_count = read_u32_at(&mmap, 20);
+        let inbound_edge_count = read_u32_at(&mmap, 24);
+        let mut sections = [SectionDescriptor::default(); NUM_SECTIONS];
+        for (idx, descriptor) in sections.iter_mut().enumerate() {
+            let start = SECTION_DESCRIPTORS_OFFSET + idx * SECTION_DESCRIPTOR_SIZE;
+            descriptor.offset = read_u64_at(&mmap, start);
+            descriptor.len = read_u64_at(&mmap, start + 8);
+        }
 
-    let resolution_validation_bytes =
-        crate::resource::ByteCount::from_usize(node_count as usize)
-            .ok_or_else(|| GraphError::Internal("resolution validation size overflowed".into()))?;
-    let resolution_validation = load_governor
-        .reserve_memory(
-            crate::resource::ResourcePhase::LoadMetadata,
-            resolution_validation_bytes,
-        )
-        .map_err(crate::safety::resource_limit_error)?;
-    let layout = validate_section_layout(
-        &mmap,
-        &sections,
-        node_count,
-        forward_edge_count,
-        inbound_edge_count,
-        flags,
-        GraphArtifactMetadata {
-            version,
-            edge_type_width,
+        let resolution_validation_bytes =
+            crate::resource::ByteCount::from_usize(node_count as usize).ok_or_else(|| {
+                GraphError::Internal("resolution validation size overflowed".into())
+            })?;
+        let resolution_validation = load_governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::LoadMetadata,
+                resolution_validation_bytes,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let layout = validate_section_layout(
+            &mmap,
+            &sections,
+            node_count,
+            forward_edge_count,
+            inbound_edge_count,
+            flags,
+            GraphArtifactMetadata {
+                version,
+                edge_type_width,
+                body_crc: computed_crc,
+            },
+        )?;
+        drop(resolution_validation);
+        Rc::new(ValidatedBaseSnapshot {
+            path: path.to_path_buf(),
+            source_stamp,
+            mmap,
+            snapshot,
+            layout,
+            flags,
             body_crc: computed_crc,
-        },
-    )?;
-    drop(resolution_validation);
-    // Mapped value/key bytes are already covered by the full anonymous
-    // snapshot reservation. This additional lease covers bounded descriptors,
+        })
+    };
+    let mmap = Arc::clone(&base.mmap);
+    let layout = base.layout.clone();
+    let version = layout.artifact_version;
+    let flags = base.flags;
+    let node_count = layout.node_count;
+    let computed_crc = base.body_crc;
+    // Mapped value/key bytes are covered by the logical snapshot reservation.
+    // This additional lease covers bounded descriptors,
     // copied names/labels, empty per-column delta containers, and temporary
     // uniqueness validation indexes.
     let filter_metadata_bytes = FilterIndex::mapped_load_metadata_upper_bound(
@@ -2511,11 +2733,14 @@ fn load_graph_file_internal(
     }
     if let Some(manifest) = pinned_manifest.as_ref() {
         validate_projection_manifest_base(path, computed_crc, artifact_version, manifest)?;
+        if let Some(fingerprint) = manifest.catalog_fingerprint {
+            engine.set_catalog_fingerprint(fingerprint);
+        }
     }
     let manifest = pinned_manifest;
     let projection_workspace = manifest
         .as_ref()
-        .map(|manifest| projection_workspace_bytes(&manifest_root, manifest))
+        .map(|manifest| projection_workspace_bytes(manifest_root, manifest))
         .transpose()?;
     let _projection_memory = projection_workspace
         .map(|bytes| {
@@ -2575,13 +2800,33 @@ fn load_graph_file_internal(
         if !manifest.segments.is_empty() {
             engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
         }
-        if projection_candidate.is_some() {
-            engine.install_projection_candidate(&manifest, manifest_root)?;
+        if matches!(projection, Some(ResolvedProjection::Candidate(_))) {
+            engine.install_projection_candidate(manifest, manifest_root)?;
         } else {
-            engine.install_projection_manifest(&manifest, manifest_root)?;
+            engine.install_projection_manifest(manifest, manifest_root)?;
         }
     }
 
+    Ok((engine, base))
+}
+
+/// Decode a raw fuzz artifact through production format and CSR validation.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn load_raw_graph_artifact_for_fuzzing(path: &Path) -> GraphResult<Engine> {
+    ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
+    let root = projection_manifest_root(path);
+    let (mut engine, base) = load_resolved_graph_artifact(
+        ResolvedArtifactLoad {
+            path,
+            manifest_root: &root,
+            projection: None,
+            resident: crate::resource::ByteCount::ZERO,
+            reusable: None,
+            allow_shared_cache: false,
+        },
+        &mut false,
+    )?;
+    engine.base_snapshot = Some(base);
     Ok(engine)
 }
 
@@ -2940,7 +3185,7 @@ pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<Strin
     Ok(graph_artifact_checksum(computed_crc))
 }
 
-/// Resolve the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
+/// Resolve `$PGDATA/{data_dir}/database-{database_oid}/{graph_id}`.
 ///
 /// The graph id must be canonical UUID text. Graph names are intentionally not
 /// accepted here because filesystem paths must be derived from stable catalog
@@ -2962,10 +3207,13 @@ fn graph_root_path_for_uncreated(graph_id: &str) -> GraphResult<PathBuf> {
         ));
     }
     let subdir = graph_data_dir();
-    Ok(PathBuf::from(&pgdata).join(&subdir).join(graph_id.as_str()))
+    Ok(PathBuf::from(&pgdata)
+        .join(&subdir)
+        .join(format!("database-{}", database_oid_for_paths()?))
+        .join(graph_id.as_str()))
 }
 
-/// Get the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
+/// Get the current database's artifact root for a graph.
 ///
 /// The directory is created for callers that intend to write artifacts.
 pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
@@ -2978,6 +3226,21 @@ pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
         ))
     })?;
     Ok(dir)
+}
+
+fn database_oid_for_paths() -> GraphResult<u32> {
+    #[cfg(all(test, not(feature = "pg_test")))]
+    let oid = 1;
+    #[cfg(any(not(test), feature = "pg_test"))]
+    // SAFETY: artifact paths are resolved inside a PostgreSQL backend. The
+    // server sets MyDatabaseId at connection startup and owns its lifetime.
+    let oid = unsafe { pgrx::pg_sys::MyDatabaseId.to_u32() };
+    if oid == 0 {
+        return Err(GraphError::Internal(
+            "cannot resolve graph artifacts without a database identity".into(),
+        ));
+    }
+    Ok(oid)
 }
 
 /// Get the `.pggraph` artifact path for a graph id.
@@ -3022,31 +3285,6 @@ pub fn projection_manifest_root_for(graph_id: &str) -> GraphResult<PathBuf> {
     Ok(projection_manifest_root(&graph_file_path_for(graph_id)?))
 }
 
-/// Remove all derived artifact files for one graph id.
-///
-/// The target root is derived from a validated graph UUID and the configured
-/// data directory. No caller-provided path is accepted.
-pub fn remove_graph_artifacts_for(graph_id: &str) -> GraphResult<()> {
-    let graph_id = GraphId::parse(graph_id)
-        .map_err(|err| GraphError::Internal(format!("invalid graph artifact id: {err}")))?;
-    let root = graph_root_path_for_uncreated(graph_id.as_str())?;
-    if root.file_name().and_then(|name| name.to_str()) != Some(graph_id.as_str()) {
-        return Err(GraphError::Internal(format!(
-            "refusing to remove graph artifact root outside graph id directory: {}",
-            root.display()
-        )));
-    }
-    if root.exists() {
-        fs::remove_dir_all(&root).map_err(|err| {
-            GraphError::Internal(format!(
-                "remove graph artifact directory {}: {err}",
-                root.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
 pub fn projection_manifest_root(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
@@ -3062,7 +3300,14 @@ pub(crate) fn current_base_artifact_path(path: &Path) -> GraphResult<Option<Path
     if let Some(manifest) = ProjectionManifestStore::new(&root).load_latest_current()? {
         return Ok(Some(root.join(manifest.base_artifact_path)));
     }
-    Ok(path.is_file().then(|| path.to_path_buf()))
+    #[cfg(test)]
+    {
+        Ok(path.is_file().then(|| path.to_path_buf()))
+    }
+    #[cfg(not(test))]
+    {
+        Ok(None)
+    }
 }
 
 /// Return whether a complete persisted base is available for loading.
@@ -3234,6 +3479,7 @@ mod tests {
             path,
             pgdata
                 .join("graph")
+                .join("database-1")
                 .join(crate::graph_policy::DEFAULT_GRAPH_ID_TEXT)
                 .join("main.pggraph")
         );
@@ -3263,17 +3509,32 @@ mod tests {
 
         assert_eq!(
             path_a,
-            pgdata.join("graph").join(graph_a).join("main.pggraph")
+            pgdata
+                .join("graph")
+                .join("database-1")
+                .join(graph_a)
+                .join("main.pggraph")
         );
         assert_eq!(
             path_b,
-            pgdata.join("graph").join(graph_b).join("main.pggraph")
+            pgdata
+                .join("graph")
+                .join("database-1")
+                .join(graph_b)
+                .join("main.pggraph")
         );
         assert_eq!(
             checkpoint_a,
-            pgdata.join("graph").join(graph_a).join("main.pggraph.sync")
+            pgdata
+                .join("graph")
+                .join("database-1")
+                .join(graph_a)
+                .join("main.pggraph.sync")
         );
-        assert_eq!(manifest_root_a, pgdata.join("graph").join(graph_a));
+        assert_eq!(
+            manifest_root_a,
+            pgdata.join("graph").join("database-1").join(graph_a)
+        );
         assert_ne!(path_a.parent(), path_b.parent());
         let _ = std::fs::remove_dir_all(&pgdata);
     }
@@ -3290,27 +3551,6 @@ mod tests {
         assert!(
             matches!(result, Err(GraphError::Internal(message)) if message.contains("graph id"))
         );
-    }
-
-    #[cfg(not(feature = "pg_test"))]
-    #[test]
-    fn remove_graph_artifacts_for_missing_graph_does_not_create_root() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _restore = EnvRestore::capture("PGDATA");
-        let pgdata = std::env::temp_dir().join(format!(
-            "graph-pgdata-remove-missing-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("t")
-        ));
-        let _ = std::fs::remove_dir_all(&pgdata);
-        std::env::set_var("PGDATA", &pgdata);
-
-        let graph_id = "00000000-0000-0000-0000-0000000000cc";
-
-        remove_graph_artifacts_for(graph_id).unwrap();
-
-        assert!(!pgdata.join("graph").join(graph_id).exists());
-        let _ = std::fs::remove_dir_all(&pgdata);
     }
 
     #[test]
@@ -3493,6 +3733,287 @@ mod tests {
         assert!(matches!(
             error,
             GraphError::CorruptFile { reason } if reason.contains("unregistered table OID")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reusable_base_excludes_serving_mutations_and_preserves_snapshot_isolation() {
+        let path = temp_graph_path("reuse-base-isolation");
+        write_graph_file(&graph_with_relationship(), &path).unwrap();
+        let mut serving = load_graph_file(&path).unwrap();
+        let local = serving.insert_sync_node(10, "local");
+        serving.resolution_insert(10, "local", local);
+        let planning = load_graph_file_reusing_base(
+            &path,
+            None,
+            crate::resource::ByteCount::ZERO,
+            serving.base_snapshot.as_ref(),
+        )
+        .unwrap();
+        assert!(Rc::ptr_eq(
+            serving.base_snapshot.as_ref().unwrap(),
+            planning.base_snapshot.as_ref().unwrap()
+        ));
+        assert_eq!(planning.node_store.node_count(), 2);
+        assert_eq!(planning.resolve(10, "local"), None);
+        assert_eq!(planning.edge_store.neighbors_weighted(0).0, &[1]);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        assert_eq!(planning.resolve(10, "B"), Some(1));
+        assert!(matches!(
+            load_graph_file_reusing_base(
+                &path,
+                None,
+                crate::resource::ByteCount::ZERO,
+                planning.base_snapshot.as_ref(),
+            ),
+            Err(GraphError::CorruptFile { .. })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_hint_for_another_valid_graph_retries_private_source() {
+        let path = temp_graph_path("shared-hint-valid-source");
+        write_graph_file(&graph_with_relationship(), &path).unwrap();
+        let mut wrong = Engine::new();
+        for key in ["C", "D"] {
+            let id = wrong.node_store.add_node(10, key.to_owned());
+            wrong.resolution_insert(10, key, id);
+        }
+        let type_id = wrong.register_edge_type("related_to").unwrap();
+        wrong.edge_store = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id,
+                weight: Some(7),
+                schema_reversed: false,
+            }],
+            true,
+        );
+        wrong.built = true;
+        let wrong_path = temp_graph_path("shared-hint-wrong-source");
+        write_graph_file(&wrong, &wrong_path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(metadata.len(), fs::metadata(&wrong_path).unwrap().len());
+        let key = serde_json::to_string(&(
+            fs::canonicalize(&path).unwrap(),
+            snapshot_source_stamp(&metadata).unwrap(),
+        ))
+        .unwrap();
+        let _poisoned = snapshot_cache::advertise_test_snapshot(
+            &mut fs::File::open(&wrong_path).unwrap(),
+            &projection_manifest_root(&path).join(".snapshot-cache"),
+            &key,
+            metadata.len() as usize,
+        )
+        .unwrap();
+        let candidate = ProjectionManifest::base_only(
+            2,
+            path.file_name().unwrap().to_string_lossy(),
+            checksum_graph_artifact(&path),
+            VERSION,
+            0,
+            2,
+        );
+        let mut hit = false;
+        assert!(load_graph_file_attempt(
+            &path,
+            Some(&candidate),
+            crate::resource::ByteCount::ZERO,
+            None,
+            true,
+            &mut hit,
+        )
+        .is_err());
+        assert!(hit, "fixture did not exercise a poisoned shared hit");
+        let loaded = load_graph_file_reusing_base(
+            &path,
+            Some(&candidate),
+            crate::resource::ByteCount::ZERO,
+            None,
+        )
+        .unwrap();
+        assert_eq!(loaded.resolve(10, "A"), Some(0));
+        assert_eq!(loaded.resolve(10, "C"), None);
+        assert_eq!(loaded.base_snapshot.as_ref().unwrap().shared_bytes(), 0);
+
+        let standalone = load_graph_file(&path).unwrap();
+        assert_eq!(standalone.resolve(10, "A"), Some(0));
+        assert_eq!(standalone.base_snapshot.as_ref().unwrap().shared_bytes(), 0);
+    }
+
+    #[test]
+    fn reusable_base_revalidates_modified_inode_and_different_root() {
+        let path = temp_graph_path("reuse-modified-source");
+        write_graph_file(&graph_with_relationship(), &path).unwrap();
+        let serving = load_graph_file(&path).unwrap();
+        let other = temp_graph_path("reuse-other-root");
+        fs::copy(&path, &other).unwrap();
+        let separate = load_graph_file_reusing_base(
+            &other,
+            None,
+            crate::resource::ByteCount::ZERO,
+            serving.base_snapshot.as_ref(),
+        )
+        .unwrap();
+        assert!(!Rc::ptr_eq(
+            serving.base_snapshot.as_ref().unwrap(),
+            separate.base_snapshot.as_ref().unwrap()
+        ));
+        overwrite_bytes(&path, HEADER_SIZE, &[255]);
+        assert!(matches!(
+            load_graph_file_reusing_base(
+                &path,
+                None,
+                crate::resource::ByteCount::ZERO,
+                serving.base_snapshot.as_ref(),
+            ),
+            Err(GraphError::CorruptFile { .. })
+        ));
+        assert_eq!(serving.resolve(10, "B"), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reusable_base_respects_shared_and_cold_fallback_memory_budgets() {
+        let path = temp_graph_path("reuse-budget");
+        let mut source = Engine::new();
+        for prefix in ["a", "b"] {
+            let key = format!("{prefix}{}", "x".repeat(1_048_576));
+            let index = source.node_store.add_node(10, key.clone());
+            source.resolution_insert(10, &key, index);
+        }
+        source.edge_store = EdgeStore::from_edges(2, vec![], false);
+        write_graph_file(&source, &path).unwrap();
+        let serving = load_graph_file(&path).unwrap();
+        let bytes = serving.base_snapshot.as_ref().unwrap().bytes() as u64;
+        let resident =
+            crate::resource::ByteCount::from_mib(crate::config::MEMORY_LIMIT_MB.get() as u64)
+                .unwrap()
+                .checked_sub(crate::resource::ByteCount::from_bytes(bytes / 2))
+                .unwrap();
+        assert!(matches!(
+            load_graph_file_with_residency(&path, resident),
+            Err(GraphError::ResourceLimit { .. })
+        ));
+        let shared =
+            load_graph_file_reusing_base(&path, None, resident, serving.base_snapshot.as_ref())
+                .unwrap();
+        assert!(Rc::ptr_eq(
+            serving.base_snapshot.as_ref().unwrap(),
+            shared.base_snapshot.as_ref().unwrap()
+        ));
+        let candidate = ProjectionManifest::base_only(
+            2,
+            path.file_name().unwrap().to_string_lossy(),
+            checksum_graph_artifact(&path),
+            VERSION,
+            0,
+            2,
+        );
+        let validated_candidate = load_graph_file_reusing_base(
+            &path,
+            Some(&candidate),
+            resident,
+            shared.base_snapshot.as_ref(),
+        )
+        .unwrap();
+        assert!(Rc::ptr_eq(
+            serving.base_snapshot.as_ref().unwrap(),
+            validated_candidate.base_snapshot.as_ref().unwrap()
+        ));
+        let replacement = temp_graph_path("reuse-budget-replacement");
+        fs::copy(&path, &replacement).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(matches!(
+            load_graph_file_reusing_base(&path, None, resident, serving.base_snapshot.as_ref()),
+            Err(GraphError::ResourceLimit { .. })
+        ));
+        eprintln!("validated base bytes={bytes}; serving/planning/candidate share one allocation instead of three");
+    }
+
+    #[test]
+    fn reusable_base_rejects_candidate_checksum_mismatch() {
+        let path = temp_graph_path("reuse-invalid-candidate");
+        write_graph_file(&graph_with_relationship(), &path).unwrap();
+        let serving = load_graph_file(&path).unwrap();
+        let candidate = ProjectionManifest::base_only(
+            2,
+            path.file_name().unwrap().to_str().unwrap(),
+            "crc32:00000000",
+            VERSION,
+            0,
+            2,
+        );
+        assert!(matches!(
+            load_graph_file_reusing_base(
+                &path,
+                Some(&candidate),
+                crate::resource::ByteCount::ZERO,
+                serving.base_snapshot.as_ref()
+            ),
+            Err(GraphError::CorruptFile { .. })
+        ));
+    }
+
+    #[test]
+    fn reusable_base_rejects_candidate_dictionary_prefix_mismatch() {
+        let path = temp_graph_path("reuse-invalid-dictionary");
+        write_graph_file(&graph_with_relationship(), &path).unwrap();
+        let serving = load_graph_file(&path).unwrap();
+        let root = projection_manifest_root(&path);
+        let dictionary_path = root.join("relationship-types-invalid.bin");
+        let dictionary =
+            crate::projection::edge_type_dictionary::EdgeTypeDictionary::try_from_labels(vec![
+                String::new(),
+                "different-base-label".to_owned(),
+            ])
+            .unwrap();
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_bytes(u64::MAX),
+            )),
+        );
+        let (checksum, bytes) =
+            crate::projection::edge_type_dictionary::write_edge_type_dictionary_artifact(
+                &root,
+                &dictionary_path,
+                &dictionary,
+                &governor,
+            )
+            .unwrap();
+        let mut candidate = ProjectionManifest::base_only(
+            2,
+            path.file_name().unwrap().to_string_lossy(),
+            checksum_graph_artifact(&path),
+            VERSION,
+            0,
+            2,
+        );
+        candidate.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: dictionary_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            checksum,
+            entry_count: 2,
+            bytes,
+        });
+        assert!(matches!(
+            load_graph_file_reusing_base(
+                &path, Some(&candidate), crate::resource::ByteCount::ZERO,
+                serving.base_snapshot.as_ref(),
+            ),
+            Err(GraphError::CorruptFile { reason }) if reason.contains("base registry prefix")
         ));
     }
 
@@ -4724,6 +5245,69 @@ mod tests {
         );
         engine.built = true;
         engine
+    }
+
+    #[test]
+    fn fuzz_loader_validates_raw_artifacts_without_publication_metadata() {
+        let engine = graph_with_relationship();
+        for version in [V6_VERSION, V7_VERSION] {
+            let path = temp_graph_path(&format!("fuzz-raw-v{version}"));
+            if version == V6_VERSION {
+                write_v6_graph_file_for_test(&engine, &path).unwrap();
+            } else {
+                write_graph_file(&engine, &path).unwrap();
+            }
+            let valid_bytes = fs::read(&path).unwrap();
+            fs::write(
+                projection_manifest_root(&path).join("projection-current.json"),
+                b"invalid publication pointer",
+            )
+            .unwrap();
+            assert!(matches!(
+                load_graph_file(&path),
+                Err(GraphError::CorruptFile { .. })
+            ));
+            let loaded = crate::fuzz_support::load_graph_file(&path).unwrap();
+            assert_eq!(loaded.node_store.node_count(), 2);
+            assert_eq!(loaded.node_store.primary_key(0), Some("A"));
+            assert_eq!(loaded.node_store.primary_key(1), Some("B"));
+            assert_eq!(loaded.edge_store.edge_count(), 1);
+            assert_eq!(loaded.reverse_edge_store.edge_count(), 1);
+            assert!(!loaded
+                .base_snapshot
+                .as_ref()
+                .unwrap()
+                .snapshot
+                .is_shareable());
+
+            let targets = read_section_offset(&path, 5);
+            write_u32_at(&path, targets, 2);
+            rewrite_crc(&path);
+            let invalid_bytes = fs::read(&path).unwrap();
+            match crate::fuzz_support::load_graph_file(&path) {
+                Err(GraphError::CorruptFile { reason }) => {
+                    assert!(reason.contains("target"), "unexpected corruption: {reason}");
+                }
+                Err(error) => panic!("unexpected artifact error: {error:?}"),
+                Ok(_) => panic!("out-of-range CSR target was accepted"),
+            }
+
+            // Opt-in corpus export uses the same writer and malformed fixture
+            // exercised above. Existing caller-owned files are never replaced.
+            if let Some(directory) = std::env::var_os("PGGRAPH_FUZZ_SEED_DIR") {
+                let directory = PathBuf::from(directory);
+                fs::create_dir_all(&directory).unwrap();
+                for (kind, bytes) in [("valid", valid_bytes), ("bad-target", invalid_bytes)] {
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(directory.join(format!("v{version}-{kind}.pggraph")))
+                        .unwrap();
+                    file.write_all(&bytes).unwrap();
+                }
+            }
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
     }
 
     fn adaptive_graph(max_type_id: u32) -> Engine {

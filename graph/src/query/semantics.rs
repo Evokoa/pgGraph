@@ -436,6 +436,7 @@ fn bind_join_node_slot(
         table_oid: info.table_oid,
         label: info.label,
         properties: info.properties,
+        primary_key_columns: info.primary_key_columns,
     });
     slot_by_var.insert(var.text.clone(), slot);
     Ok(slot)

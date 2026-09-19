@@ -48,6 +48,17 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
 }
 
 fn lower_join(plan: LogicalJoinPlan) -> PhysicalJoinPlan {
+    let source_identity_lookup = if plan.optional {
+        None
+    } else {
+        plan.patterns.first().and_then(|pattern| {
+            predicate_identity_lookup(
+                plan.predicate.as_ref(),
+                super::logical_plan::BindingSide::PathNode(pattern.source_slot),
+                &plan.node_slots[pattern.source_slot].primary_key_columns,
+            )
+        })
+    };
     PhysicalJoinPlan {
         optional: plan.optional,
         node_slots: plan
@@ -73,6 +84,7 @@ fn lower_join(plan: LogicalJoinPlan) -> PhysicalJoinPlan {
         post_aggregate_distinct_stages: lower_return_stages(plan.post_aggregate_distinct_stages),
         distinct: plan.distinct,
         predicate: plan.predicate,
+        source_identity_lookup,
         order_by: plan.order_by,
         required_table_oids: plan.required_table_oids,
         skip: plan.skip,

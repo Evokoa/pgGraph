@@ -819,6 +819,15 @@ CREATE TABLE IF NOT EXISTS graph._sync_log (
 CREATE INDEX IF NOT EXISTS idx_sync_log_id ON graph._sync_log (id);
 CREATE INDEX IF NOT EXISTS idx_sync_log_created ON graph._sync_log (created_at);
 
+-- PostgreSQL MVCC determines which immutable generation a reader may serve.
+CREATE TABLE IF NOT EXISTS graph._projection_heads (
+    graph_id UUID NOT NULL REFERENCES graph._graphs(graph_id) ON DELETE CASCADE,
+    artifact_root TEXT NOT NULL,
+    generation_id BIGINT NOT NULL CHECK (generation_id > 0),
+    manifest_checksum TEXT NOT NULL,
+    PRIMARY KEY (graph_id, artifact_root)
+);
+
 CREATE TABLE IF NOT EXISTS graph._projection_generations (
     graph_id          UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
     generation_id     BIGINT NOT NULL CHECK (generation_id > 0),
@@ -967,6 +976,7 @@ REVOKE ALL ON TABLE graph._job_runs               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_policies          FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._projection_generations FROM PUBLIC;
+REVOKE ALL ON TABLE graph._projection_heads       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_watermarks        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
 REVOKE ALL ON SEQUENCE graph._sync_log_id_seq     FROM PUBLIC;

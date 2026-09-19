@@ -30,6 +30,23 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub(crate) fn validate_catalog_provenance(
+    actual: Option<u64>,
+    expected: Option<u64>,
+) -> GraphResult<()> {
+    let Some(actual) = actual else {
+        return Err(GraphError::Internal(
+            "persisted graph has no catalog provenance; rebuild required".into(),
+        ));
+    };
+    if expected.is_some_and(|expected| expected != actual) {
+        return Err(GraphError::Internal(
+            "registered graph catalog changed since graph.build(); rebuild required".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolution storage backend.
 ///
 /// - `Builder`: compact append-only entries used during node ingestion.
@@ -116,6 +133,8 @@ pub struct Engine {
     /// Backend-local immutable snapshot used by resolution and accounting.
     /// Mapped node and edge stores retain their own `Arc` clones.
     pub(crate) _mmap: Option<Arc<memmap2::Mmap>>,
+    /// Validated base ownership reused by clean ingestion planning/candidate loads.
+    pub(crate) base_snapshot: Option<std::rc::Rc<crate::persistence::ValidatedBaseSnapshot>>,
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
@@ -944,6 +963,7 @@ impl Engine {
             resolution_store: ResolutionStore::Builder(ResolutionIndexBuilder::new()),
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
+            base_snapshot: None,
             edge_buffer: Vec::new(),
             edge_buffer_revision: 0,
             edge_buffer_missing_relationship_identity_edge_types: HashSet::new(),
@@ -971,6 +991,11 @@ impl Engine {
         }
     }
 
+    /// Require persisted registration provenance before a loaded graph is served.
+    pub(crate) fn validate_catalog_fingerprint(&self, expected: Option<u64>) -> GraphResult<()> {
+        validate_catalog_provenance(self.catalog_fingerprint, expected)
+    }
+
     /// Refresh status-only observations without replacing graph data stores.
     pub fn refresh_observed_state(
         &mut self,
@@ -989,6 +1014,11 @@ impl Engine {
         }
 
         if !self.built {
+            return;
+        }
+
+        if self._mmap.is_some() && self.catalog_fingerprint.is_none() {
+            self.mark_schema_invalid("persisted graph has no catalog provenance; rebuild required");
             return;
         }
 
@@ -2141,7 +2171,7 @@ impl Engine {
     }
 
     pub fn reserve_edge_mutation_capacity(&mut self, additional: usize) -> GraphResult<()> {
-        let limit = crate::config::EDGE_BUFFER_SIZE.get() as usize;
+        let limit = crate::resource::configured_edge_buffer_size() as usize;
         if self.edge_buffer.len().saturating_add(additional) > limit {
             self.mark_read_only(ReadOnlyReason::EdgeBufferFull);
             return Err(GraphError::EdgeBufferFull {
@@ -2153,21 +2183,21 @@ impl Engine {
             .map_err(|_| GraphError::Oom {
                 used_mb: 0,
                 need_mb: 1,
-                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+                limit_mb: crate::resource::configured_memory_limit_mb().max(1) as u64,
             })?;
         self.edge_buffer_missing_relationship_identity_counts
             .try_reserve(additional)
             .map_err(|_| GraphError::Oom {
                 used_mb: 0,
                 need_mb: 1,
-                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+                limit_mb: crate::resource::configured_memory_limit_mb().max(1) as u64,
             })?;
         self.edge_buffer_missing_relationship_identity_edge_types
             .try_reserve(additional)
             .map_err(|_| GraphError::Oom {
                 used_mb: 0,
                 need_mb: 1,
-                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+                limit_mb: crate::resource::configured_memory_limit_mb().max(1) as u64,
             })?;
         Ok(())
     }
@@ -2750,7 +2780,7 @@ impl Engine {
         self.estimated_memory_used_bytes() as f64 / 1_048_576.0
     }
 
-    /// Return the conservative backend-private engine residency in bytes.
+    /// Return conservative logical engine residency, including shared base bytes.
     pub(crate) fn estimated_memory_used_bytes(&self) -> usize {
         self.estimated_heap_bytes()
             .saturating_add(self.estimated_mmap_bytes())
@@ -2758,12 +2788,13 @@ impl Engine {
     }
 
     pub fn memory_profile(&self, concurrent_backends: i32, memory_limit_mb: i32) -> MemoryProfile {
+        let shared_bytes = self
+            .base_snapshot
+            .as_ref()
+            .map_or(0, |base| base.shared_bytes());
         let private_bytes = self
             .estimated_heap_bytes()
-            .saturating_add(self.estimated_mmap_bytes());
-        // The public columns remain for 1.x compatibility. Artifact snapshots
-        // are backend-local now, so no mapped bytes are reported as shared.
-        let shared_bytes = 0;
+            .saturating_add(self.estimated_mmap_bytes().saturating_sub(shared_bytes));
         let backend_count = concurrent_backends.max(1) as usize;
         let instance_private_bytes = private_bytes.saturating_mul(backend_count);
         let instance_total_bytes = instance_private_bytes.saturating_add(shared_bytes);
@@ -4282,6 +4313,44 @@ mod tests {
             .unwrap();
         assert!(!results.iter().any(|r| r.node_id == "E"));
         assert_eq!(results.len(), 4); // A, B, C, D
+    }
+
+    #[test]
+    fn native_edge_mutations_preserve_buffer_limit_across_threads() {
+        let workers = (0..2)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let mut engine = Engine::new();
+                    engine
+                        .push_edge_mutation(EdgeMutation {
+                            source: 0,
+                            target: 1,
+                            type_id: crate::types::EdgeTypeId::test_v6(1),
+                            schema_reversed: false,
+                            relationship_id: None,
+                            kind: MutationKind::Insert,
+                        })
+                        .expect("native edge insertion");
+                    assert_eq!(engine.edge_buffer.len(), 1);
+                    assert_eq!(engine.edge_buffer_revision, 1);
+                    assert!(engine.needs_vacuum);
+                    assert!(engine.has_any_missing_relationship_identity());
+                    assert!(matches!(
+                        engine.reserve_edge_mutation_capacity(100_000),
+                        Err(GraphError::EdgeBufferFull { size: 1 })
+                    ));
+                    assert!(engine.is_read_only);
+                    assert_eq!(
+                        engine.read_only_reason,
+                        Some(ReadOnlyReason::EdgeBufferFull)
+                    );
+                    assert_eq!(engine.edge_buffer.len(), 1);
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("native edge mutation worker");
+        }
     }
 
     #[test]

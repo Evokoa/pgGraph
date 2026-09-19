@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.2.0-16a34a?style=flat-square" alt="Version 1.2.0">
+    <img src="https://img.shields.io/badge/version-1.2.1_candidate-16a34a?style=flat-square" alt="Version 1.2.1 candidate">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -72,9 +72,21 @@ path, and relationship queries directly against ordinary PostgreSQL tables.
 Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
+> [!NOTE]
+> **PostgreSQL 19 and SQL/PGQ:** PostgreSQL removed SQL/PGQ from the
+> PostgreSQL 19 release branch on September 7, 2026. See the official
+> [revert commit](https://github.com/postgres/postgres/commit/2b9e1aff4d3d933ae8ee377fef22c2af9c7797e8)
+> and [release-management discussion](https://www.postgresql.org/message-id/CAAKRu_bEtjWYWhYxSo0o_t3DaZYRQd5PkC0abA0g9Mp4%2BovH0w%40mail.gmail.com).
+> pgGraph supports PostgreSQL 14–18 and does not depend on native SQL/PGQ.
+> Future native integration has no committed PostgreSQL target version.
+
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
 
+
+This checkout prepares the pgGraph `1.2.1` stability candidate.
+It is not yet tagged or published. Package commands below refer to `1.2.0`.
+Candidate upgrades require rebuilding each graph; see [release notes](docs/release-notes.mdx).
 
 ## Why pgGraph?
 
@@ -324,18 +336,19 @@ existing schema and accelerate it with SQL functions like `graph.search()` and
 pgGraph to add bounded, high-speed graph traversal to an existing relational
 schema.
 
-#### vs. PostgreSQL 19 SQL/PGQ
+#### SQL/PGQ and PostgreSQL
 
-SQL:2023 and PostgreSQL 19 introduce `CREATE PROPERTY GRAPH`, `GRAPH_TABLE`,
-and standard graph pattern matching backed by PostgreSQL's planner and
-optimizer — the same engine that makes PostgreSQL's relational queries strong.
+PostgreSQL removed SQL/PGQ, including `CREATE PROPERTY GRAPH` and `GRAPH_TABLE`,
+from its PostgreSQL 19 release branch. The official
+[revert commit](https://github.com/postgres/postgres/commit/2b9e1aff4d3d933ae8ee377fef22c2af9c7797e8)
+links the upstream discussion. Native SQL/PGQ integration has no committed
+PostgreSQL target version in pgGraph's roadmap.
 
-pgGraph operates at a different layer. SQL/PGQ expresses graph patterns and lets
-the optimizer choose how to execute them. pgGraph precomputes CSR adjacency
-stores and rebuildable artifacts for workloads that repeatedly traverse the same
-topology with bounded depth, path limits, filters, tenants, and application
-pagination. The pgGraph 1.0 PostgreSQL 14–18 contract does not expose SQL/PGQ.
-PostgreSQL 19 integration is tracked separately on the public roadmap.
+pgGraph supports PostgreSQL 14–18 independently of native SQL/PGQ. It
+precomputes CSR adjacency stores and rebuildable artifacts for workloads that
+repeatedly traverse the same topology with bounded depth, path limits, filters,
+tenants, and application pagination. PostgreSQL 19 compatibility is tracked
+separately on the [public roadmap](docs/roadmap.mdx).
 
 ## Community
 

@@ -36,7 +36,7 @@ SELECT graph.add_table(
 SELECT graph.enable_sync();
 SQL
 
-violations="$(psql "$DBNAME" -qAt <<'SQL'
+violations="$(psql "$DBNAME" -X -v ON_ERROR_STOP=1 -qAt <<'SQL'
 WITH exported AS (
     SELECT p.oid,
            p.proname,
@@ -63,10 +63,13 @@ allowed_security_definer AS (
         ('_max_sync_log_id_for_current_role', ''),
         ('_max_sync_log_id_for_query_state', ''),
         ('_pending_sync_rows_for_current_role', ''),
+        ('_publish_generation_for_current_role', ''),
+        ('_published_generation_for_current_role', ''),
         ('_record_sync_watermark_for_current_role', ''),
         ('_record_projection_heartbeat_for_current_role', ''),
         ('_require_selected_graph_privilege_for_current_role', 'privilege text'),
         ('_selected_graph_id_for_current_role', ''),
+        ('_sync_retention_catalog_for_current_role', ''),
         ('add_edge', 'from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text'),
         ('add_edge_to_graph', 'graph_name text, from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text, graph_tenant text, graph_namespace text'),
         ('add_table', 'table_name oid, id_column text, columns text[], tenant_column text'),
@@ -96,6 +99,7 @@ allowed_security_definer AS (
         ('registered_tables', ''),
         ('registered_tables_for_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
         ('reset', ''),
+        ('reset', 'clear_registrations boolean'),
         ('run_due_jobs', 'max_jobs integer'),
         ('run_job', 'job_id text'),
         ('run_sync_policy', 'policy_id text'),
@@ -103,6 +107,7 @@ allowed_security_definer AS (
         ('set_current_graph', 'graph_name text, tenant text, namespace text'),
         ('set_graph_residency', 'graph_name text, residency text, tenant text, namespace text'),
         ('sync_policy_status', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
+        ('sync_retention', ''),
         ('unload_graph', 'graph_name text, tenant text, namespace text'),
         ('vacuum', ''),
         ('vacuum_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
@@ -170,7 +175,8 @@ violations AS (
     FROM exported
     WHERE proname IN (
         'add_table', 'add_edge', 'reset', 'build', 'vacuum', 'maintenance',
-        'apply_sync', 'enable_sync', 'disable_sync', 'enable', 'disable', 'gql'
+        'apply_sync', 'enable_sync', 'disable_sync', 'enable', 'disable', 'gql',
+        '_publish_generation_for_current_role'
     )
       AND provolatile <> 'v'
 )

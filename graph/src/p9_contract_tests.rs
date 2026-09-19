@@ -275,7 +275,8 @@ fn p9_open_type_diagnostics_and_packages_run_on_postgres_14_through_18() {
 
     let dockerfile = repo_source("graph/tests/heavy/Dockerfile.pg-matrix");
     for requirement in [
-        "set -euo pipefail; \\\n    export RUSTFLAGS=\"${RUSTFLAGS:-} -C link-arg=-Wl,--unresolved-symbols=ignore-all\"; \\\n    for pg in ${PG_VERSIONS}",
+        "set -euo pipefail; \\\n    for pg in ${PG_VERSIONS}",
+        "RUST_TEST_THREADS=1 cargo test --release --no-default-features",
         "for test_filter in ${PGRX_TEST_FILTER}",
         "cargo pgrx test --features development \"${feature}\" \"${test_filter}\"",
         "RUN_OPEN_TYPE_PACKAGE_SMOKE",
@@ -285,6 +286,11 @@ fn p9_open_type_diagnostics_and_packages_run_on_postgres_14_through_18() {
             "P9 Docker matrix wiring is missing `{requirement}`"
         );
     }
+
+    assert!(
+        !dockerfile.contains("--unresolved-symbols=ignore-all"),
+        "release tests must fail on unresolved linker symbols"
+    );
 
     let package_matrix = repo_source("graph/tests/heavy/package_install_matrix.sh");
     assert!(package_matrix.contains("RUN_OPEN_TYPE_PACKAGE_SMOKE"));

@@ -11,7 +11,8 @@ Usage:
 The wrapper derives PostgreSQL binaries from PG_CONFIG (or the selected
 PG_VERSION_FEATURE), creates a temporary trust-authenticated cluster and Unix
 socket, exports PGDATA/PGHOST/PGPORT/PGUSER/POSTGRES_CTL/POSTGRES_OPTS, and
-removes the cluster after the command exits. It is intended for destructive
+removes the cluster only when both the command and shutdown succeed. Failed
+runs retain the cluster for inspection. It is intended for destructive
 crash-recovery release gates; never point it at an existing data directory.
 USAGE
 }
@@ -66,7 +67,8 @@ with socket.socket() as sock:
 PY
 )"
 pguser="${PGUSER:-pggraph}"
-postgres_opts="-F -k $socket_dir -p $port"
+# Retain PostgreSQL's durable flush behavior during process-crash tests.
+postgres_opts="-c fsync=on -k $socket_dir -p $port"
 token="$(python3 - <<'PY'
 import uuid
 print(uuid.uuid4())
@@ -75,18 +77,31 @@ PY
 started=0
 
 cleanup() {
+  local code=$?
+  trap - EXIT INT TERM
   if (( started == 1 )); then
-    "$pg_bin/pg_ctl" -D "$pgdata" -m immediate -t 20 -w stop >/dev/null 2>&1 || true
+    if ! "$pg_bin/pg_ctl" -D "$pgdata" -m immediate -t 20 -w stop; then
+      printf 'PostgreSQL shutdown failed; retained disposable cluster at %s\n' "$workdir" >&2
+      if (( code == 0 )); then code=1; fi
+      exit "$code"
+    fi
   fi
-  rm -rf "$workdir"
+  if (( code != 0 )); then
+    printf 'Gate failed; retained disposable cluster at %s\n' "$workdir" >&2
+    exit "$code"
+  fi
+  rm -rf "$workdir" || { if (( code == 0 )); then code=1; fi; }
+  exit "$code"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 "$pg_bin/initdb" --auth=trust --username="$pguser" -D "$pgdata" >/dev/null
 sentinel="$pgdata/.pggraph-disposable-cluster"
 printf '%s\n' "$token" >"$sentinel"
-"$pg_bin/pg_ctl" -D "$pgdata" -o "$postgres_opts" -t 60 -w start >/dev/null
 started=1
+"$pg_bin/pg_ctl" -D "$pgdata" -o "$postgres_opts" -t 60 -w start >/dev/null
 
 unset PGDATABASE PGPASSWORD PGSERVICE PGSERVICEFILE PGTARGETSESSIONATTRS
 export PG_CONFIG="$pg_config"

@@ -482,6 +482,12 @@ write on their next statement; REPEATABLE READ and SERIALIZABLE readers retain
 their transaction snapshot. This source/graph agreement applies to node and
 relationship `CREATE`, `SET`, `REMOVE`, relationship `DELETE`, `DETACH DELETE`,
 and `MERGE`, including the values returned inside the writer transaction.
+Persisted projections with standalone relationship mappings require a rebuild
+after a source node is deleted (including `DETACH DELETE`) or its primary key
+changes. Durable ingestion rejects those pending identity changes with `PG018`
+rather than moving relationships to a potentially different node slot. Rebuild
+with `graph.build()` after committing the source changes before resuming graph
+reads. This restriction also applies when the source tables have foreign keys.
 Durable new-node identity and reload are supported;
 the persisted isolation matrix also covers repeated builds, with each build
 publishing a new base-only projection generation bound to the replacement base

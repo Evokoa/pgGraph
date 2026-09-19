@@ -1,0 +1,99 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Gather",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 1000.00,
+      "Total Cost": 224724.14,
+      "Plan Rows": 77125,
+      "Plan Width": 32,
+      "Actual Startup Time": 2.619,
+      "Actual Total Time": 801.468,
+      "Actual Rows": 100000,
+      "Actual Loops": 1,
+      "Workers Planned": 2,
+      "Workers Launched": 2,
+      "Single Copy": false,
+      "Shared Hit Blocks": 9420,
+      "Shared Read Blocks": 93673,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0,
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": true,
+          "Async Capable": false,
+          "Relation Name": "rls_bench_nodes",
+          "Alias": "src",
+          "Startup Cost": 0.00,
+          "Total Cost": 216011.64,
+          "Plan Rows": 32135,
+          "Plan Width": 32,
+          "Actual Startup Time": 2.331,
+          "Actual Total Time": 791.066,
+          "Actual Rows": 33333,
+          "Actual Loops": 3,
+          "Filter": "((current_setting('graph.rls_benchmark_policy'::text, true) = 'broad_allow'::text) OR ((current_setting('graph.rls_benchmark_policy'::text, true) = 'sparse_allow'::text) AND ((id % '100'::bigint) = 0)) OR ((current_setting('graph.rls_benchmark_policy'::text, true) = 'sparse_deny'::text) AND ((id % '100'::bigint) <> 0)))",
+          "Rows Removed by Filter": 3300000,
+          "Shared Hit Blocks": 9420,
+          "Shared Read Blocks": 93673,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "Workers": [
+          ]
+        }
+      ]
+    },
+    "Settings": {
+    },
+    "Planning": {
+      "Shared Hit Blocks": 91,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.198,
+    "Triggers": [
+    ],
+    "JIT": {
+      "Functions": 12,
+      "Options": {
+        "Inlining": false,
+        "Optimization": false,
+        "Expressions": true,
+        "Deforming": true
+      },
+      "Timing": {
+        "Generation": {
+          "Deform": 0.084,
+          "Total": 0.468
+        },
+        "Inlining": 0.000,
+        "Optimization": 0.317,
+        "Emission": 6.518,
+        "Total": 7.303
+      }
+    },
+    "Execution Time": 811.312
+  }
+]

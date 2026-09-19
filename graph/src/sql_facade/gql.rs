@@ -425,6 +425,7 @@ fn execute_statement_governed(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
+                    params,
                     &context,
                 )
             })?;
@@ -474,6 +475,16 @@ fn execute_statement_governed(
             crate::sql_visibility::record_selected_visibility_strategy(false);
             let context = coordinator.context(governor);
             check_node_scan_acl(&plan);
+            if plan.can_filter_scan_candidates() {
+                return execute_filtered_node_scan(
+                    &plan,
+                    tenant_scope,
+                    params,
+                    hydrate,
+                    &context,
+                    catalog_tables,
+                );
+            }
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_node_scan_in_context(
                     &engine.borrow(),
@@ -507,6 +518,7 @@ fn execute_statement_governed(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
+                    params,
                     &context,
                 )
             })?;
@@ -922,6 +934,69 @@ fn prepare_gql_eager_visibility(
     clippy::too_many_arguments,
     reason = "identity-bounded GQL execution keeps the plan, caller scope, catalog, and governor explicit"
 )]
+/// Filter ordinary node reads before retaining their bounded result set.
+fn execute_filtered_node_scan(
+    plan: &crate::query::physical_plan::PhysicalNodeScan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    use crate::query::{execute, value};
+
+    crate::sql_visibility::with_source_policy_guard(|| {
+        let governor = context.governor;
+        let workspace = ENGINE
+            .with(|engine| execute::reserve_filtered_node_scan(&engine.borrow(), plan, governor))?;
+        let mut cursor = execute::NodeScanCursor::new();
+        let mut matches = Vec::new();
+        let mut hydrated = value::HydratedRows::new();
+        let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
+        loop {
+            // No engine borrow spans SPI, which can invoke caller RLS policies.
+            let candidate =
+                ENGINE.with(|engine| cursor.next(&engine.borrow(), plan, tenant_scope, context))?;
+            let Some(row) = candidate else { break };
+            let key = (row.node.table_oid, row.node.node_id.clone());
+            if hydrated.contains_key(&key) {
+                continue;
+            }
+            let scoped = hydrator
+                .hydrate_scoped(row.node.table_oid, &row.node.node_id)?
+                .ok_or_else(|| safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "GQL could not hydrate node `{}` from table OID {}",
+                        row.node.node_id, row.node.table_oid
+                    ),
+                })?;
+            let crate::sql_hydration::ScopedHydratedNode {
+                value,
+                workspace: row_workspace,
+            } = scoped;
+            let mut candidate_hydrated = value::HydratedRows::new();
+            candidate_hydrated
+                .try_reserve(1)
+                .map_err(|_| execute::filtered_node_allocation_error(governor))?;
+            candidate_hydrated.insert(key, value.0);
+            if value::node_candidate_matches(&row, plan, &candidate_hydrated, params)? {
+                execute::push_filtered_node_row(&mut matches, row, plan, governor)?;
+                hydrated
+                    .try_reserve(1)
+                    .map_err(|_| execute::filtered_node_allocation_error(governor))?;
+                hydrated.extend(candidate_hydrated);
+                row_workspace.retain_until_governor_drop();
+            }
+            // Rejected JSON and its lease drop before scanning another candidate.
+        }
+        workspace.retain_until_governor_drop();
+        measure_gql_read_recheck(matches.len(), || {
+            ensure_gql_node_rows_visible(&matches, governor, catalog_tables)
+        })?;
+        value::project_node_rows_governed(matches, plan, &hydrated, params, hydrate, governor)
+    })
+}
+
 fn execute_identity_node_scan_lazy(
     plan: &crate::query::physical_plan::PhysicalNodeScan,
     tenant_scope: Option<&str>,
@@ -1453,12 +1528,20 @@ fn execute_detach_delete_node(
         });
     };
     let node_idx = ENGINE.with(|engine| {
+        let engine = engine.borrow();
         engine
-            .borrow()
             .resolve(plan.table_oid, &row.node.node_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.table_oid,
+                    &row.node.node_id,
+                    tenant_scope,
+                    engine.tenanted_table_oids.contains(&plan.table_oid),
+                )
+            })
             .ok_or_else(|| safety::GraphError::GqlExecution {
                 reason: format!(
-                    "GQL DETACH DELETE node `{}` is not in the built graph",
+                    "GQL DETACH DELETE node `{}` is not in the built graph or transaction delta",
                     row.node.node_id
                 ),
             })
@@ -1504,6 +1587,7 @@ fn execute_delete_edge(
             &engine.borrow(),
             &read_plan,
             tenant_scope,
+            params,
             context,
         )
     })?;
@@ -3126,13 +3210,23 @@ fn record_deleted_edge_delta(
         let engine = engine.borrow();
         let source = engine
             .resolve(plan.edge_source_table_oid, source_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.edge_source_table_oid, source_id, None, false,
+                )
+            })
             .ok_or_else(|| safety::GraphError::GqlExecution {
-                reason: format!("GQL DELETE source node `{source_id}` is not in the built graph"),
+                reason: format!("GQL DELETE source node `{source_id}` is not in the built graph or transaction delta"),
             })?;
         let target = engine
             .resolve(plan.edge_target_table_oid, target_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.edge_target_table_oid, target_id, None, false,
+                )
+            })
             .ok_or_else(|| safety::GraphError::GqlExecution {
-                reason: format!("GQL DELETE target node `{target_id}` is not in the built graph"),
+                reason: format!("GQL DELETE target node `{target_id}` is not in the built graph or transaction delta"),
             })?;
         let type_id = engine.edge_type_id(&plan.rel_type).ok_or_else(|| {
             safety::GraphError::GqlExecution {
@@ -3166,8 +3260,29 @@ fn record_deleted_edge_delta(
 fn record_detach_deleted_edge_delta(edge: &DeletedIncidentEdge) -> safety::GraphResult<()> {
     let Some((source, target, type_id)) = ENGINE.with(|engine| {
         let engine = engine.borrow();
-        let source = engine.resolve(edge.source_table_oid, &edge.source_id)?;
-        let target = engine.resolve(edge.target_table_oid, &edge.target_id)?;
+        // PostgreSQL has already authorized and deleted these incident rows.
+        // Resolve their coordinates without filtering out another endpoint's
+        // tenant, so every projected deleted edge receives its delta.
+        let source = engine
+            .resolve(edge.source_table_oid, &edge.source_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    edge.source_table_oid,
+                    &edge.source_id,
+                    None,
+                    false,
+                )
+            })?;
+        let target = engine
+            .resolve(edge.target_table_oid, &edge.target_id)
+            .or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    edge.target_table_oid,
+                    &edge.target_id,
+                    None,
+                    false,
+                )
+            })?;
         let type_id = engine.edge_type_id(&edge.rel_type)?;
         Some((source, target, type_id))
     }) else {
@@ -3175,7 +3290,9 @@ fn record_detach_deleted_edge_delta(edge: &DeletedIncidentEdge) -> safety::Graph
     };
     crate::projection::tx_delta::record_deleted_edge(source, target, type_id)?;
     if edge.bidirectional {
-        crate::projection::tx_delta::record_deleted_edge(target, source, type_id)?;
+        crate::projection::tx_delta::record_deleted_edge_with_identity(
+            target, source, type_id, true, None,
+        )?;
     }
     Ok(())
 }
@@ -4121,6 +4238,7 @@ fn hydrate_gql_rows_governed(
     if !needed {
         return Ok(hydrated);
     }
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
     for row in rows {
         for coordinate in std::iter::once(Some(&row.source))
             .chain(std::iter::once(row.target.as_ref()))
@@ -4131,7 +4249,7 @@ fn hydrate_gql_rows_governed(
             if hydrated.contains_key(&key) {
                 continue;
             }
-            let node = hydrate_required_node_governed(coordinate, governor, catalog_tables)?;
+            let node = hydrate_required_node_with_hydrator(coordinate, &mut hydrator)?;
             hydrated.insert(key, node);
         }
     }
@@ -4523,20 +4641,23 @@ where
         )
         .map_err(crate::safety::resource_limit_error)?;
 
-    acl::check_table_acl(edge_mapping.edge_table_oid)?;
-    let table_name =
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            regclass_text(edge_mapping.edge_table_oid)
-        }))?;
-    let source_key_predicate = relationship_source_key_predicate(edge_mapping);
+    let lookup = crate::sql_hydration::SourceKeyLookup::prepare(
+        edge_mapping.edge_table_oid,
+        &edge_mapping.source_key_columns,
+        "edge_row",
+        governor,
+    )?;
+    let table_name = &lookup.table_name;
+    let source_key_predicate = &lookup.key_expr;
+    let predicate = lookup.batch_predicate();
     let query = format!(
         "SELECT {source_key_predicate} AS graph_relationship_id
            FROM {table_name} edge_row
-          WHERE {source_key_predicate} = ANY($1::text[])
+          WHERE {predicate}
           LIMIT $2"
     );
     let args = vec![
-        source_keys.clone().into(),
+        lookup.batch_arg(&source_keys, governor)?,
         i64::try_from(source_keys.len()).unwrap_or(i64::MAX).into(),
     ];
     let mut visible = std::collections::HashSet::new();
@@ -4602,6 +4723,7 @@ fn hydrate_gql_node_rows_governed(
     if !needed {
         return Ok(hydrated);
     }
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
     for row in rows {
         if row.optional_null {
             continue;
@@ -4610,7 +4732,7 @@ fn hydrate_gql_node_rows_governed(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let node = hydrate_required_node_governed(&row.node, governor, catalog_tables)?;
+        let node = hydrate_required_node_with_hydrator(&row.node, &mut hydrator)?;
         hydrated.insert(key, node);
     }
     Ok(hydrated)
@@ -4645,6 +4767,7 @@ fn hydrate_gql_relationship_rows_governed(
     })?;
     let mut workspace =
         crate::sql_hydration::reserve_hydration_workspace(governor, rows.len(), key_bytes)?;
+    let mut lookup = None;
     for row in rows {
         check_query_hydrate_progress(governor, hydrated.len())?;
         let (Some(start), Some(end)) = (&row.rel_start, &row.rel_end) else {
@@ -4659,8 +4782,21 @@ fn hydrate_gql_relationship_rows_governed(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let relationship =
-            hydrate_required_relationship(edge_mapping, row.relationship_id, &mut workspace)?;
+        let lookup = match &mut lookup {
+            Some(lookup) => lookup,
+            empty @ None => empty.insert(crate::sql_hydration::SourceKeyLookup::prepare(
+                edge_mapping.edge_table_oid,
+                &edge_mapping.source_key_columns,
+                "edge_row",
+                governor,
+            )?),
+        };
+        let relationship = hydrate_required_relationship(
+            edge_mapping,
+            row.relationship_id,
+            &mut workspace,
+            lookup,
+        )?;
         hydrated.insert(key, relationship.0);
     }
     workspace.retain_until_governor_drop();
@@ -4686,21 +4822,19 @@ fn hydrate_required_relationship(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
     relationship_id: Option<crate::edge_store::RelationshipId>,
     workspace: &mut crate::resource::ResourceLease<'_>,
+    lookup: &crate::sql_hydration::SourceKeyLookup,
 ) -> safety::GraphResult<pgrx::JsonB> {
     let identity = relationship_source_identity_owned(edge_mapping, relationship_id, workspace)?;
-    let table_name =
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            regclass_text(edge_mapping.edge_table_oid)
-        }))?;
-    let source_key_predicate = relationship_source_key_predicate(edge_mapping);
+    let table_name = &lookup.table_name;
+    let predicate = lookup.scalar_predicate();
     let size_query = format!(
         "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(edge_row.*))::bigint,
                     pg_catalog.octet_length(pg_catalog.to_jsonb(edge_row.*)::text)::bigint
                FROM {table_name} edge_row
-              WHERE {source_key_predicate} = $1
+              WHERE {predicate}
               LIMIT 1"
     );
-    let size_args = vec![identity.source_key.as_str().into()];
+    let size_args = vec![lookup.scalar_arg(&identity.source_key)];
     let json_sizes =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             Spi::connect(|client| {
@@ -4743,9 +4877,9 @@ fn hydrate_required_relationship(
     let mut sql = format!(
         "SELECT to_jsonb(edge_row.*)
          FROM {table_name} edge_row
-         WHERE {source_key_predicate} = $1"
+         WHERE {predicate}"
     );
-    let args = vec![identity.source_key.as_str().into()];
+    let args = vec![lookup.scalar_arg(&identity.source_key)];
     sql.push_str(" LIMIT 1");
     crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
         Spi::connect(|client| {
@@ -4870,6 +5004,7 @@ fn clone_charged_relationship_identity(
     Ok(identity.to_owned())
 }
 
+#[cfg(test)]
 fn relationship_source_key_predicate(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
 ) -> String {
@@ -4908,19 +5043,23 @@ fn hydrate_required_node_governed(
     governor: &crate::resource::ResourceGovernor,
     catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
-    crate::sql_hydration::hydrate_node_governed_with_tables(
-        coordinate.table_oid,
-        &coordinate.node_id,
-        governor,
-        catalog_tables,
-    )?
-    .map(|json| json.0)
-    .ok_or_else(|| safety::GraphError::GqlExecution {
-        reason: format!(
-            "GQL could not hydrate node `{}` from table OID {}",
-            coordinate.node_id, coordinate.table_oid
-        ),
-    })
+    let mut hydrator = crate::sql_hydration::NodeHydrator::new(governor, catalog_tables);
+    hydrate_required_node_with_hydrator(coordinate, &mut hydrator)
+}
+
+fn hydrate_required_node_with_hydrator(
+    coordinate: &crate::query::execute::GqlNodeCoordinate,
+    hydrator: &mut crate::sql_hydration::NodeHydrator<'_>,
+) -> safety::GraphResult<serde_json::Value> {
+    hydrator
+        .hydrate(coordinate.table_oid, &coordinate.node_id)?
+        .map(|json| json.0)
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL could not hydrate node `{}` from table OID {}",
+                coordinate.node_id, coordinate.table_oid
+            ),
+        })
 }
 
 #[cfg(feature = "pg_test")]
@@ -5102,6 +5241,122 @@ fn test_recheck_delete_edge_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_relationship_delete_preserves_parallel_identity() {
+        use crate::projection::tx_delta;
+        for (source, target) in [(0, 3), (2, 1), (2, 3)] {
+            tx_delta::clear_for_test();
+            let mut engine = crate::engine::Engine::new();
+            for key in ["base-a", "base-b"] {
+                let index = engine.node_store.add_node(10, key.into());
+                engine.resolution_insert(10, key, index);
+            }
+            let type_id = engine.register_edge_type("friend").unwrap();
+            let previous = ENGINE.with(|cell| cell.replace(engine));
+            tx_delta::record_added_node_indexed(10, "new-a", None, 2).unwrap();
+            tx_delta::record_added_node_indexed(10, "new-b", None, 2).unwrap();
+            for identity in [1, 2] {
+                for (from, to, reversed) in [(source, target, false), (target, source, true)] {
+                    tx_delta::record_added_edge(
+                        from,
+                        tx_delta::DeltaEdge {
+                            target: to,
+                            type_id,
+                            schema_reversed: reversed,
+                            weight: None,
+                            relationship_id: Some(identity),
+                        },
+                    )
+                    .unwrap();
+                }
+            }
+            let plan = crate::query::physical_plan::PhysicalDeleteEdge {
+                source_var: "a".into(),
+                source_table_oid: 10,
+                source_label: "nodes".into(),
+                rel_type: "friend".into(),
+                rel_var: "r".into(),
+                direction: crate::query::logical_plan::BoundDirection::Out,
+                target_var: "b".into(),
+                target_table_oid: 10,
+                target_label: "nodes".into(),
+                edge_table_oid: 20,
+                edge_source_table_oid: 10,
+                edge_target_table_oid: 10,
+                edge_mapping_id: 1,
+                edge_source_key_columns: crate::builder::PrimaryKeySpec::from_columns(vec![
+                    "id".into()
+                ]),
+                source_column: "source".into(),
+                target_column: "target".into(),
+                bidirectional: true,
+                predicate: None,
+                returns: vec![],
+            };
+            let keys = ["base-a", "base-b", "new-a", "new-b"];
+            record_deleted_edge_delta(
+                &plan,
+                keys[usize::try_from(source).unwrap()],
+                keys[usize::try_from(target).unwrap()],
+                1,
+            )
+            .unwrap();
+            let (inserts, deletes) = tx_delta::edge_overlay(crate::types::TraversalDirection::Out);
+            assert_eq!(tx_delta::stats().added_edges, 2);
+            assert_eq!(inserts[&source], [(target, type_id, false, Some(2))]);
+            assert_eq!(inserts[&target], [(source, type_id, true, Some(2))]);
+            assert!(deletes.is_empty());
+            tx_delta::clear_for_test();
+            ENGINE.with(|cell| cell.replace(previous));
+        }
+    }
+
+    #[test]
+    fn detached_transaction_edges_cancel_both_overlay_orientations() {
+        use crate::projection::tx_delta;
+        tx_delta::clear_for_test();
+        let mut engine = crate::engine::Engine::new();
+        engine.node_store.add_node(10, "base-a".into());
+        engine.node_store.add_node(10, "base-b".into());
+        let type_id = engine.register_edge_type("friend").unwrap();
+        let previous = ENGINE.with(|cell| cell.replace(engine));
+        let source = tx_delta::record_added_node_indexed(10, "new-a", None, 2).unwrap();
+        let target = tx_delta::record_added_node_indexed(10, "new-b", None, 2).unwrap();
+        for (from, to, reversed) in [
+            (source, target, false),
+            (target, source, true),
+            (0, 1, false),
+        ] {
+            tx_delta::record_added_edge(
+                from,
+                tx_delta::DeltaEdge {
+                    target: to,
+                    type_id,
+                    schema_reversed: reversed,
+                    weight: None,
+                    relationship_id: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(tx_delta::stats().added_edges, 3);
+        record_detach_deleted_edge_delta(&DeletedIncidentEdge {
+            rel_type: "friend".into(),
+            source_table_oid: 10,
+            target_table_oid: 10,
+            source_id: "new-a".into(),
+            target_id: "new-b".into(),
+            bidirectional: true,
+        })
+        .unwrap();
+        let (inserts, _) = tx_delta::edge_overlay(crate::types::TraversalDirection::Out);
+        assert_eq!(tx_delta::stats().added_edges, 1);
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[&0], vec![(1, type_id, false, None)]);
+        tx_delta::clear_for_test();
+        ENGINE.with(|cell| cell.replace(previous));
+    }
 
     fn edge_mapping(mapping_id: u64) -> crate::query::catalog_snapshot::EdgeMappingInfo {
         crate::query::catalog_snapshot::EdgeMappingInfo {

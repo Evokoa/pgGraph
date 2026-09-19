@@ -286,8 +286,8 @@ impl<const N: usize> PartialEq<&[u8; N]> for EdgeTypeSlice<'_> {
 impl PartialEq<&[i32]> for EdgeTypeSlice<'_> {
     fn eq(&self, other: &&[i32]) -> bool {
         self.iter()
-            .map(EdgeTypeId::get)
-            .eq(other.iter().copied().map(|value| value as u32))
+            .map(|value| i64::from(value.get()))
+            .eq(other.iter().copied().map(i64::from))
     }
 }
 
@@ -1619,6 +1619,16 @@ mod tests {
         assert!(EdgeTypeSlice::One(&[u8::MAX]).contains_physical_sentinel());
         assert!(EdgeTypeSlice::Two(&[u16::MAX]).contains_physical_sentinel());
         assert!(EdgeTypeSlice::Four(&[u32::MAX]).contains_physical_sentinel());
+    }
+
+    #[test]
+    fn edge_type_slice_signed_comparison_rejects_negative_ids() {
+        assert_eq!(EdgeTypeSlice::One(&[0, 2]), &[0_i32, 2][..]);
+        assert_eq!(EdgeTypeSlice::Two(&[256]), &[256_i32][..]);
+        assert_eq!(EdgeTypeSlice::Four(&[65_536]), &[65_536_i32][..]);
+        assert_ne!(EdgeTypeSlice::Four(&[u32::MAX - 1]), &[-2_i32][..]);
+        assert_ne!(EdgeTypeSlice::One(&[2]), &[2_i32, 3][..]);
+        assert_ne!(EdgeTypeSlice::One(&[2, 3]), &[2_i32][..]);
     }
 
     #[test]

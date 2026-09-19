@@ -17,7 +17,7 @@ search composition, sync overlays, status reporting, and persistence.
   { name: 'edge_type_registry', type: 'Vec<String>', desc: 'edge label table; index 0 is reserved for untyped root edges' },
   { name: 'resolution_store', type: 'ResolutionStore', desc: 'builder, finalized bytes, or mmap-backed lookup backend' },
   { name: 'resolution_delta', type: 'ResolutionDeltaIndex', desc: 'indexed post-build inserts that cannot mutate finalized/mmap index' },
-  { name: '_mmap', type: 'Option<Arc<Mmap>>', desc: 'retains the backend-local immutable artifact snapshot' },
+  { name: '_mmap', type: 'Option<Arc<Mmap>>', desc: 'retains immutable artifact bytes, shared through sealed Linux memory when available' },
   { name: 'edge_buffer', type: 'Vec<EdgeMutation>', desc: 'post-build edge insert/delete overlay' },
   { name: 'projection_mode', type: 'ProjectionMode', desc: 'csr_readonly or mutable_overlay runtime mode' },
   { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' },

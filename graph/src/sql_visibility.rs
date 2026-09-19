@@ -164,6 +164,7 @@ impl Drop for BfsVisibilityResolutionDropProbe {
 /// Convert PostgreSQL's non-local ERROR transfer into an ordinary Rust unwind
 /// before returning to a caller that owns traversal state. This preserves the
 /// original PostgreSQL error while ensuring the caller's Rust frames run Drop.
+#[cfg(not(test))]
 pub(crate) fn postgres_error_as_rust_unwind<T>(
     operation: impl FnOnce() -> T + std::panic::UnwindSafe,
 ) -> T {
@@ -176,6 +177,16 @@ pub(crate) fn postgres_error_as_rust_unwind<T>(
         Ok(value) => value,
         Err(error) => std::panic::resume_unwind(error),
     }
+}
+
+/// Standalone unit tests have no PostgreSQL backend or non-local ERROR transfer.
+/// Backend builds, including SQL tests with the `pg_test` feature, use the
+/// PostgreSQL error boundary above.
+#[cfg(test)]
+pub(crate) fn postgres_error_as_rust_unwind<T>(
+    operation: impl FnOnce() -> T + std::panic::UnwindSafe,
+) -> T {
+    operation()
 }
 
 #[derive(Default)]
@@ -254,6 +265,17 @@ impl VisibilityResolutionGuard {
 /// the projection between candidate materialization and admission.
 pub(crate) fn ensure_graph_api_available() -> GraphResult<()> {
     VisibilityResolutionGuard::ensure_available()
+}
+
+/// Keep a resumable read's projection stable across source-policy callbacks.
+pub(crate) fn with_source_policy_guard<T>(f: impl FnOnce() -> GraphResult<T>) -> GraphResult<T> {
+    VisibilityResolutionGuard::ensure_available()?;
+    pgrx::pg_sys::PgTryBuilder::new(AssertUnwindSafe(|| {
+        let _guard = VisibilityResolutionGuard::activate();
+        f()
+    }))
+    .finally(VisibilityResolutionGuard::clear)
+    .execute()
 }
 
 #[cfg(test)]
@@ -457,26 +479,16 @@ pub(crate) fn prepare_eager_visibility(
                 scope.hide_node(node_idx);
             }
         }
-        for (index, identity) in engine.relationship_identities.iter().enumerate() {
-            if let Some(identity) = identity {
-                if active_mapping_ids.contains(&identity.mapping_id) {
-                    let relationship_id = u32::try_from(index).map_err(|_| {
-                        GraphError::Internal("relationship identity index exceeds u32".to_string())
-                    })?;
-                    scope.hide_relationship(relationship_id);
-                }
-            }
-        }
-        let base_identity_count = engine.relationship_identities.len();
-        crate::projection::tx_delta::for_each_relationship_identity(
-            base_identity_count,
+        visit_eager_relationship_identities(
+            &engine.relationship_identities,
+            governor,
             |relationship_id, identity| {
                 if active_mapping_ids.contains(&identity.mapping_id) {
                     scope.hide_relationship(relationship_id);
                 }
+                Ok(())
             },
-        );
-
+        )?;
         Ok::<_, GraphError>(scope)
     })?;
 
@@ -491,7 +503,7 @@ pub(crate) fn prepare_eager_visibility(
                 scan_visible_node_keys(table, governor)?;
             }
             for edge in active_edges {
-                scan_visible_relationship_keys(edge, identity_slots, governor)?;
+                scan_visible_relationship_keys(edge, governor)?;
             }
             VISIBILITY_BUILD_SLOT
                 .with(|slot| slot.borrow_mut().take())
@@ -2029,36 +2041,372 @@ fn scan_visible_node_keys(table: &RegisteredTable, governor: &ResourceGovernor) 
 
 fn scan_visible_relationship_keys(
     edge: &RegisteredEdge,
-    base_identity_count: usize,
     governor: &ResourceGovernor,
 ) -> GraphResult<()> {
     acl::check_table_acl(edge.from_table_oid)?;
     let table_name = sql_table_name_from_oid(edge.from_table_oid)?;
     let key_expr = primary_key_expr("src", &edge.source_key_columns);
-    scan_visible_keys(table_name.as_sql(), &key_expr, governor, |source_key| {
-        let relationship_id = ENGINE
-            .with(|engine| {
-                engine
-                    .borrow()
-                    .relationship_identities
-                    .find_id(edge.mapping_id, source_key)
-            })
-            .or_else(|| {
-                crate::projection::tx_delta::find_relationship_identity_id(
-                    base_identity_count,
-                    edge.mapping_id,
-                    source_key,
-                )
-            });
-        if let Some(relationship_id) = relationship_id {
-            VISIBILITY_BUILD_SLOT.with(|slot| {
-                if let Some(scope) = slot.borrow_mut().as_mut() {
-                    scope.reveal_relationship(relationship_id);
-                }
-            });
+    let lookup = ENGINE.with(|engine| {
+        EagerRelationshipLookup::build(
+            &engine.borrow().relationship_identities,
+            edge.mapping_id,
+            governor,
+        )
+    })?;
+    // The owned lookup and lease outlive this ERROR boundary, so SPI failure
+    // unwinds their Rust owner. No projection borrow is held across SPI.
+    postgres_error_as_rust_unwind(AssertUnwindSafe(|| {
+        scan_visible_keys(table_name.as_sql(), &key_expr, governor, |source_key| {
+            let relationship_id = lookup.ids.get(source_key).copied();
+            if let Some(relationship_id) = relationship_id {
+                VISIBILITY_BUILD_SLOT.with(|slot| {
+                    if let Some(scope) = slot.borrow_mut().as_mut() {
+                        scope.reveal_relationship(relationship_id);
+                    }
+                });
+            }
+            Ok(())
+        })
+    }))
+}
+
+/// Temporary reverse lookup for one eager PostgreSQL policy scan.
+/// Keys are copied only for the active mapping, including transaction-local
+/// identities after the base. Stable IDs and mapped storage remain unchanged.
+/// The table and its key allocations are released together.
+struct EagerRelationshipLookup<'a> {
+    ids: HashMap<String, crate::edge_store::RelationshipId>,
+    _lease: crate::resource::ResourceLease<'a>,
+}
+
+impl<'a> EagerRelationshipLookup<'a> {
+    fn build(
+        store: &crate::relationship_identity_store::RelationshipIdentityStore,
+        mapping_id: u64,
+        governor: &'a ResourceGovernor,
+    ) -> GraphResult<Self> {
+        let overflow =
+            || GraphError::Internal("eager relationship lookup estimate overflowed".into());
+        let mut entries = 0usize;
+        let mut key_bytes = 0usize;
+        visit_eager_relationship_identities(store, governor, |_, identity| {
+            if identity.mapping_id == mapping_id {
+                entries = entries.checked_add(1).ok_or_else(overflow)?;
+                // Include per-string allocation overhead as well as its bytes.
+                key_bytes = key_bytes
+                    .checked_add(identity.source_key.len())
+                    .and_then(|bytes| bytes.checked_add(32))
+                    .ok_or_else(overflow)?;
+            }
+            Ok(())
+        })?;
+        // std's SwissTable stores one control byte per bucket. Twice the next
+        // power of two covers spare buckets; fixed slack below covers the final
+        // control group and alignment, rather than charging padding per bucket.
+        let slots = entries
+            .checked_next_power_of_two()
+            .and_then(|slots| slots.checked_mul(2))
+            .map(|slots| slots.max(4))
+            .ok_or_else(overflow)?;
+        let entry_bytes = std::mem::size_of::<(String, crate::edge_store::RelationshipId)>() + 1;
+        let allocation_bytes = slots
+            .checked_mul(entry_bytes)
+            .and_then(|bytes| bytes.checked_add(key_bytes))
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+            .and_then(|bytes| bytes.checked_add(64))
+            .and_then(ByteCount::from_usize)
+            .ok_or_else(overflow)?;
+        let mut lease = governor
+            .reserve_memory(ResourcePhase::QueryVisibility, allocation_bytes)
+            .map_err(crate::safety::resource_limit_error)?;
+        let allocation_error = |_| GraphError::Oom {
+            used_mb: governor.memory_used().as_u64() / 1_048_576,
+            need_mb: allocation_bytes.as_u64().div_ceil(1_048_576),
+            limit_mb: governor.memory_limit().as_u64() / 1_048_576,
+        };
+        let mut ids = HashMap::new();
+        ids.try_reserve(entries).map_err(allocation_error)?;
+        // Account for allocator capacity beyond the preflight estimate, if any.
+        if ids.capacity() > slots {
+            let extra = ids
+                .capacity()
+                .checked_sub(slots)
+                .and_then(|extra| extra.checked_mul(entry_bytes))
+                .and_then(ByteCount::from_usize)
+                .ok_or_else(overflow)?;
+            lease
+                .try_grow(extra)
+                .map_err(crate::safety::resource_limit_error)?;
         }
-        Ok(())
+        visit_eager_relationship_identities(store, governor, |id, identity| {
+            if identity.mapping_id == mapping_id {
+                let mut key = String::new();
+                key.try_reserve_exact(identity.source_key.len())
+                    .map_err(allocation_error)?;
+                if key.capacity() > identity.source_key.len() {
+                    let extra = ByteCount::from_usize(key.capacity() - identity.source_key.len())
+                        .ok_or_else(overflow)?;
+                    lease
+                        .try_grow(extra)
+                        .map_err(crate::safety::resource_limit_error)?;
+                }
+                key.push_str(identity.source_key);
+                ids.entry(key).or_insert(id);
+            }
+            Ok(())
+        })?;
+        Ok(Self { ids, _lease: lease })
+    }
+}
+
+fn visit_eager_relationship_identities(
+    store: &crate::relationship_identity_store::RelationshipIdentityStore,
+    governor: &ResourceGovernor,
+    mut visit: impl FnMut(
+        crate::edge_store::RelationshipId,
+        crate::relationship_identity_store::RelationshipIdentityRef<'_>,
+    ) -> GraphResult<()>,
+) -> GraphResult<()> {
+    const CHECK_INTERVAL: usize = 256;
+    for (index, identity) in store.iter().enumerate() {
+        if index % CHECK_INTERVAL == 0 {
+            postgres_error_as_rust_unwind(AssertUnwindSafe(
+                crate::resource::check_postgres_interrupts,
+            ));
+            governor
+                .check_elapsed(ResourcePhase::QueryVisibility)
+                .map_err(crate::safety::resource_limit_error)?;
+            governor
+                .consume_work(
+                    ResourcePhase::QueryVisibility,
+                    WorkUnits::new(
+                        u64::try_from((store.len() - index).min(CHECK_INTERVAL)).map_err(|_| {
+                            GraphError::Internal("relationship lookup work overflowed".into())
+                        })?,
+                    ),
+                )
+                .map_err(crate::safety::resource_limit_error)?;
+        }
+        if let Some(identity) = identity {
+            let id = crate::edge_store::RelationshipId::try_from(index).map_err(|_| {
+                GraphError::Internal("relationship identity index exceeds u32".into())
+            })?;
+            visit(id, identity)?;
+        }
+    }
+    let mut tx_count = 0usize;
+    crate::projection::tx_delta::try_for_each_relationship_identity(store.len(), |id, identity| {
+        if tx_count.is_multiple_of(CHECK_INTERVAL) {
+            postgres_error_as_rust_unwind(AssertUnwindSafe(
+                crate::resource::check_postgres_interrupts,
+            ));
+            governor
+                .check_elapsed(ResourcePhase::QueryVisibility)
+                .map_err(crate::safety::resource_limit_error)?;
+        }
+        governor
+            .consume_work(ResourcePhase::QueryVisibility, WorkUnits::new(1))
+            .map_err(crate::safety::resource_limit_error)?;
+        tx_count += 1;
+        visit(id, identity.into())
     })
+}
+
+#[cfg(test)]
+mod eager_relationship_lookup_tests {
+    use super::*;
+    use crate::edge_store::RelationshipIdentity;
+    use crate::relationship_identity_store::{
+        MappedRelationshipIdentities, MappedRelationshipIdentityParts, RelationshipIdentityStore,
+    };
+    use crate::resource::{DiskBudget, ElapsedBudget, MemoryBudget, ResourceLimits, RowCount};
+
+    fn governor(memory: u64, work: u64) -> ResourceGovernor {
+        ResourceGovernor::new(ResourceLimits::new(
+            MemoryBudget::new(ByteCount::from_bytes(memory)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(work),
+            ElapsedBudget::new(std::time::Duration::from_secs(10)),
+        ))
+    }
+
+    fn owned(entries: &[(u64, &str)]) -> RelationshipIdentityStore {
+        RelationshipIdentityStore::try_from_owned(
+            std::iter::once(None)
+                .chain(entries.iter().map(|(mapping_id, key)| {
+                    Some(RelationshipIdentity {
+                        mapping_id: *mapping_id,
+                        source_key: (*key).into(),
+                    })
+                }))
+                .collect(),
+        )
+        .expect("valid owned identities")
+    }
+
+    fn mapped(entries: &[(u64, &str)]) -> MappedRelationshipIdentities {
+        let descriptors_len = (entries.len() + 1) * 16;
+        let mut bytes = vec![0; descriptors_len];
+        for (offset, (mapping_id, key)) in entries.iter().enumerate() {
+            bytes.extend_from_slice(key.as_bytes());
+            let start = (offset + 1) * 16;
+            let key_end = u64::try_from(bytes.len() - descriptors_len).unwrap();
+            bytes[start..start + 8].copy_from_slice(&mapping_id.to_le_bytes());
+            bytes[start + 8..start + 16].copy_from_slice(&key_end.to_le_bytes());
+        }
+        let end = bytes.len();
+        MappedRelationshipIdentities::new(MappedRelationshipIdentityParts {
+            mmap: crate::mapped_bytes::MappedBytes::from_test_bytes(bytes),
+            descriptors_range: 0..descriptors_len,
+            key_bytes_range: descriptors_len..end,
+        })
+        .expect("valid mapped identities")
+    }
+
+    #[test]
+    fn eager_lookup_preserves_ids_and_mapping_boundaries_for_all_storage_forms() {
+        let entries = [
+            (42, "z"),
+            (7, "z"),
+            (42, ""),
+            (42, "[\"snow雪\",\"quote\\\"\"]"),
+        ];
+        let stores = [
+            owned(&entries),
+            RelationshipIdentityStore::Mapped(mapped(&entries)),
+            RelationshipIdentityStore::Layered {
+                base: mapped(&entries[..2]),
+                overlay: entries[2..]
+                    .iter()
+                    .map(|(mapping_id, key)| RelationshipIdentity {
+                        mapping_id: *mapping_id,
+                        source_key: (*key).into(),
+                    })
+                    .collect(),
+            },
+        ];
+        for store in stores {
+            let before = (store.estimated_heap_bytes(), store.estimated_mmap_bytes());
+            let governor = governor(1_000_000, 1_000);
+            for mapping in [42, 7, 99] {
+                let lookup = EagerRelationshipLookup::build(&store, mapping, &governor).unwrap();
+                for key in ["z", "", entries[3].1, "missing"] {
+                    assert_eq!(lookup.ids.get(key).copied(), store.find_id(mapping, key));
+                }
+                assert!(
+                    governor.memory_used().as_u64()
+                        >= u64::try_from(
+                            lookup.ids.capacity() * std::mem::size_of::<(String, u32)>()
+                                + lookup.ids.keys().map(String::capacity).sum::<usize>()
+                        )
+                        .unwrap()
+                );
+            }
+            assert_eq!(governor.memory_used(), ByteCount::ZERO);
+            assert_eq!(
+                (store.estimated_heap_bytes(), store.estimated_mmap_bytes()),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn eager_lookup_resource_failures_release_temporary_memory() {
+        let store = owned(&[(7, "a"), (7, "b"), (8, "c")]);
+        for (memory, work, resource) in [
+            (0, 1_000, "memory bytes"),
+            (1_000_000, 0, "work units"),
+            (1_000_000, u64::try_from(store.len()).unwrap(), "work units"),
+        ] {
+            let governor = governor(memory, work);
+            let error = EagerRelationshipLookup::build(&store, 7, &governor)
+                .err()
+                .unwrap();
+            assert!(
+                matches!(error, GraphError::ResourceLimit { resource: actual, .. } if actual == resource)
+            );
+            assert_eq!(governor.memory_used(), ByteCount::ZERO);
+        }
+    }
+
+    #[test]
+    fn eager_lookup_counts_dictionary_work_and_releases_on_unwind() {
+        let store = owned(&[(7, "a"), (8, "a")]);
+        let governor = governor(1_000_000, 1_000);
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _lookup = EagerRelationshipLookup::build(&store, 7, &governor).unwrap();
+            assert_eq!(
+                governor.work_used().as_u64(),
+                2 * u64::try_from(store.len()).unwrap()
+            );
+            postgres_error_as_rust_unwind(|| panic!("injected scan unwind"));
+        }));
+        assert!(result.is_err());
+        assert_eq!(governor.memory_used(), ByteCount::ZERO);
+    }
+
+    #[test]
+    fn eager_lookup_handles_an_empty_dictionary() {
+        let store = RelationshipIdentityStore::default();
+        let governor = governor(1_000_000, 1_000);
+        let lookup = EagerRelationshipLookup::build(&store, 7, &governor).unwrap();
+        assert!(lookup.ids.is_empty());
+    }
+
+    #[test]
+    fn eager_lookup_includes_transaction_ids_and_prefers_the_first_base_identity() {
+        crate::projection::tx_delta::clear_for_test();
+        struct TxCleanup;
+        impl Drop for TxCleanup {
+            fn drop(&mut self) {
+                crate::projection::tx_delta::clear_for_test();
+            }
+        }
+        let _cleanup = TxCleanup;
+        let store = owned(&[(7, "base"), (8, "other")]);
+        for (mapping_id, key) in [(7, "base"), (7, "new"), (7, "new"), (8, "new")] {
+            crate::projection::tx_delta::record_relationship_identity(
+                store.len(),
+                RelationshipIdentity {
+                    mapping_id,
+                    source_key: key.into(),
+                },
+            )
+            .unwrap();
+        }
+        let governor = governor(1_000_000, 1_000);
+        let lookup = EagerRelationshipLookup::build(&store, 7, &governor).unwrap();
+        assert_eq!(lookup.ids.get("base"), Some(&1));
+        assert_eq!(lookup.ids.get("new"), Some(&4));
+        assert_eq!(lookup.ids.get("other"), None);
+        assert_eq!(lookup.ids.len(), 2);
+        assert_eq!(
+            governor.work_used().as_u64(),
+            2 * (u64::try_from(store.len()).unwrap() + 4)
+        );
+        drop(lookup);
+        crate::projection::tx_delta::clear_for_test();
+        let after_abort = EagerRelationshipLookup::build(&store, 7, &governor).unwrap();
+        assert_eq!(after_abort.ids.get("new"), None);
+        assert_eq!(after_abort.ids.get("base"), Some(&1));
+    }
+
+    #[test]
+    fn eager_lookup_releases_a_partially_populated_map_on_resource_failure() {
+        let keys = (0..300).map(|index| index.to_string()).collect::<Vec<_>>();
+        let entries = keys.iter().map(|key| (7, key.as_str())).collect::<Vec<_>>();
+        let store = owned(&entries);
+        let governor = governor(1_000_000, u64::try_from(store.len()).unwrap() + 256);
+        let error = EagerRelationshipLookup::build(&store, 7, &governor)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, GraphError::ResourceLimit { resource, .. } if resource == "work units")
+        );
+        assert!(governor.memory_peak().as_u64() > 0);
+        assert_eq!(governor.memory_used(), ByteCount::ZERO);
+    }
 }
 
 fn scan_visible_keys(
@@ -2333,6 +2681,28 @@ fn test_arm_missing_bfs_candidate_relationship_identity() -> bool {
 mod lazy_probe_tests {
     use super::*;
     use crate::builder::PrimaryKeySpec;
+
+    #[test]
+    fn postgres_error_boundary_without_backend_preserves_values_and_rust_unwind() {
+        let value = postgres_error_as_rust_unwind(|| String::from("owned result"));
+        assert_eq!(value, "owned result");
+
+        struct DropProbe<'a>(&'a Cell<bool>);
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let dropped = Cell::new(false);
+        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _owner = DropProbe(&dropped);
+            postgres_error_as_rust_unwind(|| panic!("ordinary Rust panic"));
+        }))
+        .expect_err("the wrapper must preserve Rust unwinding");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"ordinary Rust panic"));
+        assert!(dropped.get(), "the caller's owned state must be dropped");
+    }
 
     fn plan(columns: Vec<(&str, &str)>) -> NodeProbePlan {
         NodeProbePlan {

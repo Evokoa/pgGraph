@@ -24,10 +24,16 @@ BASELINE_BATCH_SIZE="${BASELINE_BATCH_SIZE:-10000}"
 SMALL_BATCH_SIZE="${SMALL_BATCH_SIZE:-1000}"
 REBUILD_ROUNDS="${REBUILD_ROUNDS:-2}"
 MAX_RSS_MB="${MAX_RSS_MB:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 RUN_BASELINE="${RUN_BASELINE:-1}"
 RUN_SMALL_BATCH="${RUN_SMALL_BATCH:-1}"
 RUN_REBUILD="${RUN_REBUILD:-1}"
 RUN_LOW_MEMORY_REBUILD="${RUN_LOW_MEMORY_REBUILD:-1}"
+
+if [[ -n "$OUTPUT_DIR" ]]; then
+  mkdir -p "$(dirname "$OUTPUT_DIR")"
+  mkdir "$OUTPUT_DIR"
+fi
 
 run_profile() {
   local profile="$1"
@@ -44,6 +50,7 @@ run_profile() {
     REBUILD_ROUNDS="$rebuild_rounds" \
     LOW_MEMORY_BUILD="$low_memory_build" \
     MAX_RSS_MB="$MAX_RSS_MB" \
+    OUTPUT_DIR="${OUTPUT_DIR:+$OUTPUT_DIR/$profile}" \
     "$SCRIPT_DIR/measure_build_rss.sh"
 }
 

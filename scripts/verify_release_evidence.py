@@ -173,7 +173,7 @@ def verify(manifest_path: Path, tier: str, commit: str, root: Path = ROOT) -> No
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
-    parser.add_argument("--tier", choices=("rc", "full-matrix"), required=True)
+    parser.add_argument("--tier", choices=("local-validation", "rc", "full-matrix"), required=True)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     manifest = find_manifest(args.evidence.resolve())

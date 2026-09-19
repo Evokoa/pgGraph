@@ -12,6 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
+| [v1.2.1 candidate](#v1-2-1-pggraph-stability-candidate) |
 | [v1.2.0](#v1-2-0-pggraph-open-vocabulary-relationship-types) |
 | [v1.1.0](#v1-1-0-pggraph-caller-scoped-rls-and-safe-replacement) |
 | [v1.0.0](#v1-0-0-pggraph-production-release) |
@@ -24,6 +25,98 @@ so these sections remain explicit.
 | [v0.1.2](#v0-1-2-alpha-hardening-follow-up) |
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
+
+## v1.2.1: pgGraph Stability Candidate
+
+pgGraph 1.2.1 is a stability candidate, not yet tagged or published. It fixes
+sync replay, registration, artifact isolation, and transactional graph
+publication. PostgreSQL 14 through 18 remain the supported target matrix.
+
+### Correctness And Security
+
+- `csr_readonly` replay accepts valid new relationship labels, including the
+  first label after an empty build. Rolled-back mutations and fixed-snapshot
+  replay state no longer leak into later backend queries.
+- Dotted JSONB property registration preserves INSERT, UPDATE, and mapped GQL
+  writes. Invalid filter columns and incompatible types report input errors
+  instead of internal-bug diagnostics.
+- Literal dotted source-column names, including a `label_column` named
+  `rel.type`, remain SQL identifiers in generated sync triggers.
+- Mandatory multi-pattern GQL joins apply a supported primary-key equality on
+  their first source before expansion. Unrelated graph rows no longer exhaust
+  that seeded expansion's cap. Residual predicates and the candidate cap remain
+  enforced; broader property scans retain their documented limits.
+- Ordinary node-only GQL reads evaluate property predicates before retaining
+  matches, allowing selective reads across more than 10,000 source rows.
+  The 10,000-match cap and resource budgets remain enforced. Optional matches,
+  joins, paths, DISTINCT, aggregates, ordering and pagination retain their
+  [documented candidate limits](./known-issues#gql-candidate-limits-depend-on-the-query-shape).
+- GQL `DETACH DELETE` resolves transaction-created nodes and removes their
+  incident transaction edges, including synthetic reverse edges. Recreating a
+  deleted key resolves its current live transaction identity, preserving later
+  GQL reads, relationship creation and rollback.
+- Mapped GQL relationship `DELETE` resolves transaction-created endpoints and
+  preserves parallel relationships, reverse orientations and rollback.
+- Artifacts are isolated by database and validated against registered catalog
+  identities. Default graphs cannot adopt another database's files.
+- Graph generations publish through PostgreSQL transactions. Transaction and
+  savepoint rollback, reset, and drop preserve the generation visible to older
+  snapshots. Sync capture respects commit ordering and releases its writer
+  fence before the surrounding query transaction ends.
+- Build and reload reject ambiguous or mismatched endpoint identities,
+  including foreign keys that target a different registered key. Correct the
+  mapping before rebuilding; invalid edges are not silently accepted.
+
+### Compatibility, Resources, And Operations
+
+Existing SQL result shapes remain unchanged. The additive administrator
+diagnostic `graph.sync_retention()` reports pruning blockers and retained
+volume. Shared sources, alternate artifact roots, and protected generation
+visibility conservatively prevent reclamation.
+
+Ingestion memory estimates account for dictionary capacity and key sizes,
+avoiding overly conservative `PG007` rejections as relationship identities
+accumulate. Maintenance limits still apply before publication.
+
+Ingestion reuses validated immutable bases. Supported Linux backends can share
+sealed base snapshots; unavailable sharing facilities and other platforms use
+private snapshots. Catalog metadata and overlays remain private, and logical
+query-memory budgets remain conservative. Reset and drop can retain derived
+files for rollback and old readers; see
+[artifact lifecycle](/user_guide/build-and-persistence#reset).
+
+### Upgrade, Rebuild, And Rollback
+
+Back up PostgreSQL before installing the matching 1.2.1 candidate package.
+Update each database and rebuild every registered graph, selecting named graphs
+before their build:
+
+```sql
+ALTER EXTENSION graph UPDATE TO '1.2.1';
+SELECT * FROM graph.build();
+SELECT extversion FROM pg_extension WHERE extname = 'graph';
+SELECT * FROM graph.status();
+```
+
+The rebuild is required for database-scoped roots, catalog provenance, and
+transactional generation authority. Earlier artifacts are not automatically
+adopted; source tables and registrations remain authoritative. The additive
+update preserves existing SQL object identities, owners, and explicit grants.
+Logical restores also require a rebuild. In-place binary downgrade is not
+supported: restore the pre-upgrade PostgreSQL backup with the matching older
+package, then rebuild its derived graph state.
+
+### Validation Status
+
+Regression coverage includes the four reported adapter issues, caller-scoped
+RLS, snapshot and rollback behavior, commit-order replay, endpoint validation,
+and Linux snapshot lifetime. The small RLS runner regression validates its
+acceptance gate and refuses existing fixture databases and roles. Retained
+exact-result, [1M](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md)
+and [10M selective-RLS evidence](../release/evidence/engine/2026-09-12-p5-selective-rls-10m/README.md)
+cover their stated profiles and resource envelopes. Candidate release gates
+remain in progress; these notes do not certify published packages or universal
+performance guarantees.
 
 ## v1.2.0: pgGraph Open-Vocabulary Relationship Types
 

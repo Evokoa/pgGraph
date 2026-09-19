@@ -69,6 +69,7 @@ mod sql_sync;
 mod sql_traversal;
 mod sql_visibility;
 mod sync;
+mod sync_capture;
 mod tenant_store;
 mod types;
 mod visibility;
@@ -109,7 +110,12 @@ use sql_traversal::validate_traverse_options;
 /// requiring a live PostgreSQL backend.
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz_support {
-    pub use crate::persistence::load_graph_file;
+    /// Decode a raw artifact without PostgreSQL publication selection or logging.
+    pub fn load_graph_file(
+        path: &std::path::Path,
+    ) -> crate::safety::GraphResult<crate::engine::Engine> {
+        crate::persistence::load_raw_graph_artifact_for_fuzzing(path)
+    }
 
     /// Parse sync JSON properties through the same lossy boundary used by SQL
     /// sync replay. Intended for fuzz targets.
@@ -920,56 +926,12 @@ thread_local! {
 
 /// Called when the extension is loaded into a backend.
 ///
-/// Registers GUC parameters and eagerly pre-warms the OS page cache for the
-/// `.pggraph` file (if it exists). This does NOT load the graph into the engine —
-/// that happens lazily on the first query via `maybe_auto_load()`. What this
-/// does is call `madvise(MADV_WILLNEED)` to tell the kernel to prefetch the
-/// file pages into RAM, so the subsequent mmap in `load_graph_file()` won't
-/// block on disk I/O.
-///
-/// For best results, add to `postgresql.conf`:
-/// ```text
-/// shared_preload_libraries = 'graph'
-/// ```
-/// This runs `_PG_init()` at postmaster startup, giving later backend
-/// processes a warm page-cache path when the kernel keeps those pages resident.
+/// Registers configuration and transaction callbacks. Artifact selection is
+/// deferred until a database transaction can read the publication catalog.
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     config::register_gucs();
     projection::tx_delta::register_transaction_callbacks();
-
-    // Eagerly pre-warm the OS page cache for the .pggraph file.
-    let Ok(path) = persistence::graph_file_path_for(graph_policy::DEFAULT_GRAPH_ID_TEXT) else {
-        return;
-    };
-    if let Ok(Some(base_path)) = persistence::current_base_artifact_path(&path) {
-        match std::fs::File::open(&base_path) {
-            Ok(file) => {
-                // SAFETY: The file descriptor stays alive for the duration of
-                // this temporary mapping, and the mapping is only used for
-                // read-only page-cache advice.
-                if let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) } {
-                    // madvise(MADV_WILLNEED) — ask the kernel to page in the
-                    // entire file. This is non-blocking: the kernel will
-                    // asynchronously read pages from disk into the page cache.
-                    #[cfg(unix)]
-                    {
-                        mmap.advise(memmap2::Advice::WillNeed).ok();
-                    }
-                    pgrx::log!(
-                        "graph: pre-warmed page cache for {} ({:.1} MB)",
-                        base_path.display(),
-                        mmap.len() as f64 / 1_048_576.0
-                    );
-                    // mmap is dropped here — that's fine. The kernel keeps the
-                    // pages in the page cache regardless.
-                }
-            }
-            Err(_) => {
-                // Not critical — auto-load will handle it later
-            }
-        }
-    }
 
     pgrx::log!("graph: extension loaded (v{})", env!("CARGO_PKG_VERSION"));
 }
@@ -1008,6 +970,8 @@ mod tests {
     include!("pg_tests/traversal_api.rs");
     include!("pg_tests/sync_config_build.rs");
     include!("pg_tests/registration_search.rs");
+    include!("pg_tests/integer_hydration.rs");
+    include!("pg_tests/integer_lookup.rs");
     include!("pg_tests/components_jobs.rs");
     include!("pg_tests/maintenance_admin.rs");
     include!("pg_tests/workflow_search_api.rs");

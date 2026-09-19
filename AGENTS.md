@@ -31,7 +31,7 @@ asks to bypass this rule.
 
 # Current Project Scope
 
-pgGraph is an Apache-2.0 PostgreSQL extension at version 1.2.0, written in Rust
+pgGraph is an Apache-2.0 PostgreSQL extension at version 1.2.1, written in Rust
 2021 with Rust 1.96 and pgrx 0.19.1. PostgreSQL 14 through 18 are supported,
 PostgreSQL 17 is the default development target, and the PostgreSQL 13 feature
 is legacy best-effort rather than release-gated.

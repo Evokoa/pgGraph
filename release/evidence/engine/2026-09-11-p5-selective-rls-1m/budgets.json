@@ -1,0 +1,14 @@
+{
+  "required_samples": 10,
+  "max_p95_total_ms": 60000,
+  "max_p95_visibility_ms": 60000,
+  "max_memory_peak_bytes": 1073741824,
+  "max_source_rows": 3000000,
+  "max_work_units": 10000000,
+  "automatic_identity_max_source_rows": 64,
+  "node_count": 1000000,
+  "composite_count": 1000000,
+  "warmups": 3,
+  "statement_timeout_ms": 600000,
+  "purpose": "Local resource qualification; not a public latency SLA"
+}

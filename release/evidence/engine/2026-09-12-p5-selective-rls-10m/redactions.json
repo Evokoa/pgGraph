@@ -1,0 +1,39 @@
+{
+  "files": [
+    {
+      "changes": [
+        {
+          "field": "invocation_cwd",
+          "original_value_sha256": "9155de4cea20515d0abdf9d7c4665e103162a5d7f04595aebbaf566b4bc383f6",
+          "replacement": "<redacted-local-working-directory>"
+        },
+        {
+          "field": "repository_root",
+          "original_value_sha256": "a979d7dca7093d397362bc851909fcf20af56cb152ea140df6dc0352442d701c",
+          "replacement": "<redacted-local-checkout>"
+        },
+        {
+          "field": "platform",
+          "original_value_sha256": "d3ba2e1793e97bb1c0063e3f7fa3820925b283237e22b35013699b7f9b22bc01",
+          "replacement": "Linux <redacted-hostname> 6.10.14-linuxkit #1 SMP Thu Aug 14 19:26:13 UTC 2025 aarch64 GNU/Linux"
+        }
+      ],
+      "file": "run-metadata.txt",
+      "original_sha256": "7527c8a0db7c3e979c6d581f451fd518bdc09fec46162d33e45723de85fd18b6",
+      "selected_sha256": "60892b5a040d74191e4945c4f907b32ede1757aa162e8cc6211de579d382236f"
+    },
+    {
+      "changes": [
+        {
+          "field": "fixture_runner.source_path",
+          "original_value_sha256": "140b9562f829c596b1541039a5a3fd662d1b1eb9b65010e5f2cde3f2da712f2b",
+          "replacement": "graph/tests/heavy/rls_large_table_baseline.sh"
+        }
+      ],
+      "file": "validation.json",
+      "original_sha256": "8b48503cfe52185dcd2b67aa8211c98de473545d5081bc2c710048afd217ded4",
+      "selected_sha256": "171d565863e22b83783c08c8ddb96af6f6392b26fd5072f1c56a25c577b12cd4"
+    }
+  ],
+  "other_files": "Measurement CSVs and query plans copied verbatim; fixture database and role names unchanged."
+}

@@ -1,0 +1,13 @@
+# Verified SHA-256 digests of the retained max-key.json query plans.
+# The generic rule interprets the filename suffix as an API-key assignment.
+# These exact historical findings do not exclude other lines or future commits.
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:13
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:15
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:17
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:19
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:21
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:23
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:25
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:27
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:29
+72fb097edea71f63d8b9adb0684ca927c72a0835:release/evidence/engine/2026-09-11-p5-selective-rls-1m/selection-provenance.json:generic-api-key:31

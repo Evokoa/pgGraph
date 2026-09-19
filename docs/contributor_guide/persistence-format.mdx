@@ -92,8 +92,8 @@ keeps the owned builder for backend-local use and differential testing.
 
 ```text
 open file
-copy into anonymous mapping
-make snapshot read-only
+acquire sealed Linux copy or private anonymous copy
+verify sealed backing or make private snapshot read-only
 validate header size
 validate magic
 validate version
@@ -158,13 +158,40 @@ from constructing a mapped store even if they bypass file parsing.
 
 ## Mmap Lifetime
 
-The loader copies the file into an anonymous mapping and makes it read-only
-before typed views are created. The private `MappedGraphArtifact` owns that
+The loader copies the file into immutable memory before typed views are
+created. Linux can share a sealed memfd copy through a bounded weak descriptor
+cache; unavailable cache facilities and other platforms use private anonymous
+read-only memory. The private `MappedGraphArtifact` owns that
 `Arc<Mmap>` and constructs node and edge stores only after the complete layout
 validates. Each mapped store retains an `Arc` clone; `Engine._mmap` retains
 another clone for resolution lookup and memory accounting. Safe store access
 therefore cannot outlive its mapping, and source-inode writes or truncation
 cannot change the snapshot.
+
+During ingestion, the serving engine, clean planning engine, and candidate
+validator can share this validated immutable base allocation. On Unix, reuse
+requires the same artifact path, device, inode, length, modification time, and
+change time. A changed source or an unavailable identity stamp takes the full
+copy-and-validation path. Manifest checksums, catalog provenance, cumulative
+dictionary prefixes, and generation layers are still checked for each load.
+Mutable serving overlays are never reused as planning state.
+
+The ingestion memory budget counts the shared base once and reserves separate
+space for private metadata and candidate layers. Identity publication borrows
+the validated planning store instead of first materializing another complete
+identity vector. These changes reduce temporary copies within one backend;
+metadata reconstruction and validation can still scan graph-sized data.
+
+Linux cache hints contain numeric process and descriptor identities and match
+the source path and identity stamp. Each reopened descriptor must have
+irreversible write, grow and shrink protection before it is mapped and fully
+validated. Successful adopters advertise their own retained descriptors, so
+creator exit does not invalidate their mappings. The kernel releases a sealed
+object after its final descriptor and mapping disappear. Stale or corrupt hints
+are cache misses; corrupt hinted content is retried against the source file.
+Concurrent cold misses may create separate sealed copies. No preload or durable
+cache authority is required, and PostgreSQL publication rows still select the
+snapshot-visible generation.
 
 ```text
 Engine

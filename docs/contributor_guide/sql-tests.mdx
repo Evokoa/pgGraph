@@ -64,7 +64,8 @@ clusters where the pgrx harness is not representative enough.
 | `gql_write_recheck_race.sh` | Public GQL mapped write predicate recheck proof: stale `SET`, `REMOVE`, and `DETACH DELETE` matches fail after PostgreSQL row locks |
 | `gql_merge_race.sh` | Public GQL `MERGE` concurrency proof: concurrent same-key statements converge on one PostgreSQL source row |
 | `gql_relationship_race.sh` | Public GQL relationship concurrency proof: deterministic same-identity `CREATE` and same-row `DELETE` winner/loser outcomes, SQLSTATEs, and clean transaction-local state |
-| `gql_isolation_matrix.sh` | All advertised mapped GQL writes under READ COMMITTED, REPEATABLE READ, and SERIALIZABLE, with writer/read-snapshot source/projection agreement; `PERSIST_ON_BUILD=on` selects durable new-node, reload, and repeated-build coverage |
+| `gql_isolation_matrix.sh` | All advertised mapped GQL writes under READ COMMITTED, REPEATABLE READ, and SERIALIZABLE, with writer/read-snapshot source/projection agreement; `PERSIST_ON_BUILD=on` defaults to durable new-node coverage, while `FULL_PROFILE=true` selects all mapped writes independently of persistence |
+| `cache_provenance.py` | Production-session resident-cache provenance, imported snapshots, sync-log commit-order gaps and aborted base changes; ordinary cases also run through the full nonpersisted isolation gate, while prepared-transaction coverage requires explicit `--prepared` |
 | `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash proof: uncommitted transaction overlays disappear after postmaster restart while the persisted base graph reloads |
 | `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |
@@ -122,3 +123,8 @@ behavioral coverage.
 | Transaction lifecycle, sync, crash recovery, backup/restore, package, Docker, upgrade, concurrency | Heavy SQL scripts |
 | PostgreSQL-major compatibility | `run_pg_matrix.sh` or `run_pg_matrix_docker.sh` |
 | Release-gate synthetic fixture | `synthetic_release.rs` for pgrx coverage, `synthetic_release_smoke.sh` for shell/client coverage |
+
+`generation_transactions.py --read-only-only` selects production-feature checks
+for read-only published-generation loads, diagnostic housekeeping, CSR replay,
+snapshot isolation, and generation retention. The default run includes these
+cases with the existing publication and pruning regressions.

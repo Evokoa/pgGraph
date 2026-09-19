@@ -16,11 +16,32 @@ WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-rss.XXXXXX")"
 PID_FILE="$WORKDIR/backend.pid"
 OUT_FILE="$WORKDIR/build.out"
 RSS_FILE="$WORKDIR/rss.tsv"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 cleanup() {
+  local code=$?
+  trap - EXIT
+  if [[ -n "$OUTPUT_DIR" ]]; then
+    for file in "$PID_FILE" "$OUT_FILE" "$RSS_FILE"; do
+      if [[ -f "$file" ]]; then
+        cp "$file" "$OUTPUT_DIR/" || code=1
+      fi
+    done
+  fi
   rm -rf "$WORKDIR"
+  exit "$code"
 }
 trap cleanup EXIT
+
+# Refuse an existing evidence directory before installing or creating a database.
+# This also prevents a failed rerun from retaining samples from an older run.
+if [[ -n "$OUTPUT_DIR" ]]; then
+  requested_output="$OUTPUT_DIR"
+  OUTPUT_DIR=""
+  mkdir -p "$(dirname "$requested_output")"
+  mkdir "$requested_output"
+  OUTPUT_DIR="$requested_output"
+fi
 
 if [[ -z "$PG_CONFIG" ]]; then
   if [[ -x "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" ]]; then
@@ -37,7 +58,7 @@ cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --n
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
-psql "$DBNAME" <<SQL
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<SQL
 CREATE EXTENSION IF NOT EXISTS graph;
 SELECT graph.reset();
 CREATE TABLE public.graph_rss_nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -51,7 +72,7 @@ SELECT i::text, 'node-' || i::text FROM generate_series(1, $NODE_COUNT) AS i;
 INSERT INTO public.graph_rss_edges (from_id, to_id)
 SELECT i::text, (i + 1)::text FROM generate_series(1, $EDGE_COUNT) AS i;
 SELECT graph.add_table('public.graph_rss_nodes'::regclass, 'id', ARRAY['name']);
-SELECT graph.add_edge('public.graph_rss_edges'::regclass, 'from_id', 'public.graph_rss_nodes'::regclass, 'id', 'linked', false);
+SELECT graph.add_edge('public.graph_rss_edges'::regclass, 'from_id', 'public.graph_rss_nodes'::regclass, 'to_id', 'linked', false);
 SQL
 
 (
@@ -72,7 +93,7 @@ SQL
         echo "SELECT * FROM graph.build();"
       done
     fi
-  } | psql "$DBNAME"
+  } | psql -X -v ON_ERROR_STOP=1 "$DBNAME"
 ) >"$OUT_FILE" 2>&1 &
 psql_pid=$!
 
@@ -96,6 +117,30 @@ while kill -0 "$psql_pid" >/dev/null 2>&1; do
   sleep 0.25
 done
 wait "$psql_pid" || { cat "$OUT_FILE"; exit 1; }
+if [[ -z "$backend_pid" || ! -s "$RSS_FILE" || "$peak_kb" -le 0 ]]; then
+  cat "$OUT_FILE"
+  echo "Build RSS measurement failed: no positive backend RSS sample was collected" >&2
+  exit 1
+fi
+
+# Verify the persisted result outside the sampled build backend.
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<SQL
+DO \$\$
+DECLARE
+    expected text[];
+    reached text[];
+BEGIN
+    SELECT array_agg(i::text ORDER BY i) INTO expected
+    FROM generate_series(1, LEAST($EDGE_COUNT + 1, 4)) AS i;
+    SELECT array_agg(node_id ORDER BY depth) INTO reached
+    FROM graph.traverse('public.graph_rss_nodes'::regclass, '1', 3,
+                        edge_types := ARRAY['linked'], direction := 'out');
+    IF reached IS DISTINCT FROM expected THEN
+        RAISE EXCEPTION 'persisted RSS fixture lost its source chain: expected %, got %', expected, reached;
+    END IF;
+END
+\$\$;
+SQL
 
 peak_mb=$(( (peak_kb + 1023) / 1024 ))
 graph_file_mb="$(psql "$DBNAME" -Atc "SELECT round(pg_database_size(current_database()) / 1048576.0, 1)")"

@@ -574,6 +574,16 @@ pub(crate) fn record_added_node_indexed(
     result
 }
 
+/// Inspect one transaction addition without copying its key or tenant payload.
+pub(crate) fn with_added_node_at<T>(position: usize, f: impl FnOnce(&AddedNode) -> T) -> Option<T> {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .and_then(|delta| delta.added_nodes.get(position).map(f))
+    })
+}
+
 /// Return transaction-local node primary keys for a table and tenant scope.
 pub(crate) fn added_node_keys(
     table_oid: u32,
@@ -589,6 +599,10 @@ pub(crate) fn added_node_keys(
                     .added_nodes
                     .iter()
                     .filter(|node| node.table_oid == table_oid)
+                    .filter(|node| {
+                        node.node_idx
+                            .is_none_or(|index| !delta.deleted_nodes.contains(&index))
+                    })
                     .filter(
                         |node| match (tenant, node.tenant.as_deref(), table_is_tenanted) {
                             (Some(active), Some(created), true) => active == created,
@@ -628,6 +642,7 @@ pub(crate) fn added_node_indexes(
                         },
                     )
                     .filter_map(|node| node.node_idx)
+                    .filter(|index| !delta.deleted_nodes.contains(index))
                     .collect()
             })
             .unwrap_or_default()
@@ -645,7 +660,7 @@ pub(crate) fn max_added_node_primary_key_bytes() -> usize {
     })
 }
 
-/// Resolve a transaction-local node to its temporary graph index.
+/// Resolve the newest live transaction-local node to its temporary graph index.
 pub(crate) fn resolve_added_node(
     table_oid: u32,
     primary_key: &str,
@@ -657,9 +672,13 @@ pub(crate) fn resolve_added_node(
             delta
                 .added_nodes
                 .iter()
+                .rev()
                 .find(|node| {
                     node.table_oid == table_oid
                         && node.primary_key == primary_key
+                        && node
+                            .node_idx
+                            .is_some_and(|index| !delta.deleted_nodes.contains(&index))
                         && match (tenant, node.tenant.as_deref(), table_is_tenanted) {
                             (Some(active), Some(created), true) => active == created,
                             (Some(_), None, true) => false,
@@ -903,26 +922,28 @@ pub(crate) fn with_relationship_identity<R>(
     })
 }
 
-/// Visit transaction-local relationship identities with their projection IDs.
-pub(crate) fn for_each_relationship_identity(
+/// Visit transaction-local identities while permitting a governed caller to
+/// stop on cancellation, resource exhaustion, or an invalid identity ID.
+pub(crate) fn try_for_each_relationship_identity(
     base_identity_count: usize,
-    mut visit: impl FnMut(RelationshipId, &RelationshipIdentity),
-) {
+    mut visit: impl FnMut(RelationshipId, &RelationshipIdentity) -> GraphResult<()>,
+) -> GraphResult<()> {
     TX_DELTA.with(|delta| {
         let borrowed = delta.borrow();
         let Some(delta) = borrowed.as_ref() else {
-            return;
+            return Ok(());
         };
         for (offset, identity) in delta.relationship_identities.iter().enumerate() {
-            let Some(index) = base_identity_count.checked_add(offset) else {
-                continue;
-            };
-            let Ok(id) = RelationshipId::try_from(index) else {
-                continue;
-            };
-            visit(id, identity);
+            let id = base_identity_count
+                .checked_add(offset)
+                .and_then(|index| RelationshipId::try_from(index).ok())
+                .ok_or_else(|| {
+                    GraphError::Internal("transaction relationship identity ID overflowed".into())
+                })?;
+            visit(id, identity)?;
         }
-    });
+        Ok(())
+    })
 }
 
 /// Return whether a transaction-local inserted edge of a requested type lacks
@@ -952,22 +973,6 @@ pub(crate) fn has_any_missing_relationship_identity() -> bool {
             .as_ref()
             .is_some_and(|delta| !delta.missing_relationship_identity_edge_types.is_empty())
     })
-}
-
-/// Resolve a transaction-local relationship source identity.
-pub(crate) fn find_relationship_identity_id(
-    base_identity_count: usize,
-    mapping_id: u64,
-    source_key: &str,
-) -> Option<RelationshipId> {
-    let mut found = None;
-    for_each_relationship_identity(base_identity_count, |id, identity| {
-        if found.is_none() && identity.mapping_id == mapping_id && identity.source_key == source_key
-        {
-            found = Some(id);
-        }
-    });
-    found
 }
 
 /// Record a transaction-local edge deletion.
@@ -1209,6 +1214,10 @@ fn ensure_transaction_callbacks_registered() {
     }
 }
 
+pub(crate) fn subtransaction_depth() -> u32 {
+    SUBTRANSACTION_DEPTH.with(Cell::get)
+}
+
 #[cfg(not(test))]
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn xact_callback(
@@ -1224,6 +1233,14 @@ unsafe extern "C-unwind" fn xact_callback(
             | XactEvent::XACT_EVENT_PARALLEL_COMMIT
             | XactEvent::XACT_EVENT_PARALLEL_ABORT
     ) {
+        let outcome = match event {
+            XactEvent::XACT_EVENT_PREPARE => crate::sql_sync::ReplayTransactionOutcome::Prepare,
+            XactEvent::XACT_EVENT_ABORT | XactEvent::XACT_EVENT_PARALLEL_ABORT => {
+                crate::sql_sync::ReplayTransactionOutcome::Abort
+            }
+            _ => crate::sql_sync::ReplayTransactionOutcome::Commit,
+        };
+        crate::sql_sync::finish_replay_transaction(outcome);
         clear_current_transaction_state();
     }
 }
@@ -1242,9 +1259,11 @@ unsafe extern "C-unwind" fn subxact_callback(
             SUBTRANSACTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
         }
         SubXactEvent::SUBXACT_EVENT_COMMIT_SUB => {
+            crate::sql_sync::finish_replay_subtransaction(subtransaction_depth(), false);
             finish_subtransaction(false);
         }
         SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
+            crate::sql_sync::finish_replay_subtransaction(subtransaction_depth(), true);
             finish_subtransaction(true);
         }
         SubXactEvent::SUBXACT_EVENT_PRE_COMMIT_SUB => {}
@@ -1371,6 +1390,78 @@ pub(crate) fn clear_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallible_relationship_visitor_stops_on_error_and_rejects_id_overflow() {
+        clear_for_test();
+        for key in ["first", "second"] {
+            record_relationship_identity(
+                10,
+                RelationshipIdentity {
+                    mapping_id: 7,
+                    source_key: key.into(),
+                },
+            )
+            .unwrap();
+        }
+        let mut visited = Vec::new();
+        let error = try_for_each_relationship_identity(10, |id, _| {
+            visited.push(id);
+            Err(GraphError::Internal("stop visitor".into()))
+        })
+        .unwrap_err();
+        assert!(matches!(error, GraphError::Internal(message) if message == "stop visitor"));
+        assert_eq!(visited, [10]);
+        visited.clear();
+        let error = try_for_each_relationship_identity(RelationshipId::MAX as usize, |id, _| {
+            visited.push(id);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, GraphError::Internal(message) if message.contains("ID overflowed"))
+        );
+        assert_eq!(visited, [RelationshipId::MAX]);
+        clear_for_test();
+    }
+
+    #[test]
+    fn fallible_relationship_visitor_observes_savepoint_rollback() {
+        clear_for_test();
+        record_relationship_identity(
+            10,
+            RelationshipIdentity {
+                mapping_id: 7,
+                source_key: "outer".into(),
+            },
+        )
+        .unwrap();
+        set_subtransaction_depth_for_test(1);
+        record_relationship_identity(
+            10,
+            RelationshipIdentity {
+                mapping_id: 7,
+                source_key: "inner".into(),
+            },
+        )
+        .unwrap();
+        let mut before = Vec::new();
+        try_for_each_relationship_identity(10, |id, identity| {
+            before.push((id, identity.source_key.clone()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(before, [(10, "outer".into()), (11, "inner".into())]);
+        finish_subtransaction(true);
+        let mut after = Vec::new();
+        try_for_each_relationship_identity(10, |id, identity| {
+            after.push((id, identity.source_key.clone()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(after, [(10, "outer".into())]);
+        clear_for_test();
+    }
 
     fn base_edge_type_registry() -> EdgeTypeRegistry {
         EdgeTypeRegistry::try_from_labels(vec![String::new(), "base".to_string()])

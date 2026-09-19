@@ -75,6 +75,175 @@ pub(crate) struct GqlNodeRow {
     pub(crate) optional_null: bool,
 }
 
+enum NodeScanPosition {
+    Base(u32),
+    Added(usize),
+    Done,
+}
+
+/// Resumable node candidates, without holding an engine borrow during hydration.
+pub(crate) struct NodeScanCursor {
+    position: NodeScanPosition,
+}
+
+impl NodeScanCursor {
+    pub(crate) fn new() -> Self {
+        Self {
+            position: NodeScanPosition::Base(0),
+        }
+    }
+
+    pub(crate) fn next(
+        &mut self,
+        engine: &Engine,
+        plan: &PhysicalNodeScan,
+        tenant: Option<&str>,
+        context: &QueryExecutionContext<'_>,
+    ) -> GraphResult<Option<GqlNodeRow>> {
+        if !engine.built {
+            return Err(GraphError::NotBuilt);
+        }
+        // Hydration also consumes shared work units. Its increments must not
+        // let this scan skip elapsed checks by changing the checkpoint residue.
+        crate::resource::check_postgres_interrupts();
+        context
+            .governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
+            .map_err(crate::safety::resource_limit_error)?;
+        loop {
+            let node = match self.position {
+                NodeScanPosition::Base(start) => {
+                    let idx = match engine.table_membership.get(&plan.table_oid) {
+                        Some(nodes) => nodes.range(start..).next(),
+                        None => (start < engine.node_store.node_count()).then_some(start),
+                    };
+                    let Some(idx) = idx.filter(|idx| *idx < engine.node_store.node_count()) else {
+                        self.position = NodeScanPosition::Added(0);
+                        continue;
+                    };
+                    self.position = idx
+                        .checked_add(1)
+                        .map_or(NodeScanPosition::Added(0), NodeScanPosition::Base);
+                    consume_query_work(
+                        context.governor,
+                        crate::resource::ResourcePhase::QueryCandidates,
+                    )?;
+                    if engine.node_store.table_oid(idx) != Some(plan.table_oid)
+                        || !node_active(engine, idx)
+                        || crate::projection::tx_delta::node_deleted(idx)
+                        || !tenant_allows_node(engine, idx, tenant)
+                        || !context.visibility.allows_node(idx)
+                    {
+                        continue;
+                    }
+                    coordinate(engine, idx)?
+                }
+                NodeScanPosition::Added(position) => {
+                    let candidate =
+                        crate::projection::tx_delta::with_added_node_at(position, |node| {
+                            let table_is_tenanted =
+                                engine.tenanted_table_oids.contains(&plan.table_oid);
+                            if node.table_oid != plan.table_oid
+                                || (table_is_tenanted
+                                    && tenant.is_some()
+                                    && tenant != node.tenant.as_deref())
+                                || node.node_idx.is_some_and(|idx| {
+                                    crate::projection::tx_delta::node_deleted(idx)
+                                        || !context.visibility.allows_node(idx)
+                                })
+                                || (node.node_idx.is_none()
+                                    && !context.visibility.is_unrestricted())
+                            {
+                                None
+                            } else {
+                                Some(GqlNodeCoordinate {
+                                    table_oid: node.table_oid,
+                                    node_id: node.primary_key.clone(),
+                                })
+                            }
+                        });
+                    let Some(node) = candidate else {
+                        self.position = NodeScanPosition::Done;
+                        return Ok(None);
+                    };
+                    self.position = position
+                        .checked_add(1)
+                        .map_or(NodeScanPosition::Done, NodeScanPosition::Added);
+                    consume_query_work(
+                        context.governor,
+                        crate::resource::ResourcePhase::QueryCandidates,
+                    )?;
+                    let Some(node) = node else { continue };
+                    node
+                }
+                NodeScanPosition::Done => return Ok(None),
+            };
+            return Ok(Some(GqlNodeRow {
+                node,
+                optional_null: false,
+            }));
+        }
+    }
+}
+
+/// Reserve retained coordinates, map keys, and one transient scan candidate.
+pub(crate) fn reserve_filtered_node_scan<'a>(
+    engine: &Engine,
+    plan: &PhysicalNodeScan,
+    governor: &'a crate::resource::ResourceGovernor,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let key_bytes = engine
+        .node_store
+        .max_primary_key_bytes()
+        .max(crate::projection::tx_delta::max_added_node_primary_key_bytes());
+    let bytes = key_bytes
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(1_024))
+        .and_then(|bytes| {
+            plan.execution_row_cap()
+                .checked_add(1)
+                .and_then(|rows| rows.checked_mul(bytes))
+        })
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("GQL filtered scan workspace overflowed".into()))?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryCandidates, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+/// Admit a filtered match, preserving the hard cap and allocation failures.
+pub(crate) fn push_filtered_node_row(
+    rows: &mut Vec<GqlNodeRow>,
+    row: GqlNodeRow,
+    plan: &PhysicalNodeScan,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<()> {
+    let cap = plan.execution_row_cap();
+    if rows.len() >= cap {
+        return Err(GraphError::GqlExecution {
+            reason: format!("GQL result row cap exceeded ({cap})"),
+        });
+    }
+    rows.try_reserve(1)
+        .map_err(|_| filtered_node_allocation_error(governor))?;
+    rows.push(row);
+    Ok(())
+}
+
+pub(crate) fn filtered_node_allocation_error(
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory bytes".into(),
+        phase: crate::resource::ResourcePhase::QueryCandidates
+            .as_str()
+            .into(),
+        used: governor.memory_used().as_u64(),
+        requested: 1_024,
+        limit: governor.memory_limit().as_u64(),
+    }
+}
+
 /// Execute a physical one-hop plan.
 ///
 /// # Errors
@@ -101,13 +270,20 @@ pub(crate) fn execute_governed(
 ) -> GraphResult<Vec<GqlRow>> {
     let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
     let context = coordinator.context(governor);
-    execute_in_context(engine, plan, tenant, &context)
+    execute_in_context(
+        engine,
+        plan,
+        tenant,
+        &crate::query::value::QueryParams::new(),
+        &context,
+    )
 }
 
 pub(crate) fn execute_in_context(
     engine: &Engine,
     plan: &PhysicalPlan,
     tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
     context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
@@ -130,7 +306,7 @@ pub(crate) fn execute_in_context(
     )?
     .retain_until_governor_drop();
     let neighbors = GqlNeighbors::new(engine, context.visibility)?;
-    for source_idx in source_nodes(engine, plan.source_table_oid, tenant, context.visibility) {
+    for source_idx in read_source_nodes(engine, plan, tenant, params, context.visibility)? {
         consume_query_work(
             context.governor,
             crate::resource::ResourcePhase::QueryCandidates,
@@ -378,13 +554,20 @@ pub(crate) fn execute_join_governed(
 ) -> GraphResult<Vec<GqlRow>> {
     let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
     let context = coordinator.context(governor);
-    execute_join_in_context(engine, plan, tenant, &context)
+    execute_join_in_context(
+        engine,
+        plan,
+        tenant,
+        &crate::query::value::QueryParams::new(),
+        &context,
+    )
 }
 
 pub(crate) fn execute_join_in_context(
     engine: &Engine,
     plan: &PhysicalJoinPlan,
     tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
     context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
@@ -408,10 +591,22 @@ pub(crate) fn execute_join_in_context(
     )?
     .retain_until_governor_drop();
     let neighbors = GqlNeighbors::new(engine, context.visibility)?;
-    let state = JoinState {
+    let mut state = JoinState {
         node_slots: vec![None; plan.node_slots.len()],
         relationships: vec![None; plan.patterns.len()],
     };
+    if let (Some(pattern), Some(lookup)) =
+        (plan.patterns.first(), plan.source_identity_lookup.as_ref())
+    {
+        let table_oid = plan.node_slots[pattern.source_slot].table_oid;
+        let Some(source_idx) = resolve_source_identity(engine, table_oid, lookup, params, tenant)?
+        else {
+            return Ok(rows);
+        };
+        // The regular expansion admission still checks visibility, tenant,
+        // activity and transaction deletion before using this source.
+        state.node_slots[pattern.source_slot] = Some(source_idx);
+    }
     expand_join_pattern(
         engine,
         &neighbors,
@@ -1227,6 +1422,51 @@ fn join_row_shape(plan: &PhysicalJoinPlan) -> GraphResult<(usize, usize)> {
         })
         .ok_or_else(|| GraphError::Internal("join coordinate shape overflowed".to_string()))?;
     Ok((coordinates, relationships))
+}
+
+fn read_source_nodes<'a>(
+    engine: &'a Engine,
+    plan: &PhysicalPlan,
+    tenant: Option<&'a str>,
+    params: &crate::query::value::QueryParams,
+    visibility: &'a VisibilityScope,
+) -> GraphResult<Box<dyn Iterator<Item = u32> + 'a>> {
+    let Some(lookup) = plan.source_identity_lookup.as_ref() else {
+        return Ok(Box::new(source_nodes(
+            engine,
+            plan.source_table_oid,
+            tenant,
+            visibility,
+        )));
+    };
+    // Identity is a physical seed constraint. Applying it only to expanded
+    // rows lets unrelated sources consume the cap or survive OPTIONAL as
+    // null-extended rows after their predicate rejects every target.
+    let source = resolve_source_identity(engine, plan.source_table_oid, lookup, params, tenant)?;
+    Ok(Box::new(source.into_iter().filter(move |&idx| {
+        visibility.allows_node(idx) && tenant_allows_node(engine, idx, tenant)
+    })))
+}
+
+fn resolve_source_identity(
+    engine: &Engine,
+    table_oid: u32,
+    lookup: &super::logical_plan::ValueExpr,
+    params: &crate::query::value::QueryParams,
+    tenant: Option<&str>,
+) -> GraphResult<Option<u32>> {
+    Ok(
+        crate::query::value::identity_lookup_text(lookup, params)?.and_then(|node_id| {
+            engine.resolve(table_oid, &node_id).or_else(|| {
+                crate::projection::tx_delta::resolve_added_node(
+                    table_oid,
+                    &node_id,
+                    tenant,
+                    engine.tenanted_table_oids.contains(&table_oid),
+                )
+            })
+        }),
+    )
 }
 
 fn source_nodes<'a>(
@@ -2298,7 +2538,14 @@ mod resource_accounting_tests {
             VisibilityScope::enforced_for_test(hidden_nodes, hidden_relationships, rls_edge_types);
         let context = QueryExecutionContext::new(&governor, &visibility);
 
-        let rows = execute_in_context(&engine, &plan, None, &context).expect("visible execution");
+        let rows = execute_in_context(
+            &engine,
+            &plan,
+            None,
+            &crate::query::value::QueryParams::new(),
+            &context,
+        )
+        .expect("visible execution");
         assert!(rows.is_empty());
     }
 }

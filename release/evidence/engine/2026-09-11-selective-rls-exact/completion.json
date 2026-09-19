@@ -1,0 +1,20 @@
+{
+  "cases": 48,
+  "databases": [
+    "pggraph_p4_503f1f5fe9_directed",
+    "pggraph_p4_503f1f5fe9_bidirectional",
+    "pggraph_p4_503f1f5fe9_overlay",
+    "pggraph_p4_503f1f5fe9_durable",
+    "pggraph_p4_503f1f5fe9_txedge",
+    "pggraph_p4_503f1f5fe9_txnode"
+  ],
+  "roles": [
+    "pggraph_p4_503f1f5fe9_directed_r",
+    "pggraph_p4_503f1f5fe9_bidirectional_r",
+    "pggraph_p4_503f1f5fe9_overlay_r",
+    "pggraph_p4_503f1f5fe9_durable_r",
+    "pggraph_p4_503f1f5fe9_txedge_r",
+    "pggraph_p4_503f1f5fe9_txnode_r"
+  ],
+  "status": "complete"
+}

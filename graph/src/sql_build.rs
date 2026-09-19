@@ -107,7 +107,8 @@ fn build_persisted_and_publish_engine(
             crate::projection::recovery::prepare_generation_specific_rebuilt_base_manifest(
                 request.publication_plan,
                 request.source_boundary.sync_watermark(),
-            )?;
+            )?
+            .with_catalog_fingerprint(request.source_boundary.catalog_fingerprint());
 
         report_progress(
             progress,
@@ -134,7 +135,7 @@ fn build_persisted_and_publish_engine(
             });
         }
         crate::runtime_state::inject_replacement_fault("validation")?;
-        loaded.set_catalog_fingerprint(request.source_boundary.catalog_fingerprint());
+        loaded.validate_catalog_fingerprint(Some(request.source_boundary.catalog_fingerprint()))?;
         loaded.record_applied_sync_id(request.source_boundary.sync_watermark());
         loaded.set_projection_mode(request.projection_mode);
         loaded.build_resource_pressure_events = direct.pressure_events;
@@ -313,11 +314,19 @@ fn remove_staged_base(path: &std::path::Path) {
         match std::fs::remove_file(&staged) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => pgrx::warning!(
-                "graph: could not remove failed staged artifact {}: {}",
-                staged.display(),
-                error
-            ),
+            Err(error) => {
+                #[cfg(not(test))]
+                pgrx::warning!(
+                    "graph: could not remove failed staged artifact {}: {}",
+                    staged.display(),
+                    error
+                );
+                #[cfg(test)]
+                eprintln!(
+                    "could not remove failed staged artifact {}: {error}",
+                    staged.display()
+                );
+            }
         }
     }
 }
@@ -516,6 +525,8 @@ fn execute_build_inner(
     let build_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     let memory_used_mb = new_engine.estimated_memory_used_mb();
 
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     ENGINE.with(|e| {
         *e.borrow_mut() = new_engine;
     });
@@ -677,6 +688,8 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
 
+    let stamp = crate::sql_sync::prepare_backend_replay()?;
+    crate::sql_sync::mark_backend_replay(stamp);
     ENGINE.with(|e| {
         *e.borrow_mut() = new_engine;
     });
@@ -696,7 +709,11 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
 
 pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
     let graph = selected_or_default_graph_metadata()?;
-    let acquired = Spi::get_one::<bool>(&build_lock_query_for_graph(&graph.graph_id))
+    acquire_build_lock_for_graph(&graph.graph_id)
+}
+
+pub(crate) fn acquire_build_lock_for_graph(graph_id: &str) -> safety::GraphResult<()> {
+    let acquired = Spi::get_one::<bool>(&build_lock_query_for_graph(graph_id))
         .map_err(|err| {
             safety::GraphError::Internal(format!(
                 "could not acquire build/vacuum advisory lock: {}",
@@ -714,6 +731,7 @@ pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
 /// Acquire writer ownership and reconcile any candidate left by an earlier
 /// PostgreSQL error before a new publisher reserves its generation.
 pub(crate) fn acquire_build_lock_for_replacement() -> safety::GraphResult<()> {
+    crate::projection::publication::require_publication_snapshot()?;
     acquire_build_lock()?;
     let graph = selected_or_default_graph_metadata()?;
     crate::sql_facade::reconcile_interrupted_replacement(&graph)
@@ -724,6 +742,7 @@ pub(crate) fn acquire_build_lock_for_replacement() -> safety::GraphResult<()> {
 /// Repair must still run when ordinary serving validation reports a corrupt or
 /// incompatible active artifact. Other reconciliation failures remain fatal.
 pub(crate) fn acquire_build_lock_for_repair() -> safety::GraphResult<()> {
+    crate::projection::publication::require_publication_snapshot()?;
     acquire_build_lock()?;
     let graph = selected_or_default_graph_metadata()?;
     match crate::sql_facade::reconcile_interrupted_replacement(&graph) {

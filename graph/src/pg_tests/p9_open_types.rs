@@ -98,6 +98,42 @@ fn open_type_255_traversal_paths_gql_and_cypher_filter_exactly() {
 }
 
 #[pg_test]
+fn readonly_sync_interns_first_and_subsequent_dynamic_labels() {
+    build_p9_open_type_query_fixture(0, false);
+    Spi::run(
+        "SET graph.sync_mode = 'trigger';
+         SELECT * FROM graph.build(mode := 'csr_readonly');
+         INSERT INTO public.graph_test_friendships_pgtest
+           (id, user_id, friend_id, rel_type) VALUES ('first', 'u1', 'u2', 'new-first')",
+    )
+    .expect("prepare empty dictionary replay failed");
+    assert_eq!(
+        Spi::get_one::<String>(
+            "SELECT edge_path::text FROM graph.traverse(
+               'graph_test_users_pgtest'::regclass, 'u1', 1) WHERE node_id = 'u2'"
+        ).expect("automatic replay must intern the first label"),
+        Some("[\"new-first\"]".into())
+    );
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest
+           (id, user_id, friend_id, rel_type) VALUES ('second', 'u2', 'u3', 'new-second');
+         SELECT * FROM graph.apply_sync()",
+    ).expect("explicit replay must extend a populated dictionary");
+    assert_eq!(
+        Spi::get_one::<String>(
+            "SELECT edge_path::text FROM graph.traverse(
+               'graph_test_users_pgtest'::regclass, 'u1', 2) WHERE node_id = 'u3'"
+        ).expect("read multi-label path failed"),
+        Some("[\"new-first\", \"new-second\"]".into())
+    );
+    let rejected = "INSERT INTO public.graph_test_friendships_pgtest
+        (id, user_id, friend_id, rel_type) VALUES ('too-long', 'u3', 'u1', repeat('x', 1025));
+        SELECT * FROM graph.apply_sync()";
+    assert_eq!(sqlstate_for_error(rejected).as_deref(), Some("54000"));
+    assert_eq!(sql_error_detail(rejected).as_deref(), Some("pgGraph diagnostic: PG004"));
+}
+
+#[pg_test]
 fn open_type_parallel_relationships_preserve_identity_and_exact_output() {
     build_p9_open_type_query_fixture(255, false);
     Spi::run(

@@ -8,6 +8,22 @@ SQLSTATEs, ACL/RLS role boundaries, crash recovery, backup/restore, package
 validation, Docker, pg_upgrade, memory evidence, playground query stability, or
 mixed concurrency.
 
+`shared_snapshot.py` checks Linux sealed-base sharing across live backends,
+creator exit, attempted descriptor truncation, and source truncation. Use
+`--container NAME` when PostgreSQL runs in Docker. With a development build,
+`--cancellation` also checks repeated copy/registry cancellation, descriptor
+cleanup, and subsequent shared access. It creates fresh databases and retains
+their fixture artifacts, including the deliberately truncated test source.
+
+`rls_large_table_gate_regression.sh` checks the shared RLS evidence acceptance
+SQL against complete samples and a deliberately missing sample. It creates a
+fresh database, refuses to replace an existing database, and removes its own
+database on exit. For a complete runner smoke check, use
+`RUN_PROFILE=p5_release NODE_COUNT=1000 COMPOSITE_COUNT=1000 SAMPLES=2 WARMUPS=0`
+with `rls_large_table_baseline.sh`, a fresh `DBNAME`, and an external `OUTPUT_DIR`.
+This checks runner mechanics, not release-scale performance. The baseline
+runner retains its database and role and refuses to replace either fixture.
+
 `gql_isolation_matrix.sh` is the two-session backend-local mapped-write
 visibility gate. It applies node and relationship `CREATE`, `SET`, `REMOVE`,
 relationship `DELETE`, `DETACH DELETE`, and `MERGE` under READ COMMITTED,

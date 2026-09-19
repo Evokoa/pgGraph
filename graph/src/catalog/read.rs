@@ -371,59 +371,101 @@ pub(crate) fn read_catalog_for_graph(
     Ok((tables, edges, filter_columns))
 }
 
-pub(crate) fn catalog_fingerprint(
+/// Version 1 catalog digest: XXH3-64 over tagged, length-prefixed fields.
+/// Integers and lengths use little-endian u64; text uses UTF-8 bytes.
+fn registration_fingerprint_v1(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
     filter_columns: &[builder::RegisteredFilterColumn],
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut table_rows = tables.to_vec();
-    table_rows.sort_by(|a, b| a.table_name.cmp(&b.table_name));
+    let mut hash = xxhash_rust::xxh3::Xxh3::new();
+    hash.update(b"pggraph-catalog-v1");
+    let mut table_rows = tables.iter().collect::<Vec<_>>();
+    table_rows.sort_by_key(|table| table.table_oid);
+    digest_number(&mut hash, table_rows.len() as u64);
     for table in table_rows {
-        table.table_oid.hash(&mut hasher);
-        table.table_name.hash(&mut hasher);
-        table.id_columns.hash(&mut hasher);
-        table.columns.hash(&mut hasher);
-        table.tenant_column.hash(&mut hasher);
+        digest_number(&mut hash, u64::from(table.table_oid));
+        digest_text(&mut hash, &table.table_name);
+        digest_columns(&mut hash, table.id_columns.columns());
+        digest_columns(&mut hash, table.columns.as_slice());
+        digest_optional_text(&mut hash, table.tenant_column.as_deref());
     }
-    let mut edge_rows = edges.to_vec();
-    edge_rows.sort_by(|a, b| {
-        a.from_table
-            .cmp(&b.from_table)
-            .then(a.from_column.cmp(&b.from_column))
-            .then(a.to_table.cmp(&b.to_table))
-            .then(a.to_column.cmp(&b.to_column))
-            .then(a.label.cmp(&b.label))
-    });
+    let mut edge_rows = edges.iter().collect::<Vec<_>>();
+    edge_rows.sort_by_key(|edge| edge.mapping_id);
+    digest_number(&mut hash, edge_rows.len() as u64);
     for edge in edge_rows {
-        edge.mapping_id.hash(&mut hasher);
-        edge.from_table_oid.hash(&mut hasher);
-        edge.from_table.hash(&mut hasher);
-        edge.from_column.hash(&mut hasher);
-        edge.source_key_columns.hash(&mut hasher);
-        edge.to_table.hash(&mut hasher);
-        edge.to_table_oid.hash(&mut hasher);
-        edge.to_column.hash(&mut hasher);
-        edge.label.hash(&mut hasher);
-        edge.bidirectional.hash(&mut hasher);
-        edge.weight_column.hash(&mut hasher);
-        edge.label_column.hash(&mut hasher);
+        digest_number(&mut hash, edge.mapping_id);
+        digest_number(&mut hash, u64::from(edge.from_table_oid));
+        digest_text(&mut hash, &edge.from_table);
+        digest_text(&mut hash, &edge.from_column);
+        digest_columns(&mut hash, edge.source_key_columns.columns());
+        digest_number(&mut hash, u64::from(edge.to_table_oid));
+        digest_text(&mut hash, &edge.to_table);
+        digest_text(&mut hash, &edge.to_column);
+        digest_text(&mut hash, &edge.label);
+        hash.update(&[u8::from(edge.bidirectional)]);
+        digest_optional_text(&mut hash, edge.weight_column.as_deref());
+        digest_optional_text(&mut hash, edge.label_column.as_deref());
     }
-    let mut filter_rows = filter_columns.to_vec();
-    filter_rows.sort_by(|a, b| {
-        a.table_name
-            .cmp(&b.table_name)
-            .then(a.column_name.cmp(&b.column_name))
-    });
+    let mut filter_rows = filter_columns.iter().collect::<Vec<_>>();
+    filter_rows.sort_by(|a, b| (a.table_oid, &a.column_name).cmp(&(b.table_oid, &b.column_name)));
+    digest_number(&mut hash, filter_rows.len() as u64);
     for filter in filter_rows {
-        filter.table_oid.hash(&mut hasher);
-        filter.table_name.hash(&mut hasher);
-        filter.column_name.hash(&mut hasher);
-        filter.column_type.hash(&mut hasher);
+        digest_number(&mut hash, u64::from(filter.table_oid));
+        digest_text(&mut hash, &filter.table_name);
+        digest_text(&mut hash, &filter.column_name);
+        digest_text(&mut hash, &filter.column_type);
     }
-    hasher.finish()
+    hash.digest()
+}
+
+/// Include inferred endpoint bindings so foreign-key replacement invalidates a build.
+pub(crate) fn catalog_fingerprint(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filters: &[builder::RegisteredFilterColumn],
+) -> safety::GraphResult<u64> {
+    let mut hash = xxhash_rust::xxh3::Xxh3::new();
+    hash.update(b"pggraph-bound-catalog-v1");
+    digest_number(
+        &mut hash,
+        registration_fingerprint_v1(tables, edges, filters),
+    );
+    let mut bindings = edges.iter().collect::<Vec<_>>();
+    bindings.sort_by_key(|edge| edge.mapping_id);
+    digest_number(&mut hash, bindings.len() as u64);
+    for edge in bindings {
+        digest_number(&mut hash, edge.mapping_id);
+        let source = builder::edge_source_node_oid(edge, tables)?;
+        hash.update(&[u8::from(source.is_some())]);
+        if let Some(oid) = source {
+            digest_number(&mut hash, u64::from(oid));
+        }
+    }
+    Ok(hash.digest())
+}
+
+fn digest_number(hash: &mut xxhash_rust::xxh3::Xxh3, value: u64) {
+    hash.update(&value.to_le_bytes());
+}
+
+fn digest_text(hash: &mut xxhash_rust::xxh3::Xxh3, value: &str) {
+    digest_number(hash, value.len() as u64);
+    hash.update(value.as_bytes());
+}
+
+fn digest_columns(hash: &mut xxhash_rust::xxh3::Xxh3, columns: &[String]) {
+    digest_number(hash, columns.len() as u64);
+    for column in columns {
+        digest_text(hash, column);
+    }
+}
+
+fn digest_optional_text(hash: &mut xxhash_rust::xxh3::Xxh3, value: Option<&str>) {
+    hash.update(&[u8::from(value.is_some())]);
+    if let Some(value) = value {
+        digest_text(hash, value);
+    }
 }
 
 pub(crate) fn current_catalog_state_from_rows(
@@ -431,7 +473,37 @@ pub(crate) fn current_catalog_state_from_rows(
     edges: &[builder::RegisteredEdge],
     filter_columns: &[builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<(u64, Option<String>)> {
-    let fingerprint = catalog_fingerprint(tables, edges, filter_columns);
+    let fingerprint = catalog_fingerprint(tables, edges, filter_columns)?;
     let drift_reason = registered_schema_drift_reason(tables, edges, filter_columns);
     Ok((fingerprint, drift_reason))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_fingerprint_encoding_v1_is_stable_and_unambiguous() {
+        let mut table = builder::RegisteredTable {
+            table_oid: 42,
+            table_name: "public.nodes".into(),
+            id_columns: vec!["id".into()].into(),
+            columns: vec!["ab".into(), "c".into()].into(),
+            tenant_column: None,
+        };
+        let original = registration_fingerprint_v1(&[table.clone()], &[], &[]);
+        assert_eq!(original, 10_817_585_336_816_200_419);
+        table.columns = vec!["a".into(), "bc".into()].into();
+        assert_ne!(
+            original,
+            registration_fingerprint_v1(&[table.clone()], &[], &[])
+        );
+        let mut other = table.clone();
+        other.table_oid = 43;
+        other.table_name = "public.other".into();
+        assert_eq!(
+            registration_fingerprint_v1(&[table.clone(), other.clone()], &[], &[]),
+            registration_fingerprint_v1(&[other, table], &[], &[])
+        );
+    }
 }

@@ -54,7 +54,7 @@ beside it in the crate tree.
 | `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
 | `catalog/validate.rs` | Source table, key, edge, and filter-column validation |
 | `catalog/write.rs` | Catalog inserts and updates for registered graph metadata |
-| `persistence.rs` | v6/v7 `.pggraph` loader, adaptive v7 writer, CRCs, 26-section validation, and mmap setup |
+| `persistence.rs` | v6/v7 `.pggraph` loader, adaptive v7 writer, CRCs, 26-section validation, and immutable mmap setup; `persistence/snapshot_cache.rs` owns sealed Linux copies and private fallback |
 | `tenant_store.rs` | Owned/mapped tenant dictionaries, dense tokens, and sparse membership removals |
 | `projection/` | Clean CSR and overlay-aware projection read helpers |
 | `bfs.rs` | BFS and DFS traversal hot loops |
@@ -62,7 +62,8 @@ beside it in the crate tree.
 | `connected_components.rs` | Union-find connected component analysis |
 | `discover.rs` | Schema/FK discovery |
 | `sync.rs` | Trigger SQL generation and sync table creation |
-| `sql_sync.rs` | Durable sync log reading and apply logic |
+| `sync_capture.rs` | Short writer fencing and explicit snapshot capture for replay |
+| `sql_sync.rs` | Durable sync log reading, apply logic, and resident-cache transaction provenance |
 | `sql_build.rs` | Build/vacuum orchestration and locks |
 | `sql_jobs.rs` | Durable background build/maintenance jobs and hosted job helpers |
 | `sql_search.rs` | Source-table search SQL and match verification |
@@ -71,6 +72,7 @@ beside it in the crate tree.
 | `sql_visibility.rs` | Sole PostgreSQL authority for policy preparation and governed eager source-key scans; it completes SPI work outside `ENGINE` borrows |
 | `sql_filters.rs` | Structured filter parsing, typed operator conversion, hydration filtering |
 | `sql_hydration.rs` | Source-row hydration |
+| `sql_hydration/source_key_lookup.rs` | Canonical source-key predicates and bound integer lookup parameters |
 | `sql_aggregation.rs` | Strict traversal specs, path count, and aggregates |
 | `quote.rs` | SQL identifier/literal quoting helpers |
 

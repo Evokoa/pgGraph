@@ -1,10 +1,11 @@
 # Memory Model
 
 The engine is designed around cache-friendly owned arrays during build and
-read-only mapped fixed-width arrays after persistence. PostgreSQL backends do
-not share Rust heap memory or mapped snapshots. After auto-load, each backend
-copies the artifact into an anonymous read-only mapping before typed views are
-created. Format v6 keeps both CSR directions, filter values and dictionaries,
+read-only mapped fixed-width arrays after persistence. PostgreSQL backends keep
+separate Rust heaps. On Linux, backends can share a kernel-sealed memory object
+containing a validated artifact copy. Other platforms and unavailable cache
+facilities use a private anonymous read-only copy. Format v6 keeps both CSR
+directions, filter values and dictionaries,
 and relationship identities in that mapping; mutable changes remain compact
 backend-local overlays.
 This mapping is for rebuildable graph artifacts only; PostgreSQL still owns
@@ -21,8 +22,9 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
     - `relationship_identities` -> mmap base plus suffix overlay
     - `_mmap handle`
   </SharedMemoryBackends>
-  <SharedMemoryTarget title="Backend-local snapshot">
-    - anonymous read-only mapped pages
+  <SharedMemoryTarget title="Immutable base snapshot">
+    - shared sealed pages on supported Linux systems
+    - private anonymous pages on fallback
   </SharedMemoryTarget>
   <SharedMemoryHeap title="Per-backend heap after load">
     - **FilterIndex deltas** — sparse post-load mutations
@@ -36,20 +38,21 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
 </SharedMemoryDiagram>
 
 <Callout type="info">
-The base graph is copied once into each loading backend's anonymous
-read-only mapping, not expanded into per-field heap collections. Node arrays,
+The base graph is copied into an immutable mapping instead of expanded into
+per-field heap collections. Node arrays,
 forward and inbound CSR arrays, relationship-ID sidecars, primary-key bytes,
 resolution bytes, filter values and dictionaries, and relationship identities
-view that mapping. Each backend still has a private virtual mapping; resident
-pages are accounted as private mapped/page-cache-backed bytes rather than
-described as shared extension memory.
+view that mapping. A Linux backend can reopen another backend's sealed
+descriptor and map the same physical pages. Concurrent cold misses can create
+separate sealed copies. Private fallback preserves the same typed-view safety.
 </Callout>
 
 ## Runtime Resource Governors
 
 Graph-owned transient allocations use a statement-local governor with typed
 byte, row, work, disk, and elapsed units. A query or maintenance governor first
-subtracts the selected engine's estimated backend-private residency from
+subtracts the selected engine's conservative logical residency, including
+shared base bytes, from
 `graph.memory_limit_mb`, then applies the narrower operation-specific workspace
 cap. Major vectors and maps reserve against the governor before growth.
 
@@ -189,12 +192,13 @@ nodes * (active bit + table_oid + average primary key)
 `graph.estimate()` and build preflight use a separate conservative estimate
 from PostgreSQL row estimates before allocating the engine.
 
-When the engine is loaded from a `.pggraph` file, the anonymous artifact
-snapshot and its resident page-cache-backed bytes are counted as
-backend-private mapped memory. Filter and relationship-identity deltas, the
-registry, and other overlays are additional backend-private heap allocations.
-The public shared-memory profile columns remain for 1.x compatibility and
-currently report zero.
+`graph.memory_profile()` reports sealed base bytes in the shared columns and
+private anonymous snapshots in the private columns. Its instance estimate
+assumes the supplied backends use one shared base; concurrent cold misses,
+different generations and separate roots can require additional copies. Filter
+and relationship-identity deltas, the registry, and other overlays remain private
+heap allocations. Runtime admission still charges the full logical base to each
+backend. Neither figure is a cluster-wide physical-memory cap.
 
 ## Mmap Materialization For Sync
 
@@ -211,8 +215,11 @@ maintenance rebuild.
 
 ## Mapped Layout Safety Boundary
 
-The loader copies the artifact into an anonymous mapping, makes it read-only,
-and validates the complete snapshot before creating mapped stores. A private
+The loader copies the artifact into private anonymous memory or a Linux memfd.
+For a memfd, it verifies irreversible write, shrink, grow and seal seals before
+mapping read-only. A cache hint never authorizes a typed view: reopened objects
+undergo the same complete artifact validation as fresh copies. The loader
+validates the complete snapshot before creating mapped stores. A private
 owning artifact retains that mapping in `Arc<Mmap>` and is the
 production construction boundary for node and edge views. Each view owns an
 `Arc` clone, so field order, engine replacement, or dropping the loader's local

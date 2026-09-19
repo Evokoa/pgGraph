@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::safety::{GraphError, GraphResult};
 
 /// Current JSON manifest format version.
-pub(crate) const MANIFEST_VERSION: u32 = 3;
+pub(crate) const MANIFEST_VERSION: u32 = 4;
 const LEGACY_MANIFEST_VERSION: u32 = 2;
 /// Validation state for a generation whose artifacts are ready to read.
 pub(crate) const VALIDATION_STATUS_VALID: &str = "valid";
@@ -96,6 +96,9 @@ pub(crate) struct ProjectionManifest {
     pub(crate) obsolete_files: Vec<ManifestFileRef>,
     /// Highest durable sync-log row represented by this generation.
     pub(crate) sync_watermark: i64,
+    /// Registration fingerprint captured by the source build boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) catalog_fingerprint: Option<u64>,
     /// Current validation status for the manifest and referenced files.
     pub(crate) validation_status: String,
     /// Manifest creation timestamp as Unix microseconds.
@@ -134,6 +137,7 @@ impl ProjectionManifest {
             base_chunks: Vec::new(),
             obsolete_files: Vec::new(),
             sync_watermark,
+            catalog_fingerprint: None,
             validation_status: VALIDATION_STATUS_VALID.to_string(),
             created_at_unix_micros,
             last_ingestion_unix_micros: None,
@@ -142,8 +146,9 @@ impl ProjectionManifest {
         }
     }
 
-    /// Carry forward persisted operation timestamps from the previous manifest.
-    pub(crate) fn inherit_operation_timestamps(&mut self, previous: &Self) {
+    /// Carry forward build provenance and operation timestamps from the previous manifest.
+    pub(crate) fn inherit_generation_metadata(&mut self, previous: &Self) {
+        self.catalog_fingerprint = previous.catalog_fingerprint;
         self.last_ingestion_unix_micros = previous.last_ingestion_unix_micros;
         self.last_compaction_unix_micros = previous.last_compaction_unix_micros;
         self.last_repair_unix_micros = previous.last_repair_unix_micros;
@@ -173,7 +178,7 @@ impl ProjectionManifest {
     /// fields are empty, watermarks are negative, or child references are
     /// incomplete.
     pub(crate) fn validate(&self) -> GraphResult<()> {
-        if !matches!(self.version, LEGACY_MANIFEST_VERSION | MANIFEST_VERSION) {
+        if !matches!(self.version, LEGACY_MANIFEST_VERSION | 3 | MANIFEST_VERSION) {
             return Err(GraphError::IncompatibleVersion(format!(
                 "projection manifest version {} is unsupported; expected {}",
                 self.version, MANIFEST_VERSION
@@ -697,11 +702,42 @@ impl ProjectionManifestStore {
     }
 
     pub(crate) fn current_generation_id(&self) -> GraphResult<Option<u64>> {
-        if let Some(pointer) = self.load_current_pointer()? {
-            return Ok(Some(pointer.generation_id));
+        #[cfg(not(test))]
+        {
+            let Some(published) = super::publication::current(&self.root)? else {
+                return Ok(None);
+            };
+            if manifest_checksum_for_path(&self.manifest_path(published.generation_id))?
+                != published.manifest_checksum
+            {
+                return Err(manifest_corrupt("published manifest checksum mismatch"));
+            }
+            Ok(Some(published.generation_id))
         }
-        self.latest_manifest_path()
-            .map(|latest| latest.map(|(generation_id, _)| generation_id))
+        #[cfg(test)]
+        {
+            if let Some(pointer) = self.load_current_pointer()? {
+                return Ok(Some(pointer.generation_id));
+            }
+            self.latest_manifest_path()
+                .map(|latest| latest.map(|(generation_id, _)| generation_id))
+        }
+    }
+
+    /// Inspect an explicitly authorized graph without changing graph selection.
+    pub(crate) fn published_metadata(
+        &self,
+        published: &super::publication::PublishedGeneration,
+    ) -> GraphResult<ProjectionManifest> {
+        let path = self.manifest_path(published.generation_id);
+        if manifest_checksum_for_path(&path)? != published.manifest_checksum {
+            return Err(manifest_corrupt("published manifest checksum mismatch"));
+        }
+        let manifest = self.load_manifest_file(&path)?;
+        if manifest.generation_id != published.generation_id {
+            return Err(manifest_corrupt("published manifest generation mismatch"));
+        }
+        Ok(manifest)
     }
 
     /// Read only the publication generation needed to recover damaged state.
@@ -712,27 +748,36 @@ impl ProjectionManifestStore {
     /// `projection_repair()` reach its corruption planner. Callers must not use
     /// this method to treat the referenced manifest as loadable.
     pub(crate) fn current_generation_id_for_recovery(&self) -> GraphResult<Option<u64>> {
-        let path = self.current_pointer_path();
-        let Some(raw) = read_bounded_optional_file(
-            &path,
-            MAX_CURRENT_POINTER_BYTES,
-            "read current pointer for recovery",
-        )?
-        else {
-            return self
-                .latest_manifest_path()
-                .map(|latest| latest.map(|(generation_id, _)| generation_id));
-        };
-        let pointer = serde_json::from_slice::<ProjectionCurrentPointer>(&raw).map_err(|err| {
-            manifest_corrupt(format!("current pointer recovery decoding failed: {err}"))
-        })?;
-        if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
-            return Err(manifest_corrupt(format!(
-                "current pointer is invalid: version={}, generation_id={}",
-                pointer.version, pointer.generation_id
-            )));
+        #[cfg(not(test))]
+        {
+            super::publication::current(&self.root)
+                .map(|published| published.map(|published| published.generation_id))
         }
-        Ok(Some(pointer.generation_id))
+        #[cfg(test)]
+        {
+            let path = self.current_pointer_path();
+            let Some(raw) = read_bounded_optional_file(
+                &path,
+                MAX_CURRENT_POINTER_BYTES,
+                "read current pointer for recovery",
+            )?
+            else {
+                return self
+                    .latest_manifest_path()
+                    .map(|latest| latest.map(|(generation_id, _)| generation_id));
+            };
+            let pointer =
+                serde_json::from_slice::<ProjectionCurrentPointer>(&raw).map_err(|err| {
+                    manifest_corrupt(format!("current pointer recovery decoding failed: {err}"))
+                })?;
+            if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
+                return Err(manifest_corrupt(format!(
+                    "current pointer is invalid: version={}, generation_id={}",
+                    pointer.version, pointer.generation_id
+                )));
+            }
+            Ok(Some(pointer.generation_id))
+        }
     }
 
     fn current_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
@@ -775,21 +820,32 @@ impl ProjectionManifestStore {
     }
 
     fn prepare_current_pointer(&self, expected_current: Option<u64>) -> GraphResult<()> {
-        let direct_current = self
-            .load_current_pointer()?
-            .map(|pointer| pointer.generation_id);
-        if direct_current.is_none() {
-            if let Some(generation_id) = expected_current {
-                self.write_current_pointer(generation_id)?;
+        #[cfg(not(test))]
+        {
+            if self.current_generation_id_for_recovery()? == expected_current {
+                Ok(())
+            } else {
+                Err(GraphError::BuildLocked)
             }
         }
-        let actual = self
-            .load_current_pointer()?
-            .map(|pointer| pointer.generation_id);
-        if actual == expected_current {
-            Ok(())
-        } else {
-            Err(GraphError::BuildLocked)
+        #[cfg(test)]
+        {
+            let direct_current = self
+                .load_current_pointer()?
+                .map(|pointer| pointer.generation_id);
+            if direct_current.is_none() {
+                if let Some(generation_id) = expected_current {
+                    self.write_current_pointer(generation_id)?;
+                }
+            }
+            let actual = self
+                .load_current_pointer()?
+                .map(|pointer| pointer.generation_id);
+            if actual == expected_current {
+                Ok(())
+            } else {
+                Err(GraphError::BuildLocked)
+            }
         }
     }
 
@@ -798,6 +854,9 @@ impl ProjectionManifestStore {
         generation_id: u64,
         expected_current: Option<u64>,
     ) -> GraphResult<()> {
+        #[cfg(not(test))]
+        let actual = self.current_generation_id_for_recovery()?;
+        #[cfg(test)]
         let actual = self
             .load_current_pointer()?
             .map(|pointer| pointer.generation_id);
@@ -915,7 +974,10 @@ impl ProjectionManifestStore {
         if publication.is_err() {
             let _ = fs::remove_file(&tmp_path);
         }
-        publication
+        publication?;
+        #[cfg(not(test))]
+        super::publication::publish(&self.root, generation_id, pointer.manifest_checksum)?;
+        Ok(())
     }
 
     fn latest_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
@@ -1202,6 +1264,12 @@ impl ProjectionGenerationHeartbeat {
 
 #[cfg(not(test))]
 pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
+    if super::publication::uses_fixed_snapshot() || super::publication::transaction_is_read_only() {
+        // The native snapshot horizon protects this generation. Updating a
+        // newer heartbeat row from an imported snapshot would serialize-fail.
+        // Read-only transactions cannot persist reader housekeeping either.
+        return Ok(());
+    }
     validate_status(&manifest.validation_status)?;
     let caller_oid = crate::catalog::current_role_oid()?;
     let result = with_pending_generation_heartbeat(
@@ -1668,6 +1736,10 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
 
 #[cfg(not(test))]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    if super::publication::transaction_is_read_only() {
+        // Readers already exclude expired rows without deleting them.
+        return Ok(());
+    }
     pgrx::Spi::get_one::<bool>("SELECT graph._expire_projection_heartbeats_for_current_role()")
         .map_err(|err| {
             GraphError::Internal(format!("projection heartbeat expiration failed: {err}"))
@@ -1720,6 +1792,26 @@ mod tests {
         assert_eq!(decoded, manifest);
         assert!(decoded.segments.is_empty());
         assert_eq!(decoded.validation_status, VALIDATION_STATUS_VALID);
+    }
+
+    #[test]
+    fn projection_manifest_preserves_catalog_provenance_and_legacy_absence() {
+        let mut original = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:abcd", 7, 0, 1);
+        original.catalog_fingerprint = Some(42);
+        let mut derived = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:abcd", 7, 3, 2);
+        derived.inherit_generation_metadata(&original);
+        let decoded = ProjectionManifest::from_json(&derived.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(decoded.catalog_fingerprint, Some(42));
+        assert_eq!(decoded.version, 4);
+        let mut legacy = original;
+        legacy.version = 3;
+        legacy.catalog_fingerprint = None;
+        let decoded = ProjectionManifest::from_json(&legacy.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(decoded.catalog_fingerprint, None);
+        assert!(
+            crate::engine::validate_catalog_provenance(decoded.catalog_fingerprint, Some(42))
+                .is_err()
+        );
     }
 
     #[test]

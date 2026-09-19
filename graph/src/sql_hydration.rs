@@ -1,9 +1,100 @@
 //! SQL hydration helpers for source rows returned by graph operations.
 
-use crate::catalog::{primary_key_expr, read_catalog, sql_table_name_from_oid};
+use crate::catalog::read_catalog;
 use crate::{acl, safety, types};
 use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
+
+mod source_key_lookup;
+pub(crate) use source_key_lookup::SourceKeyLookup;
+
+/// Reuses current source metadata only within one hydration operation.
+pub(crate) struct NodeHydrator<'a> {
+    governor: &'a crate::resource::ResourceGovernor,
+    tables: &'a [crate::builder::RegisteredTable],
+    lookups: HashMap<u32, SourceKeyLookup>,
+}
+
+/// A hydrated row whose memory reservation follows the value's lifetime.
+pub(crate) struct ScopedHydratedNode<'a> {
+    pub(crate) value: pgrx::JsonB,
+    pub(crate) workspace: crate::resource::ResourceLease<'a>,
+}
+
+impl ScopedHydratedNode<'_> {
+    fn retain(self) -> pgrx::JsonB {
+        self.workspace.retain_until_governor_drop();
+        self.value
+    }
+}
+
+impl<'a> NodeHydrator<'a> {
+    pub(crate) fn new(
+        governor: &'a crate::resource::ResourceGovernor,
+        tables: &'a [crate::builder::RegisteredTable],
+    ) -> Self {
+        Self {
+            governor,
+            tables,
+            lookups: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn hydrate(
+        &mut self,
+        table_oid: u32,
+        node_id: &str,
+    ) -> safety::GraphResult<Option<pgrx::JsonB>> {
+        Ok(self
+            .hydrate_scoped(table_oid, node_id)?
+            .map(ScopedHydratedNode::retain))
+    }
+
+    /// Hydrate a candidate without retaining rejected rows' memory charges.
+    pub(crate) fn hydrate_scoped(
+        &mut self,
+        table_oid: u32,
+        node_id: &str,
+    ) -> safety::GraphResult<Option<ScopedHydratedNode<'a>>> {
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            acl::check_table_acl(table_oid)
+        }))?;
+        if !self.lookups.contains_key(&table_oid) {
+            let table = self
+                .tables
+                .iter()
+                .find(|table| table.table_oid == table_oid)
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!(
+                        "cannot hydrate node from unregistered table OID {table_oid}"
+                    ))
+                })?;
+            let lookup =
+                SourceKeyLookup::prepare(table_oid, &table.id_columns, "src", self.governor)?;
+            self.lookups.try_reserve(1).map_err(|_| {
+                hydration_allocation_error(
+                    self.governor,
+                    std::mem::size_of::<(u32, SourceKeyLookup)>(),
+                )
+            })?;
+            self.lookups.insert(table_oid, lookup);
+        }
+        hydrate_node_with_lookup(node_id, self.governor, &self.lookups[&table_oid])
+    }
+}
+
+fn hydration_allocation_error(
+    governor: &crate::resource::ResourceGovernor,
+    requested_bytes: usize,
+) -> safety::GraphError {
+    safety::GraphError::ResourceLimit {
+        resource: "memory bytes".into(),
+        phase: crate::resource::ResourcePhase::QueryHydrate.as_str().into(),
+        used: governor.memory_used().as_u64(),
+        requested: u64::try_from(requested_bytes).unwrap_or(u64::MAX),
+        limit: governor.memory_limit().as_u64(),
+    }
+}
 
 #[cfg(feature = "development")]
 thread_local! {
@@ -32,6 +123,45 @@ fn inject_hydration_cancellation() {}
 fn test_arm_hydration_cancel() -> bool {
     HYDRATION_CANCEL_BEFORE_SPI.with(|armed| armed.set(true));
     true
+}
+
+/// Deterministic barrier between source metadata preparation and source reads.
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_hydrate_node_after_lookup")]
+fn test_hydrate_node_after_lookup(
+    table_oid: pgrx::pg_sys::Oid,
+    node_id: &str,
+    barrier_key: i64,
+) -> Option<pgrx::JsonB> {
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        acl::check_table_acl(table_oid.to_u32())?;
+        let governor = hydration_governor()?;
+        let (tables, _, _) = read_catalog()?;
+        let table = tables
+            .iter()
+            .find(|table| table.table_oid == table_oid.to_u32())
+            .ok_or_else(|| {
+                safety::GraphError::Internal("unregistered source lookup table".into())
+            })?;
+        let lookup =
+            SourceKeyLookup::prepare(table.table_oid, &table.id_columns, "src", &governor)?;
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+                    None,
+                    &[barrier_key.into()],
+                )
+                .map(|_| ())
+        })
+        .map_err(|error| {
+            safety::GraphError::Internal(format!("source lookup barrier failed: {error}"))
+        })?;
+        let hydrated = hydrate_node_with_lookup(node_id, &governor, &lookup)?;
+        let retained = hydrated.map(ScopedHydratedNode::retain);
+        Ok::<_, safety::GraphError>(retained)
+    }))
+    .unwrap_or_else(|error| error.report())
 }
 
 // PostgreSQL's binary JSONB stores at least one four-byte entry per scalar or
@@ -101,38 +231,24 @@ pub(crate) fn hydrate_node_governed_with_tables(
     governor: &crate::resource::ResourceGovernor,
     tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Option<pgrx::JsonB>> {
-    let mut workspace = reserve_hydration_workspace(governor, 1, node_id.len())?;
-    let table = tables
-        .iter()
-        .find_map(|table| {
-            Ok::<u32, crate::safety::GraphError>(table.table_oid)
-                .ok()
-                .filter(|oid| *oid == table_oid)
-                .map(|_| table)
-        })
-        .ok_or_else(|| {
-            safety::GraphError::Internal(format!(
-                "cannot hydrate node from unregistered table OID {}",
-                table_oid
-            ))
-        })?;
+    NodeHydrator::new(governor, tables).hydrate(table_oid, node_id)
+}
 
-    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-        acl::check_table_acl(table_oid)
-    }))?;
-    let table_name =
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            sql_table_name_from_oid(table.table_oid)
-        }))?;
-    let pk_expr = primary_key_expr("src", &table.id_columns);
+fn hydrate_node_with_lookup<'a>(
+    node_id: &str,
+    governor: &'a crate::resource::ResourceGovernor,
+    lookup: &SourceKeyLookup,
+) -> safety::GraphResult<Option<ScopedHydratedNode<'a>>> {
+    let mut workspace = reserve_hydration_workspace(governor, 1, node_id.len())?;
+    let table_name = &lookup.table_name;
+    let predicate = lookup.scalar_predicate();
     let size_query = format!(
         "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(src.*))::bigint,
                     pg_catalog.octet_length(pg_catalog.to_jsonb(src.*)::text)::bigint
-               FROM {} src WHERE {} = $1 LIMIT 1",
-        table_name.as_sql(),
-        pk_expr
+               FROM {} src WHERE {} LIMIT 1",
+        table_name, predicate
     );
-    let size_args = vec![node_id.into()];
+    let size_args = vec![lookup.scalar_arg(node_id)];
     let json_sizes =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             Spi::connect(|client| {
@@ -170,11 +286,10 @@ pub(crate) fn hydrate_node_governed_with_tables(
         u64::try_from(text_bytes.max(0)).unwrap_or(0),
     )?;
     let hydrate_query = format!(
-        "SELECT to_jsonb(src.*) FROM {} src WHERE {} = $1 LIMIT 1",
-        table_name.as_sql(),
-        pk_expr
+        "SELECT to_jsonb(src.*) FROM {} src WHERE {} LIMIT 1",
+        table_name, predicate
     );
-    let hydrate_args = vec![node_id.into()];
+    let hydrate_args = vec![lookup.scalar_arg(node_id)];
     let hydrated =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             Spi::connect(|client| {
@@ -183,8 +298,7 @@ pub(crate) fn hydrate_node_governed_with_tables(
                     .map_err(|e| {
                         safety::GraphError::Internal(format!(
                             "hydration failed for {}: {}",
-                            table_name.as_sql(),
-                            e
+                            table_name, e
                         ))
                     })?;
                 if result.is_empty() {
@@ -196,8 +310,7 @@ pub(crate) fn hydrate_node_governed_with_tables(
                 })
             })
         }))?;
-    workspace.retain_until_governor_drop();
-    Ok(hydrated)
+    Ok(hydrated.map(|value| ScopedHydratedNode { value, workspace }))
 }
 
 #[allow(dead_code, reason = "compatibility entry point")]
@@ -264,18 +377,19 @@ pub(crate) fn hydrate_nodes_governed_with_tables(
                 table_oid
             ))
         })?;
-        acl::check_table_acl(table_oid)?;
-        let table_name = sql_table_name_from_oid(table.table_oid)?;
-        let pk_expr = primary_key_expr("src", &table.id_columns);
+        let lookup = SourceKeyLookup::prepare(table_oid, &table.id_columns, "src", governor)?;
+        let table_name = &lookup.table_name;
+        let pk_expr = &lookup.key_expr;
+        let predicate = lookup.batch_predicate();
         let size_query = format!(
                 "SELECT pg_catalog.count(*)::bigint,
                         COALESCE(pg_catalog.sum(pg_catalog.pg_column_size(pg_catalog.to_jsonb(src.*))), 0)::bigint,
                         COALESCE(pg_catalog.sum(pg_catalog.octet_length(pg_catalog.to_jsonb(src.*)::text)), 0)::bigint
-                   FROM {} src WHERE {} = ANY($1::text[])",
-                table_name.as_sql(),
-                pk_expr
+                   FROM {} src WHERE {}",
+                table_name,
+                predicate
             );
-        let size_params = vec![node_ids.clone().into()];
+        let size_params = vec![lookup.batch_arg(&node_ids, governor)?];
         let (visible_rows, binary_bytes, text_bytes) =
             crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
                 || {
@@ -326,12 +440,10 @@ pub(crate) fn hydrate_nodes_governed_with_tables(
             crate::resource::check_postgres_interrupts,
         ));
         let query = format!(
-            "SELECT {} AS graph_node_id, to_jsonb(src.*) FROM {} src WHERE {} = ANY($1::text[])",
-            pk_expr,
-            table_name.as_sql(),
-            pk_expr
+            "SELECT {} AS graph_node_id, to_jsonb(src.*) FROM {} src WHERE {}",
+            pk_expr, table_name, predicate
         );
-        let hydration_params = vec![node_ids.clone().into()];
+        let hydration_params = vec![lookup.batch_arg(&node_ids, governor)?];
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             Spi::connect(|client| {
                 let result = client
@@ -339,8 +451,7 @@ pub(crate) fn hydrate_nodes_governed_with_tables(
                     .map_err(|e| {
                         safety::GraphError::Internal(format!(
                             "batch hydration failed for {}: {}",
-                            table_name.as_sql(),
-                            e
+                            table_name, e
                         ))
                     })?;
                 for row in result {
@@ -403,14 +514,15 @@ pub(crate) fn visible_node_keys_governed_with_tables(
                 "cannot check source visibility for unregistered table OID {table_oid}"
             ))
         })?;
-        acl::check_table_acl(*table_oid)?;
-        let table_name = sql_table_name_from_oid(table.table_oid)?;
-        let pk_expr = primary_key_expr("src", &table.id_columns);
+        let lookup = SourceKeyLookup::prepare(*table_oid, &table.id_columns, "src", governor)?;
+        let table_name = &lookup.table_name;
+        let pk_expr = &lookup.key_expr;
+        let predicate = lookup.batch_predicate();
         let query = format!(
-            "SELECT {pk_expr} AS graph_node_id FROM {} src WHERE {pk_expr} = ANY($1::text[])",
-            table_name.as_sql()
+            "SELECT {pk_expr} AS graph_node_id FROM {} src WHERE {predicate}",
+            table_name
         );
-        let visibility_params = vec![node_ids.clone().into()];
+        let visibility_params = vec![lookup.batch_arg(node_ids, governor)?];
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             Spi::connect(|client| {
                 let result = client

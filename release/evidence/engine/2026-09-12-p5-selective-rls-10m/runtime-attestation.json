@@ -1,0 +1,84 @@
+{
+  "build_command": "cargo pgrx install --release --no-default-features --features 'pg17 development' --pg-config /usr/lib/postgresql/17/bin/pg_config",
+  "build_features": [
+    "pg17",
+    "development"
+  ],
+  "build_profile": "release",
+  "build_source_commit": "077076f956baec64847822a2e68310ade3741170",
+  "cgroup": {
+    "after": {
+      "cpu.max": "400000 100000",
+      "memory.current": "4012974080",
+      "memory.events": {
+        "high": 0,
+        "low": 0,
+        "max": 31679,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "memory.max": "6442450944",
+      "memory.peak": "6442450944",
+      "self-cgroup.txt": "0::/"
+    },
+    "before": {
+      "cpu.max": "400000 100000",
+      "memory.current": "55930880",
+      "memory.events": {
+        "high": 0,
+        "low": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "memory.max": "6442450944",
+      "memory.peak": "61415424",
+      "self-cgroup.txt": "0::/"
+    }
+  },
+  "cluster_stopped_cleanly": true,
+  "commit": "455351ca049a6dac73852fd90f0fd0a97d6556e4",
+  "effective_governors": {
+    "memory_limit_mb": 4096,
+    "query_memory_mb": 2048,
+    "query_work_limit": 100000000,
+    "spill_disk_limit_mb": 4096
+  },
+  "fixture_build": {
+    "build_time_ms": 374614.234252,
+    "edges_loaded": 19999998,
+    "memory_used_mb": 1953.179370880127,
+    "nodes_loaded": 20000000,
+    "projection_mode": "csr_readonly"
+  },
+  "fixture_build_spill_disk_limit_mb": 16384,
+  "library_sha256": "d33cf6a74a76c3c8a9d7e46cff251cb9b501dde953d6d5523e9e62ab469c399d",
+  "memory_peak_scope": "cgroup lifetime; query peaks validated separately",
+  "previous_preparation_failure": {
+    "container_memory_limit_bytes": 6442450944,
+    "failure": "Linux global OOM killed the build backend before query sampling.",
+    "library_sha256": "d33cf6a74a76c3c8a9d7e46cff251cb9b501dde953d6d5523e9e62ab469c399d",
+    "measured_samples": 0,
+    "outer_vm_reported_memory_bytes": 8217473024,
+    "query_budgets_changed": false,
+    "source_commit": "455351ca049a6dac73852fd90f0fd0a97d6556e4",
+    "stage": "graph.build"
+  },
+  "query_spill_disk_limit_mb": 4096,
+  "runtime": {
+    "architecture": "aarch64",
+    "autovacuum": "off",
+    "cpu_quota": 4,
+    "fsync": "on",
+    "listen_addresses": "",
+    "memory_limit_bytes": 6442450944,
+    "os": "Linux",
+    "outer_vm_configured_memory_mib": 12288,
+    "outer_vm_reported_memory_bytes": 12528992256,
+    "postgres_version": "17.11 (Debian 17.11-1.pgdg12+2)"
+  },
+  "settings_evidence": "Effective governors and build/query spill settings were queried and retained in their CSVs.",
+  "source_equivalence": "No graph/ changes between build source and measured source commits."
+}

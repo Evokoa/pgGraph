@@ -1,0 +1,2 @@
+postgres_version,database_name,node_count,composite_count,node_table_bytes,composite_table_bytes,edge_table_bytes
+17.11 (Debian 17.11-1.pgdg12+2),pggraph_rls_10m_1789217715_51,10000000,10000000,1069408256,1160208384,907501568

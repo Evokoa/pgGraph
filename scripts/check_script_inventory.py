@@ -29,6 +29,7 @@ MAINTAINER = {
     "scripts/validate_release.py",
 }
 HOST_MUTATING = {
+    "graph/tests/heavy/shared_snapshot.py",
     "graph/tests/heavy/open_type_package_smoke.sh",
     "graph/tests/heavy/open_type_query_latency.sh",
     "graph/tests/heavy/run_open_type_query_criterion.sh",
@@ -39,12 +40,28 @@ HOST_MUTATING = {
     "graph/tests/heavy/phase3_update_smoke.sh",
     "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
     "graph/tests/heavy/v1_2_update_artifact_rollback.sh",
+    "graph/tests/heavy/publication_upgrade_artifact.sh",
 }
 LINUX_ONLY = {
+    "graph/tests/heavy/shared_snapshot.py",
     "graph/tests/heavy/open_type_query_resources.sh",
     "graph/tests/heavy/run_open_type_query_resource_matrix.sh",
 }
 TOOL_OVERRIDES = {
+    "graph/tests/heavy/gql_isolation_matrix.sh": ["bash", "cargo", "python3", "psql", "createdb", "dropdb"],
+    "graph/tests/heavy/cache_provenance.py": ["python3", "psql", "createdb"],
+    "graph/tests/heavy/build_endpoint_identity.sh": ["bash", "psql", "createdb"],
+    "graph/tests/heavy/catalog_provenance.sh": ["bash", "psql", "createdb"],
+    "graph/tests/heavy/generation_transactions.py": ["python3", "psql", "createdb"],
+    "graph/tests/heavy/psql_session.py": ["python3", "psql"],
+    "graph/tests/heavy/publication_upgrade.sh": ["bash", "psql", "createdb"],
+    "graph/tests/heavy/publication_upgrade_artifact.sh": ["bash", "cargo-pgrx", "git", "tar", "psql", "createdb", "python3"],
+    "graph/tests/heavy/replay_transactions.py": ["python3", "psql", "createdb"],
+    "graph/tests/heavy/rls_large_table_gate_regression.sh": ["bash", "psql", "createdb", "dropdb"],
+    "graph/tests/heavy/shared_snapshot.py": [
+        "python3", "psql", "createdb", "cat", "cp", "find", "stat", "truncate", "fallocate",
+    ],
+    "graph/tests/heavy/stability_regressions.sh": ["bash", "psql", "createdb", "dropdb"],
     "graph/tests/heavy/open_type_package_smoke.sh": [
         "bash",
         "psql",

@@ -5,14 +5,17 @@
     {"path": "graph/src/acl.rs", "blocks": 8, "boundary": "PostgreSQL caller, RLS, parameter, and table ACL FFI", "owner": "SQL security adapter"},
     {"path": "graph/src/catalog/graphs.rs", "blocks": 1, "boundary": "PostgreSQL role FFI", "owner": "catalog adapter"},
     {"path": "graph/src/edge_store.rs", "blocks": 3, "boundary": "validated adaptive mmap typed views", "owner": "artifact validation"},
-    {"path": "graph/src/lib.rs", "blocks": 1, "boundary": "read-only mmap advice", "owner": "backend load adapter"},
     {"path": "graph/src/mapped_bytes.rs", "blocks": 1, "boundary": "Miri-compatible test backing", "owner": "mapped byte ownership"},
     {"path": "graph/src/node_store.rs", "blocks": 2, "boundary": "validated mmap typed views", "owner": "artifact validation"},
-    {"path": "graph/src/persistence.rs", "blocks": 1, "boundary": "PostgreSQL data directory FFI", "owner": "persistence adapter"},
+    {"path": "graph/src/persistence.rs", "blocks": 2, "boundary": "PostgreSQL data directory and database identity FFI", "owner": "persistence adapter"},
+    {"path": "graph/src/persistence/snapshot_cache.rs", "blocks": 11, "boundary": "sealed memfd ownership, read-only mappings, backend descriptor accounting and Linux test fixtures", "owner": "immutable snapshot/descriptor adapter"},
+    {"path": "graph/src/projection/publication.rs", "blocks": 3, "boundary": "transaction isolation, read-only state and native visibility horizon", "owner": "transaction publication adapter"},
     {"path": "graph/src/projection/tx_delta.rs", "blocks": 1, "boundary": "PostgreSQL transaction callbacks", "owner": "transaction adapter"},
     {"path": "graph/src/runtime_state.rs", "blocks": 1, "boundary": "backend-local cancellation-safe snapshot lifetime", "owner": "runtime state adapter"},
     {"path": "graph/src/sql_facade/admin.rs", "blocks": 1, "boundary": "cancellation-safe compaction snapshot lifetime", "owner": "administration adapter"},
+    {"path": "graph/src/sql_hydration/source_key_lookup.rs", "blocks": 1, "boundary": "PostgreSQL transaction-owned source relation lock and locked relcache descriptor", "owner": "source hydration adapter"},
     {"path": "graph/src/sql_jobs.rs", "blocks": 1, "boundary": "PostgreSQL backend PID FFI", "owner": "background-job adapter"},
+    {"path": "graph/src/sync_capture.rs", "blocks": 7, "boundary": "PostgreSQL advisory lock, snapshot and portal FFI", "owner": "sync capture adapter"},
     {"path": "graph/src/sql_visibility.rs", "blocks": 2, "boundary": "backend-local cancellation-safe SPI frame lifetime", "owner": "RLS visibility adapter"}
   ]
 }

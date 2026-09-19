@@ -15,6 +15,7 @@ every backend-local engine.
 |---|---|
 | `sync.rs` | Generate trigger functions/triggers and create sync tables |
 | `sql_sync.rs` | Parse sync mode, read durable sync log in bounded batches, apply row changes |
+| `sync_capture.rs` | Brief writer fencing and explicit snapshot capture for bounded replay batches |
 | `sql_build.rs` | Maintenance rebuild and vacuum orchestration |
 | `sql_jobs.rs` | Durable job rows, hosted job helpers, and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
@@ -22,10 +23,31 @@ every backend-local engine.
 | `projection/ingest.rs` | Core committed-row to L0 segment publication logic |
 | `projection/layered.rs` | Base CSR plus durable-segment plus transaction-delta layered read source |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
+| `projection/publication.rs` | Transaction-visible generation authority, privilege mediators, and PostgreSQL snapshot retention |
 | `projection/normalize.rs` | Deterministic committed-mutation normalization and ingest buffer limits |
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
 
 ## Durable Tables
+
+Sync sequence IDs order allocation, not commits. Replay acquires a non-blocking
+exclusive session advisory lock against source writers, then pins a PostgreSQL
+snapshot and copies its bounded log batch. Byte preflight and payload cursors
+use that same snapshot. The fence is released before normalization, engine
+mutation or artifact publication, including on cancellation. An active writer
+causes `55P03` (`PG006`) without advancing replay; retry after it commits.
+Offline builds retain their separate coherent-source transaction locks.
+
+READ COMMITTED captures a new snapshot after fencing. REPEATABLE READ and
+SERIALIZABLE can reuse a resident base only when its last build or replay has a
+confirmed committed top-level transaction ID visible in their snapshot. Unknown
+or invisible provenance discards the cache, so imported older snapshots cannot
+inherit newer rows. Mapped transaction-overlay writes can retain that unchanged
+base across transaction end. Base loading or replay within a fixed snapshot is
+discarded at transaction end: sequence IDs can have invisible lower entries even
+after a higher entry becomes visible. Aborted base changes, including savepoint
+rollback and prepared transactions, cannot establish committed cache provenance.
+Durable publication still requires READ COMMITTED and rejects uncommitted source
+rows.
 
 Bootstrap and sync schema helpers create:
 
@@ -384,6 +406,15 @@ reference is absent. The loader preserves the immutable base registry as an
 exact prefix and rejects segment or base-chunk IDs outside the cumulative
 dictionary before topology installation.
 
+Manifest version 4 persists the source build's catalog fingerprint. It uses
+XXH3-64 over a versioned, length-prefixed encoding of registrations, with
+little-endian integers and UTF-8 text. Derived generations retain the build's
+fingerprint. Load and ingestion compare it against current registrations;
+missing or mismatched provenance requires rebuilding. Version 2 and 3 metadata
+can be inspected for recovery, but cannot authorize serving without provenance.
+Older releases cannot read version 4 manifests, so rebuild derived artifacts
+when downgrading.
+
 Ingestion generations retain all segment, base-chunk, and obsolete-file
 references from the preceding manifest before appending new segments. A sync
 batch that cannot produce a durable row does not advance the watermark.
@@ -473,9 +504,9 @@ folds:
 ## Sync-Log Retention
 
 `graph._sync_log` rows are never deleted outside of `sql_sync::prune_sync_log`
-and `sql_sync::prune_sync_log_if_safe`, called only from
-`sql_build::execute_maintenance_rebuild_with_progress` (both the foreground
-`graph.maintenance()` path and the background maintenance worker path).
+and `sql_sync::prune_sync_log_if_safe`, called from maintenance rebuilds and
+`graph.projection_gc()`. A newly published generation cannot authorize pruning
+until it commits and the native PostgreSQL visibility horizon passes it.
 `graph.apply_sync()` never deletes rows.
 
 Backend-local `applied_sync_id` (`csr_readonly` mode's replay progress) is
@@ -495,7 +526,13 @@ of the durable projection's own `sync_watermark` (for a persisted
 currently unexpired heartbeats. `compute_sync_log_retention_floor` (a pure
 function, unit- and proptest-covered independent of SPI) implements the
 bootstrap safety rule: `(None, None) => None`, never a default floor of `0`
-or any other guess. `sql_sync::prune_sync_log` deletes
+or any other guess. The shared typed eligibility evaluator additionally
+suppresses the floor for shared source consumers, alternate published artifact
+roots, or protected generation visibility. Health reporting evaluates this
+policy without locking; deletion rechecks it under the build transaction lock.
+`graph.sync_retention()` exposes the first blocker and opt-in retained-volume
+counts behind a fixed-search-path administrator privilege boundary.
+`sql_sync::prune_sync_log` deletes
 `graph._sync_log` rows with `id <= floor` (inclusive: a row exactly at the
 floor is, by construction, already applied by everyone counted in the
 computation) scoped to the selected graph's registered table oids via

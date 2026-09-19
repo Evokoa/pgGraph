@@ -34,6 +34,7 @@ pub(crate) mod layered;
 pub(crate) mod manifest;
 pub(crate) mod neighbors;
 pub(crate) mod normalize;
+pub(crate) mod publication;
 #[allow(
     dead_code,
     reason = "Microphase 13 adds recovery helpers before status diagnostics consume all fields"

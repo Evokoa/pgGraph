@@ -33,7 +33,7 @@ pub(crate) fn record_query_start_pending_probe() {
     });
 }
 
-/// Reset the engine — clear graph and remove persisted files.
+/// Clear the resident engine and transaction-visible persisted publication.
 #[pg_extern(schema = "graph", security_definer)]
 #[search_path(pg_catalog, pg_temp)]
 fn reset() {
@@ -56,6 +56,10 @@ fn reset_selected_graph(clear_registrations: bool) {
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
         let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
             .unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock_for_graph(&graph.graph_id)
+            .unwrap_or_else(|err| err.report());
+        crate::projection::publication::clear_direct(&graph.graph_id)
+            .unwrap_or_else(|err| err.report());
         let cleared: Option<catalog::ClearedRegistrationCounts> = clear_registrations.then(|| {
             catalog::clear_graph_registrations(&graph.graph_id).unwrap_or_else(|err| err.report())
         });
@@ -65,10 +69,9 @@ fn reset_selected_graph(clear_registrations: bool) {
         });
         crate::runtime_state::clear_loaded_graph();
         crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
-        persistence::remove_graph_artifacts_for(&graph.graph_id).unwrap_or_else(|err| err.report());
         if let Some(cleared) = cleared {
             pgrx::notice!(
-                "graph: removed persisted files and cleared {} tables, {} edges, and {} filter columns for graph {} ({})",
+                "graph: cleared publication and {} tables, {} edges, and {} filter columns for graph {} ({})",
                 cleared.tables,
                 cleared.edges,
                 cleared.filter_columns,
@@ -77,7 +80,7 @@ fn reset_selected_graph(clear_registrations: bool) {
             );
         } else {
             pgrx::notice!(
-                "graph: removed persisted files for graph {} ({})",
+                "graph: cleared publication for graph {} ({})",
                 graph.graph_name,
                 graph.graph_id
             );
@@ -320,11 +323,9 @@ fn graph_runtime_status() -> TableIterator<
                 .is_ok()
             })
             .map(|graph| {
-                let logical_artifact =
-                    persistence::graph_file_path_for_uncreated(&graph.graph_id).ok();
-                let artifact = logical_artifact
-                    .as_ref()
-                    .and_then(|path| persistence::current_base_artifact_path(path).ok().flatten());
+                let artifact =
+                    crate::projection::publication::authorized_artifact_path(&graph.graph_id)
+                        .unwrap_or_else(|err| err.report());
                 let artifact_metadata = artifact.as_ref().and_then(|path| path.metadata().ok());
                 let artifact_exists = artifact_metadata.is_some();
                 let artifact_bytes =
@@ -584,23 +585,21 @@ pub(super) fn hydrate_component_page_governed(
 /// FilterIndex and the edge type registry are bincode-deserialized into
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
-pub(super) fn maybe_auto_load(graph: &catalog::GraphMetadata, catalog_fingerprint: u64) {
-    if let Err(err) = clear_loaded_graph_if_mismatched(&graph.graph_id) {
-        pgrx::warning!("graph: auto-load skipped: {}", err);
-        return;
+pub(super) fn maybe_auto_load(
+    graph: &catalog::GraphMetadata,
+    catalog_fingerprint: u64,
+) -> safety::GraphResult<()> {
+    clear_loaded_graph_if_mismatched(&graph.graph_id)?;
+    let resident = ENGINE.with(|engine| engine.borrow().built);
+    if !config::AUTO_LOAD.get() && !resident {
+        return Ok(());
     }
-
-    if !config::AUTO_LOAD.get() {
-        return;
-    }
-
-    if let Err(err) = load_selected_graph_from_disk(
+    load_selected_graph_from_disk(
         graph,
         true,
         CatalogFingerprintForLoad::Known(catalog_fingerprint),
-    ) {
-        pgrx::warning!("graph: auto-load skipped: {}", err);
-    }
+    )?;
+    Ok(())
 }
 
 pub(super) fn clear_loaded_graph_if_mismatched(graph_id: &str) -> safety::GraphResult<()> {
@@ -634,27 +633,36 @@ fn load_selected_graph_from_disk(
     quiet_missing: bool,
     catalog_fingerprint: CatalogFingerprintForLoad,
 ) -> safety::GraphResult<bool> {
-    crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.load_graph()")?;
-    if quiet_missing && graph.residency == "cold" {
+    if quiet_missing && graph.residency == "cold" && !ENGINE.with(|e| e.borrow().built) {
         return Ok(false);
     }
+    let path = persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
+    let root = persistence::projection_manifest_root(&path);
+    let published_generation =
+        crate::projection::manifest::ProjectionManifestStore::new(&root).current_generation_id()?;
     ENGINE.with(|e| {
         let eng = e.borrow();
         if eng.built {
-            if crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id) {
+            let resident_generation = eng.projection_manifest.as_ref().map(|m| m.generation_id);
+            if crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id)
+                && resident_generation == published_generation
+                && (resident_generation.is_none()
+                    || eng.projection_manifest_root.as_deref() == Some(root.as_path()))
+            {
                 crate::runtime_state::touch_loaded_graph(&graph.graph_id);
                 return Ok(true);
             }
             drop(eng);
+            crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.load_graph()")?;
             *e.borrow_mut() = Engine::new();
             crate::runtime_state::clear_loaded_graph();
         } else {
             drop(eng);
         }
+        crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.load_graph()")?;
 
         // Check if persisted file exists without creating artifact directories
         // during query-time auto-load or operator load inspection.
-        let path = persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
         if !persistence::persisted_graph_exists(&path)? {
             if !quiet_missing {
                 return Err(safety::GraphError::NotBuilt);
@@ -674,21 +682,21 @@ fn load_selected_graph_from_disk(
         pgrx::log!("graph: loading from {} (mmap)", path.display());
         match persistence::load_graph_file(&path) {
             Ok(mut loaded_engine) => {
-                match catalog_fingerprint {
-                    CatalogFingerprintForLoad::Known(catalog_fingerprint) => {
-                        loaded_engine.set_catalog_fingerprint(catalog_fingerprint);
-                    }
+                let expected = match catalog_fingerprint {
+                    CatalogFingerprintForLoad::Known(fingerprint) => Some(fingerprint),
                     CatalogFingerprintForLoad::Resolve => {
-                        if let Ok((tables, edges, filters)) = read_catalog() {
-                            loaded_engine.set_catalog_fingerprint(super::catalog_fingerprint(
-                                &tables, &edges, &filters,
-                            ));
-                        }
+                        let (tables, edges, filters) = read_catalog()?;
+                        Some(super::catalog_fingerprint(&tables, &edges, &filters)?)
                     }
-                    CatalogFingerprintForLoad::Omit => {}
+                    CatalogFingerprintForLoad::Omit => None,
+                };
+                if let Err(error) = loaded_engine.validate_catalog_fingerprint(expected) {
+                    loaded_engine.refresh_observed_state(0, 0, &Err(error));
                 }
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
+                let stamp = crate::sql_sync::prepare_backend_replay()?;
+                crate::sql_sync::mark_backend_replay(stamp);
                 *e.borrow_mut() = loaded_engine;
                 crate::runtime_state::mark_loaded_graph(graph);
                 pgrx::log!(
@@ -817,8 +825,8 @@ pub(crate) struct QueryStartState {
 
 fn load_query_start_state(graph: catalog::GraphMetadata) -> safety::GraphResult<QueryStartState> {
     let (tables, edges, filter_columns) = catalog::read_catalog_for_graph(&graph.graph_id)?;
-    let catalog_fingerprint = catalog::catalog_fingerprint(&tables, &edges, &filter_columns);
-    let catalog_state = catalog::current_catalog_state_from_rows(&tables, &edges, &filter_columns);
+    let catalog_state = catalog::current_catalog_state_from_rows(&tables, &edges, &filter_columns)?;
+    let catalog_fingerprint = catalog_state.0;
     let applicable_table_oids =
         crate::sql_sync::applicable_table_oids_from_catalog(&tables, &edges);
     let sync_mode = current_sync_mode()?;
@@ -828,7 +836,7 @@ fn load_query_start_state(graph: catalog::GraphMetadata) -> safety::GraphResult<
         edges,
         filter_columns,
         catalog_fingerprint,
-        catalog_state,
+        catalog_state: Ok(catalog_state),
         applicable_table_oids,
         sync_mode,
     })
@@ -859,7 +867,7 @@ fn prepare_current_graph(
         CatalogFingerprintForLoad::Known(query_start.catalog_fingerprint),
     )?;
     if allow_auto_load {
-        maybe_auto_load(&query_start.graph, query_start.catalog_fingerprint);
+        maybe_auto_load(&query_start.graph, query_start.catalog_fingerprint)?;
     }
 
     let disabled = disabled_graph_trigger_count()?;

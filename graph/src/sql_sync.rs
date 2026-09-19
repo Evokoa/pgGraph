@@ -1,15 +1,14 @@
 //! SQL sync-log replay, trigger management, and tenant-scope helpers.
 
 use crate::catalog::{
-    catalog_fingerprint, foreign_key_target_table_oid, read_catalog,
-    selected_or_default_graph_metadata, selected_or_default_graph_metadata_via_definer,
-    table_oid_from_name,
+    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata,
+    selected_or_default_graph_metadata_via_definer, table_oid_from_name,
 };
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
     current_base_artifact_path, graph_artifact_metadata_for_path, graph_file_path, load_graph_file,
-    load_graph_file_with_projection_candidate_and_residency, load_graph_file_with_residency,
-    persisted_graph_exists, projection_manifest_root, read_sync_checkpoint,
+    load_graph_file_reusing_base, persisted_graph_exists, projection_manifest_root,
+    read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
 use crate::projection::manifest::{
@@ -25,6 +24,239 @@ use crate::{builder, config, engine, safety, sync, ENGINE};
 use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
 use xxhash_rust::xxh3::xxh3_64;
+
+thread_local! {
+    static REPLAYED_SUBTRANSACTIONS: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    static REPLAY_ABORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CACHE_PROVENANCE: std::cell::Cell<CacheProvenance> = const { std::cell::Cell::new(CacheProvenance::new()) };
+    static REPLAY_TRANSACTION_STAMP: std::cell::Cell<Option<ReplayTransactionStamp>> = const { std::cell::Cell::new(None) };
+}
+
+/// Full top-level XID, when already assigned. Missing provenance never licenses reuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReplayTransactionStamp(Option<std::num::NonZeroU64>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheStamp {
+    Unknown,
+    Pending(ReplayTransactionStamp),
+    Committed(std::num::NonZeroU64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixedSnapshotCache {
+    NotEntered,
+    Preserved,
+    Changed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayTransactionOutcome {
+    Commit,
+    Abort,
+    Prepare,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheProvenance {
+    stamp: CacheStamp,
+    fixed: FixedSnapshotCache,
+}
+
+impl CacheProvenance {
+    const fn new() -> Self {
+        Self {
+            stamp: CacheStamp::Unknown,
+            fixed: FixedSnapshotCache::NotEntered,
+        }
+    }
+
+    fn mark_mutation(&mut self, stamp: ReplayTransactionStamp) {
+        self.stamp = CacheStamp::Pending(stamp);
+        if self.fixed != FixedSnapshotCache::NotEntered {
+            self.fixed = FixedSnapshotCache::Changed;
+        }
+    }
+
+    fn fixed_snapshot_candidate(&mut self) -> Option<std::num::NonZeroU64> {
+        // Until PostgreSQL verifies visibility, both errors and a negative
+        // result must leave the cache unusable beyond the current transaction.
+        self.fixed = FixedSnapshotCache::Changed;
+        match self.stamp {
+            CacheStamp::Committed(xid) => Some(xid),
+            CacheStamp::Unknown | CacheStamp::Pending(_) => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.stamp = CacheStamp::Unknown;
+        if self.fixed != FixedSnapshotCache::NotEntered {
+            self.fixed = FixedSnapshotCache::Changed;
+        }
+    }
+
+    fn finish(&mut self, outcome: ReplayTransactionOutcome, invalidated: bool) -> bool {
+        // A fixed snapshot may skip an invisible lower sync ID while replaying a
+        // higher one. Its scalar watermark must never escape that transaction.
+        let discard = invalidated
+            || self.fixed == FixedSnapshotCache::Changed
+            || (outcome != ReplayTransactionOutcome::Commit
+                && matches!(self.stamp, CacheStamp::Pending(_)));
+        self.stamp = if discard {
+            CacheStamp::Unknown
+        } else {
+            match self.stamp {
+                CacheStamp::Pending(ReplayTransactionStamp(Some(xid))) => {
+                    CacheStamp::Committed(xid)
+                }
+                CacheStamp::Pending(ReplayTransactionStamp(None)) => CacheStamp::Unknown,
+                other => other,
+            }
+        };
+        self.fixed = FixedSnapshotCache::NotEntered;
+        discard
+    }
+}
+
+/// Capture once per transaction, outside all ENGINE and thread-local borrows.
+pub(crate) fn prepare_backend_replay() -> safety::GraphResult<ReplayTransactionStamp> {
+    if let Some(stamp) = REPLAY_TRANSACTION_STAMP.get() {
+        return Ok(stamp);
+    }
+    #[cfg(not(test))]
+    let xid = crate::sql_visibility::postgres_error_as_rust_unwind(|| {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT pg_catalog.pg_current_xact_id_if_assigned()::pg_catalog.text",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<String>(1)
+        })
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("cache transaction provenance failed: {error}"))
+    })?
+    .map(|value| {
+        value.parse::<std::num::NonZeroU64>().map_err(|error| {
+            safety::GraphError::Internal(format!("invalid cache transaction provenance: {error}"))
+        })
+    })
+    .transpose()?;
+    #[cfg(test)]
+    let xid = None;
+    let stamp = ReplayTransactionStamp(xid);
+    REPLAY_TRANSACTION_STAMP.set(Some(stamp));
+    Ok(stamp)
+}
+
+/// Mark before changing the resident base. This performs no SPI.
+pub(crate) fn mark_backend_replay(stamp: ReplayTransactionStamp) {
+    let depth = crate::projection::tx_delta::subtransaction_depth() as usize;
+    REPLAYED_SUBTRANSACTIONS.with(|levels| {
+        let mut levels = levels.borrow_mut();
+        levels.resize(depth + 1, false);
+        levels[depth] = true;
+    });
+    let mut provenance = CACHE_PROVENANCE.get();
+    provenance.mark_mutation(stamp);
+    CACHE_PROVENANCE.set(provenance);
+}
+
+pub(crate) fn finish_replay_transaction(outcome: ReplayTransactionOutcome) {
+    REPLAYED_SUBTRANSACTIONS.with(|levels| {
+        let mut levels = levels.borrow_mut();
+        if outcome != ReplayTransactionOutcome::Commit && levels.iter().any(|dirty| *dirty) {
+            REPLAY_ABORTED.set(true);
+        }
+        levels.clear();
+    });
+    let mut provenance = CACHE_PROVENANCE.get();
+    REPLAY_ABORTED.set(provenance.finish(outcome, REPLAY_ABORTED.get()));
+    CACHE_PROVENANCE.set(provenance);
+    REPLAY_TRANSACTION_STAMP.set(None);
+}
+
+pub(crate) fn finish_replay_subtransaction(depth: u32, aborted: bool) {
+    REPLAYED_SUBTRANSACTIONS.with(|levels| {
+        let mut levels = levels.borrow_mut();
+        let depth = depth as usize;
+        if levels.get(depth).copied().unwrap_or(false) {
+            if aborted {
+                REPLAY_ABORTED.set(true);
+            } else if depth > 0 {
+                levels[depth - 1] = true;
+            }
+        }
+        levels.truncate(depth);
+    });
+}
+
+pub(crate) fn clear_cache_provenance() {
+    let mut provenance = CACHE_PROVENANCE.get();
+    provenance.clear();
+    CACHE_PROVENANCE.set(provenance);
+}
+
+fn enter_fixed_snapshot() -> safety::GraphResult<()> {
+    let mut provenance = CACHE_PROVENANCE.get();
+    if provenance.fixed != FixedSnapshotCache::NotEntered {
+        return Ok(());
+    }
+    // Failed or canceled visibility checks must not leave an accepted cache.
+    let candidate = provenance.fixed_snapshot_candidate();
+    CACHE_PROVENANCE.set(provenance);
+    let previously_invalidated = REPLAY_ABORTED.replace(true);
+    let Some(xid) = candidate else {
+        return Ok(());
+    };
+    if previously_invalidated {
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    let visible = crate::sql_visibility::postgres_error_as_rust_unwind(|| {
+        Spi::connect(|client| {
+            client.select(
+                "SELECT pg_catalog.pg_visible_in_snapshot($1::pg_catalog.xid8, pg_catalog.pg_current_snapshot())",
+                None, &[xid.to_string().into()],
+            )?.first().get::<bool>(1)
+        })
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("cache snapshot provenance failed: {error}"))
+    })?
+    .ok_or_else(|| {
+        safety::GraphError::Internal("cache snapshot provenance returned NULL".into())
+    })?;
+    #[cfg(test)]
+    let visible = {
+        let _ = xid;
+        false
+    };
+    if visible {
+        provenance.fixed = FixedSnapshotCache::Preserved;
+        CACHE_PROVENANCE.set(provenance);
+        REPLAY_ABORTED.set(false);
+    }
+    Ok(())
+}
+
+/// Discard replayed source rows only after PostgreSQL has finished aborting.
+/// Transaction callbacks set a flag without borrowing an engine or calling SPI.
+pub(crate) fn recover_aborted_replay() -> safety::GraphResult<()> {
+    if crate::projection::publication::uses_fixed_snapshot() {
+        enter_fixed_snapshot()?;
+    }
+    if REPLAY_ABORTED.get() {
+        crate::projection::tx_delta::ensure_engine_replacement_allowed("sync rollback recovery")?;
+        ENGINE.with(|engine| *engine.borrow_mut() = engine::Engine::new());
+        crate::runtime_state::clear_loaded_graph();
+        REPLAY_ABORTED.set(false);
+    }
+    Ok(())
+}
 
 #[cfg(not(test))]
 thread_local! {
@@ -59,21 +291,31 @@ pub(crate) fn current_sync_mode() -> safety::GraphResult<config::SyncMode> {
 
 pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
     let (tables, edges, filter_columns) = read_catalog()?;
-    let mut trigger_specs =
-        std::collections::BTreeMap::<u32, (builder::PrimaryKeySpec, Vec<String>)>::new();
+    let mut trigger_specs = std::collections::BTreeMap::<
+        u32,
+        (builder::PrimaryKeySpec, Vec<sync::TriggerColumn>),
+    >::new();
     for table in &tables {
-        let mut columns = table.columns.to_vec();
+        let mut columns: Vec<_> = table
+            .columns
+            .iter()
+            .cloned()
+            .map(sync::TriggerColumn::Property)
+            .collect();
         for filter in filter_columns
             .iter()
             .filter(|filter| filter.table_oid == table.table_oid)
         {
-            if !columns.iter().any(|column| column == &filter.column_name) {
-                columns.push(filter.column_name.clone());
+            if !columns
+                .iter()
+                .any(|column| column.name() == filter.column_name)
+            {
+                columns.push(sync::TriggerColumn::Property(filter.column_name.clone()));
             }
         }
         if let Some(tenant_column) = &table.tenant_column {
-            if !columns.iter().any(|column| column == tenant_column) {
-                columns.push(tenant_column.clone());
+            if !columns.iter().any(|column| column.name() == tenant_column) {
+                columns.push(sync::TriggerColumn::SourceColumn(tenant_column.clone()));
             }
         }
         trigger_specs.insert(table.table_oid, (table.id_columns.clone(), columns));
@@ -93,8 +335,8 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
             .chain(edge.weight_column.iter())
             .chain(edge.label_column.iter())
         {
-            if !columns.iter().any(|existing| existing == column) {
-                columns.push(column.clone());
+            if !columns.iter().any(|existing| existing.name() == column) {
+                columns.push(sync::TriggerColumn::SourceColumn(column.clone()));
             }
         }
     }
@@ -626,7 +868,7 @@ impl SyncReplayContext {
             .collect::<HashSet<_>>();
         let mut edge_source_node_oids = HashMap::with_capacity(edges.len());
         for edge in &edges {
-            if let Some(source_oid) = sync_edge_source_node_oid(edge, &tables)? {
+            if let Some(source_oid) = builder::edge_source_node_oid(edge, &tables)? {
                 edge_source_node_oids.insert(edge.mapping_id, source_oid);
             }
         }
@@ -668,19 +910,6 @@ impl SyncReplayContext {
         self.all_table_oids.push(oid);
         Ok(oid)
     }
-}
-
-fn sync_edge_source_node_oid(
-    edge: &builder::RegisteredEdge,
-    tables: &[builder::RegisteredTable],
-) -> safety::GraphResult<Option<u32>> {
-    if tables
-        .iter()
-        .any(|table| table.table_oid == edge.from_table_oid)
-    {
-        return Ok(Some(edge.from_table_oid));
-    }
-    foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)
 }
 
 struct LegacySyncEntry {
@@ -798,14 +1027,27 @@ fn ensure_engine_loaded_for_apply_sync(
         Some(state) => state.graph.clone(),
         None => selected_or_default_graph_metadata()?,
     };
+    let graph_path = crate::persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
+    let root = projection_manifest_root(&graph_path);
+    let published_generation = ProjectionManifestStore::new(&root).current_generation_id()?;
     if ENGINE.with(|e| e.borrow().built)
         && crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id)
+        && ENGINE.with(|e| {
+            e.borrow()
+                .projection_manifest
+                .as_ref()
+                .map(|m| m.generation_id)
+        }) == published_generation
+        && ENGINE.with(|e| {
+            let engine = e.borrow();
+            engine.projection_manifest.is_none()
+                || engine.projection_manifest_root.as_deref() == Some(root.as_path())
+        })
     {
         crate::runtime_state::touch_loaded_graph(&graph.graph_id);
         return Ok(());
     }
 
-    let graph_path = crate::persistence::graph_file_path_for(&graph.graph_id)?;
     if !persisted_graph_exists(&graph_path)? {
         return Err(safety::GraphError::NotBuilt);
     }
@@ -884,15 +1126,20 @@ fn sync_apply_stats_from_entries(entries: &[SyncLogEntry]) -> SyncApplyStats {
 
 fn install_loaded_engine_for_selected_graph(
     graph: &crate::catalog::GraphMetadata,
-    mut loaded: engine::Engine,
+    loaded: engine::Engine,
     query_catalog_fingerprint: Option<u64>,
 ) -> safety::GraphResult<()> {
     crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.apply_sync()")?;
-    if let Some(catalog_fingerprint) = query_catalog_fingerprint {
-        loaded.set_catalog_fingerprint(catalog_fingerprint);
-    } else if let Ok((tables, edges, filters)) = read_catalog() {
-        loaded.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
-    }
+    let expected = match query_catalog_fingerprint {
+        Some(fingerprint) => fingerprint,
+        None => {
+            let (tables, edges, filters) = read_catalog()?;
+            catalog_fingerprint(&tables, &edges, &filters)?
+        }
+    };
+    loaded.validate_catalog_fingerprint(Some(expected))?;
+    let stamp = prepare_backend_replay()?;
+    mark_backend_replay(stamp);
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
@@ -996,6 +1243,19 @@ fn ingest_projection_until_internal(
         .map_err(crate::safety::resource_limit_error)?;
     let store = ProjectionManifestStore::new(root.clone());
     let previous = store.load_latest_current()?;
+    let expected_fingerprint = match query_catalog_fingerprint {
+        Some(fingerprint) => fingerprint,
+        None => {
+            let (tables, edges, filters) = read_catalog()?;
+            catalog_fingerprint(&tables, &edges, &filters)?
+        }
+    };
+    engine::validate_catalog_provenance(
+        previous
+            .as_ref()
+            .and_then(|manifest| manifest.catalog_fingerprint),
+        Some(expected_fingerprint),
+    )?;
     let previous_watermark = match previous.as_ref() {
         Some(manifest) => manifest.sync_watermark,
         None => read_sync_checkpoint(&graph_path)?.unwrap_or(0),
@@ -1005,17 +1265,14 @@ fn ingest_projection_until_internal(
             .as_ref()
             .map(|state| state.applicable_table_oids.as_slice()),
     )?;
-    acquire_sync_writer_barrier()?;
     ensure_no_current_transaction_sync_rows(
         previous_watermark,
         query_sync
             .as_ref()
             .map(|state| state.applicable_table_oids.as_slice()),
     )?;
-    // Read only after taking the exclusive writer barrier. All earlier
-    // shared-lock writers have either committed or caused barrier acquisition
-    // to fail, and later writers cannot publish sync rows until this
-    // transaction releases the barrier.
+    // Capture owned rows under a short writer fence and one pinned snapshot.
+    // The fence is released before normalization and artifact publication.
     let entries = read_sync_log_entries_after_bounded(
         previous_watermark,
         row_limit,
@@ -1042,6 +1299,7 @@ fn ingest_projection_until_internal(
             })?),
         )
         .map_err(crate::safety::resource_limit_error)?;
+    ensure_engine_loaded_for_apply_sync(query_sync.as_ref())?;
     if entries.is_empty() {
         return Ok(ProjectionIngestOutcome {
             stats: ProjectionIngestStats {
@@ -1051,7 +1309,6 @@ fn ingest_projection_until_internal(
             query_replay: query_sync.map(|state| state.replay),
         });
     }
-    ensure_engine_loaded_for_apply_sync(query_sync.as_ref())?;
     let observed_max_sync_id = match target_sync_id {
         Some(target_sync_id) => target_sync_id,
         None => max_sync_log_id()?,
@@ -1095,8 +1352,13 @@ fn ingest_projection_until_internal(
     let normalization_bytes = sync_normalization_memory_upper_bound(&entries, &context)?
         .checked_add(context_and_manifest)
         .ok_or_else(sync_normalization_size_overflow)?;
-    let duplicate_engine_peak = resident_bytes
-        .checked_add(resident_bytes)
+    let reusable_base = ENGINE.with(|engine| engine.borrow().base_snapshot.clone());
+    let shared_base_bytes = reusable_base.as_ref().map_or(0, |base| base.bytes() as u64);
+    let private_resident = crate::resource::ByteCount::from_bytes(
+        resident_bytes.as_u64().saturating_sub(shared_base_bytes),
+    );
+    let duplicate_engine_peak = private_resident
+        .checked_add(private_resident)
         .ok_or_else(sync_normalization_size_overflow)?;
     let governed_peak = normalization_bytes
         .checked_add(duplicate_engine_peak)
@@ -1109,11 +1371,12 @@ fn ingest_projection_until_internal(
         .ok_or_else(|| {
             safety::GraphError::Internal("sync planning residency overflowed".to_string())
         })?;
-    let mut planning_engine = load_graph_file_with_residency(&graph_path, planning_residency)?;
-    // The current projection identity artifact writer still consumes a dense
-    // owned dictionary. Materialize only this planning engine; the serving
-    // engine keeps its mapped base.
-    planning_engine.relationship_identities.materialize()?;
+    let planning_engine = load_graph_file_reusing_base(
+        &graph_path,
+        None,
+        planning_residency,
+        reusable_base.as_ref(),
+    )?;
     let planning_engine_bytes =
         crate::resource::ByteCount::from_usize(planning_engine.estimated_memory_used_bytes())
             .ok_or_else(|| {
@@ -1121,8 +1384,17 @@ fn ingest_projection_until_internal(
                     "sync planning engine residency does not fit u64".to_string(),
                 )
             })?;
-    let validated_engine_peak = planning_engine_bytes
-        .checked_add(planning_engine_bytes)
+    let shares_base = reusable_base
+        .as_ref()
+        .zip(planning_engine.base_snapshot.as_ref())
+        .is_some_and(|(serving, planning)| std::rc::Rc::ptr_eq(serving, planning));
+    let unique_planning_bytes = crate::resource::ByteCount::from_bytes(
+        planning_engine_bytes
+            .as_u64()
+            .saturating_sub(if shares_base { shared_base_bytes } else { 0 }),
+    );
+    let validated_engine_peak = unique_planning_bytes
+        .checked_add(unique_planning_bytes)
         .and_then(|engines| normalization_bytes.checked_add(engines))
         .ok_or_else(sync_normalization_size_overflow)?;
     memory
@@ -1142,26 +1414,20 @@ fn ingest_projection_until_internal(
             ),
         });
     }
-    let relationship_identities = planning_engine
-        .relationship_identities
-        .as_owned_slice()
-        .ok_or_else(|| {
-            safety::GraphError::Internal(
-                "materialized relationship identity store was not owned".to_string(),
-            )
-        })?;
     let (base_artifact_path, base_checksum, base_version) =
         sync_ingest_base_artifact_metadata(&current_base_path)?;
+    let next_reserved_generation = crate::projection::recovery::next_rebuild_generation_id(&root)?;
     let ingester = ProjectionIngester::new(root, base_artifact_path, base_checksum, base_version);
     let candidate_residency = planning_residency
-        .checked_add(planning_engine_bytes)
+        .checked_add(unique_planning_bytes)
         .ok_or_else(|| {
             safety::GraphError::Internal("sync candidate residency overflowed".to_string())
         })?;
     crate::runtime_state::mark_replacement_in_progress(
         &graph.graph_id,
         previous.as_ref().map(|manifest| manifest.generation_id),
-        crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?,
+        crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?
+            .map(|generation| generation.max(next_reserved_generation)),
     );
     let has_unseen_edge_type = rows
         .iter()
@@ -1194,40 +1460,24 @@ fn ingest_projection_until_internal(
             crate::catalog::enforce_artifact_storage_quota(dictionary_peak)
         }))?;
     }
-    let (result, validated_engine) = if has_unseen_edge_type {
+    let (result, validated_engine) =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            ingester.ingest_committed_rows_with_dictionaries_governed(
+            ingester.ingest_committed_rows_with_store_governed(
                 &rows,
                 MutationBufferLimits::new(row_limit, byte_limit),
-                relationship_identities,
-                planning_engine.edge_type_registry.as_slice(),
+                &planning_engine.relationship_identities,
+                has_unseen_edge_type.then(|| planning_engine.edge_type_registry.as_slice()),
                 &governor,
                 |candidate| {
-                    load_graph_file_with_projection_candidate_and_residency(
+                    load_graph_file_reusing_base(
                         &current_base_path,
-                        candidate,
+                        Some(candidate),
                         candidate_residency,
+                        planning_engine.base_snapshot.as_ref(),
                     )
                 },
             )
-        }))?
-    } else {
-        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
-            ingester.ingest_committed_rows_with_identities_governed(
-                &rows,
-                MutationBufferLimits::new(row_limit, byte_limit),
-                relationship_identities,
-                &governor,
-                |candidate| {
-                    load_graph_file_with_projection_candidate_and_residency(
-                        &current_base_path,
-                        candidate,
-                        candidate_residency,
-                    )
-                },
-            )
-        }))?
-    };
+        }))?;
     let stats = projection_ingest_stats(result, previous_watermark, &entries);
     if stats.sync_watermark > previous_watermark {
         let mut validated_engine = validated_engine.ok_or_else(|| {
@@ -1902,6 +2152,24 @@ fn read_sync_log_entries_after_internal(
     bounded: Option<(usize, &mut crate::resource::ResourceLease<'_>)>,
     applicable_table_oids: Option<&[i32]>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
+    crate::sync_capture::capture(|| {
+        read_captured_sync_log_entries(
+            applied_sync_id,
+            limit,
+            high_watermark,
+            bounded,
+            applicable_table_oids,
+        )
+    })
+}
+
+fn read_captured_sync_log_entries(
+    applied_sync_id: i64,
+    limit: usize,
+    high_watermark: Option<i64>,
+    bounded: Option<(usize, &mut crate::resource::ResourceLease<'_>)>,
+    applicable_table_oids: Option<&[i32]>,
+) -> safety::GraphResult<Vec<SyncLogEntry>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -1916,6 +2184,8 @@ fn read_sync_log_entries_after_internal(
     if applicable_table_oids.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_sync_replay_not_pruned(applied_sync_id)?;
+    ensure_sync_writer_barrier_triggers(Some(applicable_table_oids))?;
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     if let Some((max_bytes, memory)) = bounded {
         let ids = read_sync_log_entry_plan_after(
@@ -1929,9 +2199,9 @@ fn read_sync_log_entries_after_internal(
         return read_sync_log_entries_by_ids(&ids, applicable_table_oids);
     }
     Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT id, op::text, table_oid::oid::integer, table_name,
+        let mut cursor = crate::sync_capture::open_cursor(
+            client,
+            "SELECT id, op::text, table_oid::oid::integer, table_name,
                     old_pk, new_pk, properties::text, old_row::text, new_row::text
              FROM graph._sync_log
              WHERE id > $1
@@ -1939,14 +2209,15 @@ fn read_sync_log_entries_after_internal(
                AND ($4::bigint IS NULL OR id <= $4)
              ORDER BY id
              LIMIT $2",
-                None,
-                &[
-                    applied_sync_id.into(),
-                    limit.into(),
-                    applicable_table_oids.to_vec().into(),
-                    high_watermark.into(),
-                ],
-            )
+            &[
+                applied_sync_id.into(),
+                limit.into(),
+                applicable_table_oids.to_vec().into(),
+                high_watermark.into(),
+            ],
+        )?;
+        let rows = cursor
+            .fetch(limit)
             .map_err(|e| safety::GraphError::Internal(format!("sync log read failed: {e}")))?;
         let mut entries = Vec::new();
         for row in rows {
@@ -2017,7 +2288,8 @@ fn read_sync_log_entry_plan_after(
     memory: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<Vec<i64>> {
     Spi::connect(|client| {
-        let mut cursor = client.open_cursor(
+        let mut cursor = crate::sync_capture::open_cursor(
+            client,
             "SELECT id,
                     octet_length(op::text)::bigint + octet_length(table_name)
                     + COALESCE(octet_length(old_pk), 0)
@@ -2037,7 +2309,7 @@ fn read_sync_log_entry_plan_after(
                 applicable_table_oids.to_vec().into(),
                 high_watermark.into(),
             ],
-        );
+        )?;
         let row_limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut ids = Vec::new();
         let mut raw_payload_bytes = 0usize;
@@ -2244,17 +2516,18 @@ fn read_sync_log_entries_by_ids(
         return Ok(Vec::new());
     }
     let entries = Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT id, op::text, table_oid::oid::integer, table_name,
+        let mut cursor = crate::sync_capture::open_cursor(
+            client,
+            "SELECT id, op::text, table_oid::oid::integer, table_name,
                         old_pk, new_pk, properties::text, old_row::text, new_row::text
                    FROM graph._sync_log
                   WHERE id = ANY($1::bigint[])
                     AND table_oid::oid::integer = ANY($2::int4[])
                   ORDER BY id",
-                None,
-                &[ids.into(), applicable_table_oids.into()],
-            )
+            &[ids.into(), applicable_table_oids.into()],
+        )?;
+        let rows = cursor
+            .fetch(i64::try_from(ids.len()).unwrap_or(i64::MAX))
             .map_err(|err| {
                 safety::GraphError::Internal(format!("bounded sync log read failed: {err}"))
             })?;
@@ -2336,10 +2609,29 @@ fn apply_sync_log_entry_with_context(
     let operation = SyncRowOperation::from_entry(entry, &tenant_change)?;
     let edge_mutation_reservation =
         sync_entry_edge_mutation_reservation(entry, table_oid, context, &rows)?;
+    let stamp = prepare_backend_replay()?;
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.reserve_edge_mutation_capacity(edge_mutation_reservation)?;
+        // Reject invalid labels before any row mutation or rollback bookkeeping.
+        for row in [rows.old.as_ref(), rows.new.as_ref()].into_iter().flatten() {
+            for edge in &context.edges {
+                if context.table_oid(&edge.from_table) == Some(table_oid)
+                    && projection_edge_endpoints(context, edge, row).is_some()
+                {
+                    let label = sync_row_edge_label(edge, row);
+                    eng.edge_type_registry
+                        .registration_heap_upper_bound(&label)?;
+                    if eng.edge_type_registry.id(&label).is_none() {
+                        crate::projection::tx_delta::ensure_engine_replacement_allowed(
+                            "relationship type sync replay",
+                        )?;
+                    }
+                }
+            }
+        }
+        mark_backend_replay(stamp);
         apply_sync_row_operation(&mut eng, table_oid, entry, context, &rows, operation)?;
         match entry.op {
             SyncOp::Insert => {
@@ -3496,6 +3788,14 @@ fn json_value_bool(raw: &serde_json::Value) -> safety::GraphResult<bool> {
         })
 }
 
+fn sync_row_edge_label(edge: &builder::RegisteredEdge, row: &serde_json::Value) -> String {
+    edge.label_column
+        .as_deref()
+        .and_then(|column| row_text_value(row, column))
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| edge.label.clone())
+}
+
 pub(crate) fn apply_row_edge_mutations(
     eng: &mut engine::Engine,
     context: &SyncReplayContext,
@@ -3516,15 +3816,27 @@ pub(crate) fn apply_row_edge_mutations(
         else {
             continue;
         };
-        let edge_label = edge
-            .label_column
-            .as_deref()
-            .and_then(|column| row_text_value(row, column))
-            .filter(|label| !label.trim().is_empty())
-            .unwrap_or_else(|| edge.label.clone());
-        let type_id = eng
-            .edge_type_id(&edge_label)
-            .ok_or(safety::GraphError::EdgeTypeLimit)?;
+        let edge_label = sync_row_edge_label(edge, row);
+        let type_id = match eng.edge_type_registry.id(&edge_label) {
+            Some(type_id) => type_id,
+            None => {
+                // Buffered replay needs a base ID, never a provisional transaction ID.
+                crate::projection::tx_delta::ensure_engine_replacement_allowed(
+                    "relationship type sync replay",
+                )?;
+                let growth = eng
+                    .edge_type_registry
+                    .registration_heap_upper_bound(&edge_label)?;
+                let governor = eng.query_resource_governor()?;
+                let _memory = governor
+                    .reserve_memory(
+                        crate::resource::ResourcePhase::SyncIngest,
+                        crate::resource::ByteCount::from_bytes(growth as u64),
+                    )
+                    .map_err(crate::safety::resource_limit_error)?;
+                eng.register_edge_type(&edge_label)?
+            }
+        };
         let source = resolve_sync_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
         let target = resolve_sync_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
@@ -3961,6 +4273,14 @@ const SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS: i64 = 10_000;
 /// `sync_log_retention_floor` does not treat this backend as gone.
 #[cfg(not(test))]
 pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    if crate::projection::publication::uses_fixed_snapshot()
+        || crate::projection::publication::transaction_is_read_only()
+    {
+        // Snapshot-local progress must not replace a backend's newer durable
+        // heartbeat. The native horizon retains the required generation/log.
+        // Read-only transactions cannot persist reader housekeeping either.
+        return Ok(());
+    }
     let caller_oid = crate::catalog::current_role_oid()?;
     let result = with_pending_sync_watermark(
         PendingSyncWatermark {
@@ -4068,6 +4388,10 @@ pub(crate) fn record_sync_watermark_heartbeat_direct(
 /// backend that disconnected without cleanup stops blocking pruning once
 /// its heartbeat's `expires_at` has passed.
 pub(crate) fn expire_stale_sync_watermarks() -> safety::GraphResult<()> {
+    if crate::projection::publication::transaction_is_read_only() {
+        // Retention diagnostics already exclude expired rows.
+        return Ok(());
+    }
     Spi::get_one::<bool>("SELECT graph._expire_sync_watermarks_for_current_role()").map_err(
         |err| {
             safety::GraphError::Internal(format!(
@@ -4095,10 +4419,8 @@ pub(crate) fn expire_stale_sync_watermarks_direct() -> safety::GraphResult<()> {
 /// selected graph.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SyncWatermarkDiagnostics {
-    /// Safe floor to prune `graph._sync_log` below, or `None` when no
-    /// evidence (durable projection watermark or an active backend
-    /// heartbeat) makes any floor safe yet.
-    pub(crate) retention_floor: Option<i64>,
+    /// Advisory eligibility, rechecked under the writer fence before deletion.
+    pub(crate) eligibility: SyncPruneEligibility,
     /// `true` when a floor exists and the log has grown far enough past it
     /// that pruning would meaningfully shrink `graph._sync_log`.
     pub(crate) prune_recommended: bool,
@@ -4106,6 +4428,215 @@ pub(crate) struct SyncWatermarkDiagnostics {
     /// this graph, so operators can see whether a lagging backend is
     /// blocking pruning.
     pub(crate) active_backends: i32,
+}
+
+/// Catalog-only facts for the selected graph's advisory retention decision.
+pub(crate) struct SyncRetentionCatalog {
+    pub(crate) heartbeat_floor: Option<i64>,
+    pub(crate) active_backends: i32,
+    pub(crate) has_sources: bool,
+    pub(crate) shared_source: bool,
+    pub(crate) alternate_artifact_root: bool,
+}
+
+pub(crate) fn sync_retention_catalog_direct(
+    graph_id: &str,
+) -> safety::GraphResult<SyncRetentionCatalog> {
+    let table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    sync_retention_catalog_for_oids(graph_id, &table_oids)
+}
+
+fn sync_retention_catalog_via_definer() -> safety::GraphResult<SyncRetentionCatalog> {
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT * FROM graph._sync_retention_catalog_for_current_role()",
+            None,
+            &[],
+        )?;
+        let row = rows.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<i64>(1)?,
+            row.get::<i32>(2)?,
+            row.get::<bool>(3)?,
+            row.get::<bool>(4)?,
+            row.get::<bool>(5)?,
+        ))
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("sync retention catalog read failed: {error}"))
+    })
+    .and_then(
+        |(heartbeat_floor, active_backends, has_sources, shared_source, alternate_root)| match (
+            active_backends,
+            has_sources,
+            shared_source,
+            alternate_root,
+        ) {
+            (
+                Some(active_backends),
+                Some(has_sources),
+                Some(shared_source),
+                Some(alternate_artifact_root),
+            ) => Ok(SyncRetentionCatalog {
+                heartbeat_floor,
+                active_backends,
+                has_sources,
+                shared_source,
+                alternate_artifact_root,
+            }),
+            _ => Err(safety::GraphError::Internal(
+                "sync retention catalog returned null required fields".into(),
+            )),
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncPruneBlocker {
+    NoPositiveWatermark,
+    NoRegisteredSources,
+    SharedSource,
+    AlternateArtifactRoot,
+    #[cfg_attr(
+        test,
+        allow(
+            dead_code,
+            reason = "native PostgreSQL horizon is checked in backend builds"
+        )
+    )]
+    GenerationVisibility,
+}
+
+impl SyncPruneBlocker {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NoPositiveWatermark => "no_positive_watermark",
+            Self::NoRegisteredSources => "no_registered_sources",
+            Self::SharedSource => "shared_source",
+            Self::AlternateArtifactRoot => "alternate_artifact_root",
+            Self::GenerationVisibility => "generation_visibility",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncPruneEligibility {
+    Eligible(i64),
+    Blocked(SyncPruneBlocker),
+}
+
+impl SyncPruneEligibility {
+    pub(crate) fn floor(self) -> Option<i64> {
+        match self {
+            Self::Eligible(floor) => Some(floor),
+            Self::Blocked(_) => None,
+        }
+    }
+
+    pub(crate) fn blocker(self) -> Option<SyncPruneBlocker> {
+        match self {
+            Self::Eligible(_) => None,
+            Self::Blocked(blocker) => Some(blocker),
+        }
+    }
+}
+
+/// Reporting is advisory and takes no writer fence. Deletion calls this again
+/// under the publisher transaction lock, which also protects graph registration.
+fn sync_retention_catalog_for_oids(
+    graph_id: &str,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<SyncRetentionCatalog> {
+    let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
+    // Rows belong to sources. A floor for one consumer cannot authorize
+    // deletion when another graph or artifact root may still need those rows.
+    Spi::connect(|client| {
+        let result = client.select(
+            "SELECT min(applied_sync_id), count(*)::int, EXISTS (
+                 SELECT 1 FROM (
+                     SELECT graph_id, table_oid FROM graph._registered_tables
+                     UNION ALL
+                     SELECT graph_id, from_table_oid FROM graph._registered_edges
+                 ) consumers
+                 WHERE consumers.graph_id <> $1::uuid
+                   AND consumers.table_oid::integer = ANY($2::int4[])
+             ), EXISTS (
+                 SELECT 1 FROM graph._projection_heads
+                 WHERE graph_id = $1::uuid AND artifact_root <> $3
+             )
+             FROM graph._sync_watermarks
+             WHERE graph_id = $1::uuid AND expires_at > now()",
+            None,
+            &[
+                graph_id.into(),
+                applicable_table_oids.to_vec().into(),
+                root.to_string_lossy().as_ref().into(),
+            ],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::SpiError>(SyncRetentionCatalog {
+            heartbeat_floor: row.get::<i64>(1)?,
+            active_backends: row.get::<i32>(2)?.unwrap_or(0),
+            has_sources: !applicable_table_oids.is_empty(),
+            shared_source: row.get::<bool>(3)?.unwrap_or(true),
+            alternate_artifact_root: row.get::<bool>(4)?.unwrap_or(true),
+        })
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("sync retention catalog lookup failed: {error}"))
+    })
+}
+
+/// Reporting is advisory; pruning rechecks these facts under its writer fence.
+fn sync_prune_eligibility(
+    floor: Option<i64>,
+    catalog: &SyncRetentionCatalog,
+) -> safety::GraphResult<SyncPruneEligibility> {
+    use SyncPruneBlocker as Blocker;
+    use SyncPruneEligibility::{Blocked, Eligible};
+
+    if !catalog.has_sources {
+        return Ok(Blocked(Blocker::NoRegisteredSources));
+    }
+    if catalog.shared_source {
+        return Ok(Blocked(Blocker::SharedSource));
+    }
+    if catalog.alternate_artifact_root {
+        return Ok(Blocked(Blocker::AlternateArtifactRoot));
+    }
+    #[cfg(not(test))]
+    let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
+    #[cfg(not(test))]
+    if crate::projection::publication::historical_generations_required(&root)? {
+        // Includes absent or uncommitted publication, fixed snapshots and the
+        // native horizon for active snapshots, prepared xacts and replication.
+        return Ok(Blocked(Blocker::GenerationVisibility));
+    }
+    Ok(match floor.filter(|floor| *floor > 0) {
+        Some(floor) => Eligible(floor),
+        None => Blocked(Blocker::NoPositiveWatermark),
+    })
+}
+
+/// Exact selected-source volume is opt-in administrative work, never part of
+/// ordinary graph queries or the lightweight sync-health recommendation path.
+pub(crate) fn sync_retained_volume() -> safety::GraphResult<(i64, i64)> {
+    let table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    Spi::connect(|client| {
+        let result = client.select(
+            "SELECT (SELECT count(*) FROM graph._sync_log
+                      WHERE table_oid::oid::integer = ANY($1::int4[])),
+                    pg_catalog.pg_total_relation_size('graph._sync_log'::regclass)",
+            None,
+            &[table_oids.into()],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+        ))
+    })
+    .map_err(|error| safety::GraphError::Internal(format!("sync retention volume failed: {error}")))
 }
 
 /// Pure bootstrap-safety-rule decision: the safe prune floor is the minimum
@@ -4147,30 +4678,15 @@ pub(crate) fn sync_watermark_diagnostics(
     durable_watermark: Option<i64>,
     max_sync_log_id: i64,
 ) -> safety::GraphResult<SyncWatermarkDiagnostics> {
-    let graph_id = selected_or_default_graph_metadata()?.graph_id;
-    let (heartbeat_floor, active_backends) = Spi::connect(|client| {
-        let result = client.select(
-            "SELECT min(applied_sync_id), count(*)::int
-             FROM graph._sync_watermarks
-             WHERE graph_id = $1::uuid
-               AND expires_at > now()",
-            None,
-            &[graph_id.into()],
-        )?;
-        let row = result.first();
-        Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?, row.get::<i32>(2)?.unwrap_or(0)))
-    })
-    .map_err(|err| {
-        safety::GraphError::Internal(format!("sync watermark diagnostics query failed: {err}"))
-    })?;
-
-    let retention_floor = compute_sync_log_retention_floor(durable_watermark, heartbeat_floor);
-    let prune_recommended = is_sync_log_prune_recommended(retention_floor, max_sync_log_id);
+    let catalog = sync_retention_catalog_via_definer()?;
+    let floor = compute_sync_log_retention_floor(durable_watermark, catalog.heartbeat_floor);
+    let eligibility = sync_prune_eligibility(floor, &catalog)?;
+    let prune_recommended = is_sync_log_prune_recommended(eligibility.floor(), max_sync_log_id);
 
     Ok(SyncWatermarkDiagnostics {
-        retention_floor,
+        eligibility,
         prune_recommended,
-        active_backends,
+        active_backends: catalog.active_backends,
     })
 }
 
@@ -4192,8 +4708,15 @@ pub(crate) fn prune_sync_log(floor: Option<i64>) -> safety::GraphResult<i64> {
     if floor <= 0 {
         return Ok(0);
     }
+    #[cfg(not(test))]
+    crate::sql_build::acquire_build_lock()?;
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
-    if applicable_table_oids.is_empty() {
+    let graph_id = crate::catalog::selected_or_default_graph_id_via_definer()?;
+    let catalog = sync_retention_catalog_for_oids(&graph_id, &applicable_table_oids)?;
+    if sync_prune_eligibility(Some(floor), &catalog)?
+        .floor()
+        .is_none()
+    {
         return Ok(0);
     }
     // `floor` is an already-applied id (everyone counted in its computation
@@ -4268,11 +4791,13 @@ pub(crate) fn ensure_sync_replay_not_pruned(applied_sync_id: i64) -> safety::Gra
 
 /// Resolves the durable projection watermark (when one exists), computes the
 /// safe sync-log retention floor, and prunes `graph._sync_log` below it.
-/// Returns the number of rows removed. Intended for `graph.maintenance()`
-/// and `graph.run_scheduled_maintenance()`, which already fold accumulated
-/// sync/overlay state into a clean base; this is not called from
+/// Returns the number of rows removed. Used by maintenance rebuilds and
+/// `graph.projection_gc()` after committed publication permits reclamation;
+/// this is not called from
 /// `graph.apply_sync()`, which is the interactive, non-destructive path.
 pub(crate) fn prune_sync_log_if_safe() -> safety::GraphResult<i64> {
+    #[cfg(not(test))]
+    crate::sql_build::acquire_build_lock()?;
     expire_stale_sync_watermarks()?;
     let artifact = crate::persistence::graph_file_path_uncreated()?;
     let root = crate::persistence::projection_manifest_root(&artifact);
@@ -4284,7 +4809,7 @@ pub(crate) fn prune_sync_log_if_safe() -> safety::GraphResult<i64> {
     )?;
     let diagnostics =
         sync_watermark_diagnostics(projection.manifest_watermark, max_sync_log_id()?)?;
-    prune_sync_log(diagnostics.retention_floor)
+    prune_sync_log(diagnostics.eligibility.floor())
 }
 
 pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> {
@@ -4306,6 +4831,128 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 
 #[cfg(test)]
 mod tests {
+    fn committed_cache() -> super::CacheProvenance {
+        let xid = std::num::NonZeroU64::new(42).unwrap();
+        let mut cache = super::CacheProvenance::new();
+        cache.mark_mutation(super::ReplayTransactionStamp(Some(xid)));
+        assert!(!cache.finish(super::ReplayTransactionOutcome::Commit, false));
+        assert_eq!(cache.stamp, super::CacheStamp::Committed(xid));
+        cache
+    }
+
+    #[test]
+    fn cache_mutation_requires_actual_commit_and_known_top_level_xid() {
+        use super::{
+            CacheProvenance, CacheStamp, ReplayTransactionOutcome, ReplayTransactionStamp,
+        };
+        let xid = std::num::NonZeroU64::new(42).unwrap();
+        for outcome in [
+            ReplayTransactionOutcome::Abort,
+            ReplayTransactionOutcome::Prepare,
+        ] {
+            let mut cache = CacheProvenance::new();
+            cache.mark_mutation(ReplayTransactionStamp(Some(xid)));
+            assert!(cache.finish(outcome, false));
+            assert_eq!(cache.stamp, CacheStamp::Unknown);
+        }
+        let mut cache = CacheProvenance::new();
+        cache.mark_mutation(ReplayTransactionStamp(None));
+        assert!(!cache.finish(ReplayTransactionOutcome::Commit, false));
+        assert_eq!(cache.stamp, CacheStamp::Unknown);
+    }
+
+    #[test]
+    fn fixed_entry_requires_committed_provenance_and_positive_snapshot_visibility() {
+        let mut cache = super::CacheProvenance::new();
+        assert_eq!(cache.fixed_snapshot_candidate(), None);
+        cache.mark_mutation(super::ReplayTransactionStamp(std::num::NonZeroU64::new(43)));
+        assert_eq!(cache.fixed_snapshot_candidate(), None);
+
+        let mut cache = committed_cache();
+        assert_eq!(
+            cache.fixed_snapshot_candidate(),
+            std::num::NonZeroU64::new(42)
+        );
+        // A failed check (including an imported older snapshot) cannot preserve
+        // this candidate merely because its writer eventually committed.
+        assert!(cache.finish(super::ReplayTransactionOutcome::Commit, false));
+        assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+    }
+
+    #[test]
+    fn overlay_only_fixed_transactions_preserve_the_committed_baseline() {
+        for outcome in [
+            super::ReplayTransactionOutcome::Commit,
+            super::ReplayTransactionOutcome::Abort,
+        ] {
+            let mut cache = committed_cache();
+            let baseline = cache.stamp;
+            cache.fixed = super::FixedSnapshotCache::Preserved;
+            assert!(!cache.finish(outcome, false));
+            assert_eq!(cache.stamp, baseline);
+            assert_eq!(cache.fixed, super::FixedSnapshotCache::NotEntered);
+        }
+    }
+
+    #[test]
+    fn fixed_snapshot_replay_never_exports_its_possibly_incomplete_watermark() {
+        for outcome in [
+            super::ReplayTransactionOutcome::Commit,
+            super::ReplayTransactionOutcome::Abort,
+        ] {
+            let mut cache = committed_cache();
+            cache.fixed = super::FixedSnapshotCache::Preserved;
+            cache.mark_mutation(super::ReplayTransactionStamp(std::num::NonZeroU64::new(43)));
+            assert!(cache.finish(outcome, false));
+            assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+        }
+    }
+
+    #[test]
+    fn aborted_savepoint_or_cache_clear_cannot_revalidate_prior_provenance() {
+        let mut cache = committed_cache();
+        cache.mark_mutation(super::ReplayTransactionStamp(std::num::NonZeroU64::new(43)));
+        assert!(cache.finish(super::ReplayTransactionOutcome::Commit, true));
+        assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+
+        let mut cache = committed_cache();
+        cache.clear();
+        assert_eq!(cache.stamp, super::CacheStamp::Unknown);
+        cache.fixed = super::FixedSnapshotCache::Preserved;
+        cache.clear();
+        assert!(cache.finish(super::ReplayTransactionOutcome::Commit, false));
+    }
+
+    #[test]
+    fn replay_abort_tracks_nested_scopes_and_survives_outer_commit() {
+        super::CACHE_PROVENANCE.set(super::CacheProvenance::new());
+        super::REPLAY_ABORTED.set(false);
+        super::REPLAYED_SUBTRANSACTIONS.with(|levels| *levels.borrow_mut() = vec![true, false]);
+        super::finish_replay_subtransaction(1, true);
+        assert!(
+            !super::REPLAY_ABORTED.get(),
+            "an untouched savepoint must not invalidate its parent"
+        );
+        super::REPLAYED_SUBTRANSACTIONS
+            .with(|levels| *levels.borrow_mut() = vec![false, false, true]);
+        super::finish_replay_subtransaction(2, false);
+        super::finish_replay_subtransaction(1, true);
+        assert!(
+            super::REPLAY_ABORTED.get(),
+            "released child replay belongs to its parent"
+        );
+        super::finish_replay_transaction(super::ReplayTransactionOutcome::Commit);
+        assert!(
+            super::REPLAY_ABORTED.get(),
+            "outer commit must not hide an unrecovered abort"
+        );
+        super::REPLAY_ABORTED.set(false);
+        super::REPLAYED_SUBTRANSACTIONS.with(|levels| *levels.borrow_mut() = vec![true]);
+        super::finish_replay_transaction(super::ReplayTransactionOutcome::Abort);
+        assert!(super::REPLAY_ABORTED.get());
+        super::REPLAY_ABORTED.set(false);
+    }
+
     use super::{
         applicable_table_oids_from_catalog, artifact_quota_peak_bytes,
         compute_sync_log_retention_floor, encoded_edge_type_dictionary_bytes,

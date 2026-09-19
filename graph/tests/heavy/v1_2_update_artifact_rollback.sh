@@ -120,8 +120,8 @@ SQL
 install_tree "$ROOT_DIR" "$WORKDIR/package-1.2"
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
-ALTER EXTENSION graph UPDATE TO '1.2.0';
-SELECT 1 / CASE WHEN extversion = '1.2.0' THEN 1 ELSE 0 END
+ALTER EXTENSION graph UPDATE TO '1.2.1';
+SELECT 1 / CASE WHEN extversion = '1.2.1' THEN 1 ELSE 0 END
 FROM pg_extension WHERE extname = 'graph';
 DO $$
 DECLARE
@@ -170,6 +170,8 @@ BEGIN
     END IF;
 END
 $$;
+-- The 1.2.1 publication catalog requires rebuilding pre-upgrade artifacts.
+SELECT * FROM graph.build();
 SELECT 1 / CASE WHEN count(*) = 3 THEN 1 ELSE 0 END FROM graph.edge_types();
 SELECT 1 / CASE WHEN string_agg(node_id, ',' ORDER BY depth, node_id) = 'a,b' THEN 1 ELSE 0 END
 FROM graph.traverse(
@@ -221,11 +223,19 @@ SELECT graph.add_edge(
     label_column := 'relationship_name'
 );
 SELECT * FROM graph.build();
-SELECT 1 / CASE WHEN count(*) = 2 THEN 1 ELSE 0 END
-FROM graph.traverse(
-    'public.release_nodes'::regclass, 'a', 3,
-    edge_types := ARRAY['works_at', 'founded'], hydrate := false
-) WHERE depth > 0;
+DO $$ BEGIN
+    IF (SELECT array_agg(node_id ORDER BY depth) FROM graph.traverse(
+        'public.release_nodes'::regclass, 'a', 3,
+        edge_types := ARRAY['works_at', 'founded'], direction := 'out', hydrate := false
+    )) IS DISTINCT FROM ARRAY['a', 'b', 'c']::text[]
+       OR (SELECT edge_path FROM graph.traverse(
+        'public.release_nodes'::regclass, 'a', 3,
+        edge_types := ARRAY['works_at', 'founded'], direction := 'out', hydrate := false
+    ) WHERE node_id = 'c' AND depth = 2)
+        IS DISTINCT FROM '["works_at", "founded"]'::jsonb THEN
+        RAISE EXCEPTION 'backup-restore rollback changed the source chain or relationship labels';
+    END IF;
+END $$;
 SQL
 
 dropdb "$RESTORE_DB"
