@@ -412,7 +412,7 @@ fn topology_query_entry_points_run_as_invoker() {
            JOIN pg_catalog.pg_namespace AS namespace
              ON namespace.oid = proc.pronamespace
           WHERE namespace.nspname = 'graph'
-            AND proc.proname IN ('traverse', 'connected_components', 'component_stats')
+            AND proc.proname IN ('traverse', 'connected_components', 'component_stats', 'sync_health')
             AND proc.prosecdef",
     )
     .expect("read topology function security metadata failed")
@@ -426,6 +426,7 @@ fn topology_query_entry_points_run_as_invoker() {
             AND proc.proname IN (
                 '_selected_graph_id_for_current_role',
                 '_active_generation_count_for_current_role',
+                '_sync_retention_catalog_for_current_role',
                 '_enforce_loaded_graph_quota_for_current_role',
                 '_require_selected_graph_privilege_for_current_role',
                 '_graph_id_for_current_role_with_privilege',

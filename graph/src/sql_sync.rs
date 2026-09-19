@@ -4430,6 +4430,67 @@ pub(crate) struct SyncWatermarkDiagnostics {
     pub(crate) active_backends: i32,
 }
 
+/// Catalog-only facts for the selected graph's advisory retention decision.
+pub(crate) struct SyncRetentionCatalog {
+    pub(crate) heartbeat_floor: Option<i64>,
+    pub(crate) active_backends: i32,
+    pub(crate) has_sources: bool,
+    pub(crate) shared_source: bool,
+    pub(crate) alternate_artifact_root: bool,
+}
+
+pub(crate) fn sync_retention_catalog_direct(
+    graph_id: &str,
+) -> safety::GraphResult<SyncRetentionCatalog> {
+    let table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    sync_retention_catalog_for_oids(graph_id, &table_oids)
+}
+
+fn sync_retention_catalog_via_definer() -> safety::GraphResult<SyncRetentionCatalog> {
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT * FROM graph._sync_retention_catalog_for_current_role()",
+            None,
+            &[],
+        )?;
+        let row = rows.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<i64>(1)?,
+            row.get::<i32>(2)?,
+            row.get::<bool>(3)?,
+            row.get::<bool>(4)?,
+            row.get::<bool>(5)?,
+        ))
+    })
+    .map_err(|error| {
+        safety::GraphError::Internal(format!("sync retention catalog read failed: {error}"))
+    })
+    .and_then(
+        |(heartbeat_floor, active_backends, has_sources, shared_source, alternate_root)| match (
+            active_backends,
+            has_sources,
+            shared_source,
+            alternate_root,
+        ) {
+            (
+                Some(active_backends),
+                Some(has_sources),
+                Some(shared_source),
+                Some(alternate_artifact_root),
+            ) => Ok(SyncRetentionCatalog {
+                heartbeat_floor,
+                active_backends,
+                has_sources,
+                shared_source,
+                alternate_artifact_root,
+            }),
+            _ => Err(safety::GraphError::Internal(
+                "sync retention catalog returned null required fields".into(),
+            )),
+        },
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncPruneBlocker {
     NoPositiveWatermark,
@@ -4482,23 +4543,16 @@ impl SyncPruneEligibility {
 
 /// Reporting is advisory and takes no writer fence. Deletion calls this again
 /// under the publisher transaction lock, which also protects graph registration.
-fn sync_prune_eligibility(
-    floor: Option<i64>,
+fn sync_retention_catalog_for_oids(
+    graph_id: &str,
     applicable_table_oids: &[i32],
-) -> safety::GraphResult<SyncPruneEligibility> {
-    use SyncPruneBlocker as Blocker;
-    use SyncPruneEligibility::{Blocked, Eligible};
-
-    if applicable_table_oids.is_empty() {
-        return Ok(Blocked(Blocker::NoRegisteredSources));
-    }
-    let graph_id = crate::catalog::selected_or_default_graph_id_via_definer()?;
+) -> safety::GraphResult<SyncRetentionCatalog> {
     let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
     // Rows belong to sources. A floor for one consumer cannot authorize
     // deletion when another graph or artifact root may still need those rows.
-    let consumers = Spi::connect(|client| {
+    Spi::connect(|client| {
         let result = client.select(
-            "SELECT EXISTS (
+            "SELECT min(applied_sync_id), count(*)::int, EXISTS (
                  SELECT 1 FROM (
                      SELECT graph_id, table_oid FROM graph._registered_tables
                      UNION ALL
@@ -4509,7 +4563,9 @@ fn sync_prune_eligibility(
              ), EXISTS (
                  SELECT 1 FROM graph._projection_heads
                  WHERE graph_id = $1::uuid AND artifact_root <> $3
-             )",
+             )
+             FROM graph._sync_watermarks
+             WHERE graph_id = $1::uuid AND expires_at > now()",
             None,
             &[
                 graph_id.into(),
@@ -4518,20 +4574,38 @@ fn sync_prune_eligibility(
             ],
         )?;
         let row = result.first();
-        Ok::<_, pgrx::spi::SpiError>((
-            row.get::<bool>(1)?.unwrap_or(true),
-            row.get::<bool>(2)?.unwrap_or(true),
-        ))
+        Ok::<_, pgrx::spi::SpiError>(SyncRetentionCatalog {
+            heartbeat_floor: row.get::<i64>(1)?,
+            active_backends: row.get::<i32>(2)?.unwrap_or(0),
+            has_sources: !applicable_table_oids.is_empty(),
+            shared_source: row.get::<bool>(3)?.unwrap_or(true),
+            alternate_artifact_root: row.get::<bool>(4)?.unwrap_or(true),
+        })
     })
     .map_err(|error| {
-        safety::GraphError::Internal(format!("sync consumer lookup failed: {error}"))
-    })?;
-    if consumers.0 {
+        safety::GraphError::Internal(format!("sync retention catalog lookup failed: {error}"))
+    })
+}
+
+/// Reporting is advisory; pruning rechecks these facts under its writer fence.
+fn sync_prune_eligibility(
+    floor: Option<i64>,
+    catalog: &SyncRetentionCatalog,
+) -> safety::GraphResult<SyncPruneEligibility> {
+    use SyncPruneBlocker as Blocker;
+    use SyncPruneEligibility::{Blocked, Eligible};
+
+    if !catalog.has_sources {
+        return Ok(Blocked(Blocker::NoRegisteredSources));
+    }
+    if catalog.shared_source {
         return Ok(Blocked(Blocker::SharedSource));
     }
-    if consumers.1 {
+    if catalog.alternate_artifact_root {
         return Ok(Blocked(Blocker::AlternateArtifactRoot));
     }
+    #[cfg(not(test))]
+    let root = projection_manifest_root(&crate::persistence::graph_file_path_uncreated()?);
     #[cfg(not(test))]
     if crate::projection::publication::historical_generations_required(&root)? {
         // Includes absent or uncommitted publication, fixed snapshots and the
@@ -4604,32 +4678,15 @@ pub(crate) fn sync_watermark_diagnostics(
     durable_watermark: Option<i64>,
     max_sync_log_id: i64,
 ) -> safety::GraphResult<SyncWatermarkDiagnostics> {
-    let graph_id = selected_or_default_graph_metadata()?.graph_id;
-    let (heartbeat_floor, active_backends) = Spi::connect(|client| {
-        let result = client.select(
-            "SELECT min(applied_sync_id), count(*)::int
-             FROM graph._sync_watermarks
-             WHERE graph_id = $1::uuid
-               AND expires_at > now()",
-            None,
-            &[graph_id.into()],
-        )?;
-        let row = result.first();
-        Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?, row.get::<i32>(2)?.unwrap_or(0)))
-    })
-    .map_err(|err| {
-        safety::GraphError::Internal(format!("sync watermark diagnostics query failed: {err}"))
-    })?;
-
-    let floor = compute_sync_log_retention_floor(durable_watermark, heartbeat_floor);
-    let eligibility =
-        sync_prune_eligibility(floor, &SyncReplayContext::load()?.applicable_table_oids())?;
+    let catalog = sync_retention_catalog_via_definer()?;
+    let floor = compute_sync_log_retention_floor(durable_watermark, catalog.heartbeat_floor);
+    let eligibility = sync_prune_eligibility(floor, &catalog)?;
     let prune_recommended = is_sync_log_prune_recommended(eligibility.floor(), max_sync_log_id);
 
     Ok(SyncWatermarkDiagnostics {
         eligibility,
         prune_recommended,
-        active_backends,
+        active_backends: catalog.active_backends,
     })
 }
 
@@ -4654,7 +4711,9 @@ pub(crate) fn prune_sync_log(floor: Option<i64>) -> safety::GraphResult<i64> {
     #[cfg(not(test))]
     crate::sql_build::acquire_build_lock()?;
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
-    if sync_prune_eligibility(Some(floor), &applicable_table_oids)?
+    let graph_id = crate::catalog::selected_or_default_graph_id_via_definer()?;
+    let catalog = sync_retention_catalog_for_oids(&graph_id, &applicable_table_oids)?;
+    if sync_prune_eligibility(Some(floor), &catalog)?
         .floor()
         .is_none()
     {

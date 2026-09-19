@@ -4115,3 +4115,19 @@ SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'publish_generation_for_current_role_wrapper';
 /* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:341
+-- graph::sql_facade::admin::_sync_retention_catalog_for_current_role
+CREATE  FUNCTION graph."_sync_retention_catalog_for_current_role"() RETURNS TABLE (
+	"heartbeat_floor" bigint,  /* Option < i64 > */
+	"active_backends" INT,  /* i32 */
+	"has_sources" bool,  /* bool */
+	"shared_source" bool,  /* bool */
+	"alternate_artifact_root" bool  /* bool */
+)
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'sync_retention_catalog_for_current_role_wrapper';
+/* </end connected objects> */

@@ -499,6 +499,7 @@
     "_record_sync_watermark_for_current_role",
     "_require_selected_graph_privilege_for_current_role",
     "_selected_graph_id_for_current_role",
+    "_sync_retention_catalog_for_current_role",
     "test_enabled"
   ],
   "postgresql": {
@@ -959,10 +960,10 @@
     "schema_version": 1
   },
   "sql_schema": {
-    "entity_block_count": 173,
-    "function_contract_count": 171,
-    "function_contracts_sha256": "6f448b5f96b9461364444ff154387e34296dff849109416e4a125641c7be9411",
-    "normalized_sha256": "3f486c087d1a46cae8e2deb6684182553019d68aeda3d5d7a9d367ec964706bf"
+    "entity_block_count": 174,
+    "function_contract_count": 172,
+    "function_contracts_sha256": "c4ee25570f2c56b74243d34a475f47728ace8f85daf506651f3160d589e54c87",
+    "normalized_sha256": "825fc697d4b6ce6ebec52e904cc167260f58172be4d8fce6f672c1e66a06411b"
   },
   "sql_signatures": [
     {

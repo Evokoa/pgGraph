@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import uuid
+from pathlib import Path
 
 from psql_session import Session
 
@@ -450,6 +451,7 @@ def read_only_rls():
         assert reader.execute("SELECT count(*) FROM graph.traverse('n'::regclass, 'b', 0, hydrate := false);") == "0"
         assert reader.execute("SELECT count(*) FROM graph.traverse('n'::regclass, 'a', 0, hydrate := true);") == "1"
         assert reader.execute("SELECT count(*) FROM graph.status();") == "1"
+        assert reader.execute("SELECT count(*) FROM graph.sync_health();") == "1"
         for function in ("projection_status", "sync_retention"):
             reader.execute("DO $$ BEGIN BEGIN PERFORM * FROM graph." + function + "(); "
                            "RAISE EXCEPTION 'reader accessed admin diagnostics'; "
@@ -465,6 +467,10 @@ def read_only_transactions():
     read_only_snapshot_retention()
     read_only_rls()
     read_only_mutable_pending_requires_write()
+    database = create_database("health_acl")
+    subprocess.run(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", database,
+                    "-f", str(Path(__file__).with_name("sync_health_authorization.sql"))],
+                   check=True)
     print("Read-only transaction regressions passed", flush=True)
 
 

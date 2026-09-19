@@ -25,6 +25,21 @@ AS 'MODULE_PATHNAME', 'publish_generation_for_current_role_wrapper';
 GRANT EXECUTE ON FUNCTION graph._published_generation_for_current_role() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION graph._publish_generation_for_current_role() TO PUBLIC;
 
+CREATE FUNCTION graph._sync_retention_catalog_for_current_role()
+RETURNS TABLE (
+    heartbeat_floor bigint,
+    active_backends integer,
+    has_sources boolean,
+    shared_source boolean,
+    alternate_artifact_root boolean
+)
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'sync_retention_catalog_for_current_role_wrapper';
+
+GRANT EXECUTE ON FUNCTION graph._sync_retention_catalog_for_current_role() TO PUBLIC;
+
 CREATE FUNCTION graph.sync_retention()
 RETURNS TABLE (
     eligible_prune_floor bigint,

@@ -830,8 +830,11 @@ RETURNS TABLE (
 ```
 
 Reports the sync and compaction signals most useful to schedulers and external
-monitors. Use `apply_sync_recommended` to decide when a lightweight replay is
-useful for a writable backend-local engine, and `maintenance_recommended` to
+monitors. Requires read access to the selected graph, including for named-graph
+readers without extension ownership. Counts describe physical projection and
+sync state, not RLS-filtered query results. Use `apply_sync_recommended` to decide
+when a lightweight replay is useful for a writable backend-local engine, and
+`maintenance_recommended` to
 decide when overlay/read-only/rebuild state should be folded back into the base
 graph. The `durable_*_recommended` columns mirror `graph.projection_status()`
 for projection ingestion, compaction, GC, and persisted repair pressure without

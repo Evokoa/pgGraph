@@ -21,6 +21,10 @@ DO $$ BEGIN
     RAISE EXCEPTION 'upgrade test requires the released 1.2.0 schema';
   END IF;
 END $$;
+SELECT 'pggraph_upgrade_owner_' || substr(md5(current_database()), 1, 12) AS role
+\gset upgrade_
+CREATE ROLE :"upgrade_role" NOLOGIN;
+ALTER FUNCTION graph.test_enabled() OWNER TO :"upgrade_role";
 REVOKE EXECUTE ON FUNCTION graph.test_enabled() FROM PUBLIC;
 CREATE TABLE public.pggraph_upgrade_original_functions AS
 SELECT oid, proowner, proacl FROM pg_proc WHERE pronamespace = 'graph'::regnamespace;
@@ -72,7 +76,8 @@ ALTER EXTENSION graph UPDATE TO '1.2.1';
 ROLLBACK;
 DO $$ BEGIN
   IF (SELECT extversion FROM pg_extension WHERE extname = 'graph') IS DISTINCT FROM '1.2.0'
-     OR to_regclass('graph._projection_heads') IS NOT NULL THEN
+     OR to_regclass('graph._projection_heads') IS NOT NULL
+     OR to_regprocedure('graph._sync_retention_catalog_for_current_role()') IS NOT NULL THEN
     RAISE EXCEPTION 'rolled-back update changed the 1.2.0 catalog';
   END IF;
 END $$;
@@ -161,4 +166,37 @@ DO $$ BEGIN
   END IF;
 END $$;
 SQL
+psql -X -v ON_ERROR_STOP=1 -d "$database" -f "$PGGRAPH_ROOT/graph/tests/heavy/sync_health_authorization.sql"
+fresh_database="${database:0:57}_fresh"
+pggraph_validate_database_name "$fresh_database"
+createdb "$fresh_database"
+psql -X -v ON_ERROR_STOP=1 -d "$fresh_database" -c 'CREATE EXTENSION graph;'
+psql -X -v ON_ERROR_STOP=1 -d "$fresh_database" -f "$PGGRAPH_ROOT/graph/tests/heavy/sync_health_authorization.sql"
+helper_metadata() {
+  psql -X -qAt -v ON_ERROR_STOP=1 -d "$1" <<'SQL'
+SELECT jsonb_build_object(
+    'arguments', pg_get_function_identity_arguments(p.oid),
+    'result', pg_get_function_result(p.oid),
+    'owner', pg_get_userbyid(p.proowner),
+    'definer', p.prosecdef, 'strict', p.proisstrict,
+    'volatility', p.provolatile, 'parallel', p.proparallel,
+    'settings', p.proconfig, 'library', p.probin, 'symbol', p.prosrc,
+    'extension', (SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+                  WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                    AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'),
+    'acl', (SELECT jsonb_agg(jsonb_build_array(
+                 pg_get_userbyid(a.grantor), COALESCE(r.rolname, 'PUBLIC'),
+                 a.privilege_type, a.is_grantable) ORDER BY a.grantee, a.privilege_type)
+            FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+            LEFT JOIN pg_roles r ON r.oid = a.grantee))
+FROM pg_proc p WHERE p.oid = 'graph._sync_retention_catalog_for_current_role()'::regprocedure;
+SQL
+}
+upgraded_metadata="$(helper_metadata "$database")"
+fresh_metadata="$(helper_metadata "$fresh_database")"
+[[ -n "$upgraded_metadata" && "$upgraded_metadata" == "$fresh_metadata" ]] || {
+  echo 'Fresh and upgraded diagnostic helper metadata differ' >&2
+  exit 1
+}
+printf 'Fresh/upgraded helper metadata: %s\n' "$upgraded_metadata"
 printf 'Transactional publication upgrade passed (%s)\n' "$database"

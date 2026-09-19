@@ -340,6 +340,40 @@ fn active_generation_count_for_current_role() -> i32 {
 
 #[pg_extern(
     schema = "graph",
+    name = "_sync_retention_catalog_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn sync_retention_catalog_for_current_role() -> TableIterator<
+    'static,
+    (
+        name!(heartbeat_floor, Option<i64>),
+        name!(active_backends, i32),
+        name!(has_sources, bool),
+        name!(shared_source, bool),
+        name!(alternate_artifact_root, bool),
+    ),
+> {
+    with_panic_boundary("_sync_retention_catalog_for_current_role()", || {
+        let caller = catalog::current_role_oid().unwrap_or_else(|error| error.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller)
+            .unwrap_or_else(|error| error.report());
+        catalog::require_graph_privilege_for_role(&graph, catalog::GraphPrivilege::Read, caller)
+            .unwrap_or_else(|error| error.report());
+        let state = crate::sql_sync::sync_retention_catalog_direct(&graph.graph_id)
+            .unwrap_or_else(|error| error.report());
+        TableIterator::new(vec![(
+            state.heartbeat_floor,
+            state.active_backends,
+            state.has_sources,
+            state.shared_source,
+            state.alternate_artifact_root,
+        )])
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
     name = "_enforce_loaded_graph_quota_for_current_role",
     security_definer
 )]

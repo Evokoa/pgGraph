@@ -243,8 +243,9 @@ Selected-graph resolution and private catalog maintenance use small
 catalogs.
 
 Operational status reports physical projection state; their counts are not
-RLS-filtered query results. `graph.status()`, build/maintenance job status,
-`graph.loaded_graphs()`, and `graph.graph_runtime_status()` require read access
+RLS-filtered query results. `graph.status()`, `graph.sync_health()`,
+build/maintenance job status, `graph.loaded_graphs()`, and
+`graph.graph_runtime_status()` require read access
 to every graph row they expose. `graph.projection_status()` and
 `graph.build_resource_status()` require selected-graph `admin` access.
 Cluster-wide generation counts and backend-local resource telemetry require a
