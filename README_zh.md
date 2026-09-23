@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.2.1_candidate-16a34a?style=flat-square" alt="Version 1.2.1 candidate">
+    <img src="https://img.shields.io/badge/version-1.2.1-16a34a?style=flat-square" alt="Version 1.2.1">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -76,9 +76,8 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 > **寻找托管版本？** 我们已经在 [polygres.com](https://polygres.com) 上推出了 pgGraph 的托管版本，为 Postgres 提供完整的高性能 GraphRAG。
 
 
-当前代码正在准备 pgGraph `1.2.1` 稳定性候选版本，尚未创建 tag 或发布。
-以下安装包命令仍指向之前的 `1.2.0` 版本。升级到候选版本后，必须重建每个图，
-详见[发布说明](docs/release-notes.mdx)。
+pgGraph `1.2.1` 重点改进稳定性、同步和数据库隔离。
+升级时必须更新扩展并重建每个图，详见[发布说明](docs/release-notes.mdx)。
 
 ## 为什么选择 pgGraph？
 
@@ -100,7 +99,7 @@ cd pggraph
 scripts/quickstart.sh
 ```
 
-签名的多架构镜像是 `ghcr.io/evokoa/pggraph:1.2.0`；部署前应验证其
+请使用带版本号的多架构发布镜像 `ghcr.io/evokoa/pggraph:1.2.1`；部署前应验证其
 digest。
 
 默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
@@ -121,8 +120,8 @@ psql -h localhost -U postgres -d graph
 ## Homebrew 安装
 
 [Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) 是
-PostgreSQL 17 的便捷安装渠道。该 tap 的公式使用已签名的 1.2.0 release
-bundle。
+PostgreSQL 17 的便捷安装渠道。该 tap 与 Docker 和 PGXN 渠道分别更新。
+安装此版本后，请确认扩展报告的版本号为 `1.2.1`。
 
 ```bash
 brew tap Evokoa/tap
@@ -183,13 +182,13 @@ scripts/quickstart.sh playground panama mutable
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
 PostgreSQL 14 到 18 均有已发布的 Docker 镜像。未带 PostgreSQL 主版本的
-tag（例如 `1.2.0` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL
+tag（例如 `1.2.1` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL
 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按
 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
 
 ## PGXN 源码安装
 
-PGXN 提供已签名 1.2.0 release bundle 中的已验证源码 ZIP。因为 pgGraph
+通过 PGXN 安装时，请使用已签名 1.2.1 release bundle 中的已验证源码 ZIP。因为 pgGraph
 是一个 Rust/pgrx 扩展，从源码构建需要 Rust 工具链。
 
 ### 前置要求

@@ -7,11 +7,9 @@ still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
 the release support matrix.
 
 <Callout type="info">
-This checkout prepares the pgGraph 1.2.1 stability candidate, not yet tagged or
-published. Build from source to evaluate it. Package commands below target the
-previous 1.2.0 release; upgrading to the candidate requires rebuilding each
-graph as described in [release notes](/release-notes).
-Official pgGraph 1.2.0 packages support PostgreSQL 14 through 18.
+These instructions target pgGraph 1.2.1 on PostgreSQL 14 through 18.
+Upgrading requires updating the extension and rebuilding each graph as
+described in [release notes](/release-notes).
 </Callout>
 
 ## Source Build Requirements
@@ -52,7 +50,8 @@ psql -d postgres -c "CREATE EXTENSION graph;"
 psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
 ```
 
-The formula installs pgGraph 1.2.0 from the signed release bundle.
+The formula uses a signed release bundle. For this release, verify that the
+installed extension reports version `1.2.1`.
 
 The Homebrew formula is a convenience channel for PostgreSQL 17. The complete
 1.2 package matrix is the checksummed PGXN/source archive and attested GHCR
@@ -61,7 +60,7 @@ images for PostgreSQL 14 through 18.
 Homebrew is maintained through the separate Evokoa tap, not published by this
 repository's protected PGXN/GHCR workflow. The tap owner updates its source URL
 and checksum from the signed release bundle, runs the formula audit and test,
-and announces availability only after the installed extension reports 1.2.0.
+and announces availability only after the installed extension reports 1.2.1.
 
 ## Install pgrx
 
@@ -87,9 +86,9 @@ EOL.
 
 ## PGXN Source Install
 
-PGXN serves the exact checksummed source ZIP from the signed 1.2.0 release
-bundle. Because pgGraph is a Rust/pgrx extension, source installation requires
-Rust and `cargo-pgrx` before running `pgxn install`.
+For PGXN installation, use the exact checksummed source ZIP from the signed
+1.2.1 release bundle. Because pgGraph is a Rust/pgrx extension, source
+installation requires Rust and `cargo-pgrx` before running `pgxn install`.
 
 ```bash
 cargo install cargo-pgrx --version 0.19.1 --locked
@@ -174,14 +173,14 @@ Attested images are available on GitHub Container Registry for PostgreSQL 14
 through 18 and support **linux/amd64** and **linux/arm64**.
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:1.2.0
+docker pull ghcr.io/evokoa/pggraph:1.2.1
 ```
 
 | Tag | Description |
 |---|---|
-| `1.2.0` | Pinned reproducible tag (PostgreSQL 17) — always resolves to the same image digest |
+| `1.2.1` | Pinned reproducible tag (PostgreSQL 17), always resolves to the same image digest |
 | `latest` | Moving tag that points to the most recent stable PostgreSQL 17 image |
-| `pg14-1.2.0` through `pg18-1.2.0` | Versioned image for a specific PostgreSQL major |
+| `pg14-1.2.1` through `pg18-1.2.1` | Versioned image for a specific PostgreSQL major |
 | `pg14` through `pg18` | Latest stable image for a specific PostgreSQL major |
 
 Start the container:
@@ -191,7 +190,7 @@ docker run --rm \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=graph \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:1.2.0
+  ghcr.io/evokoa/pggraph:1.2.1
 ```
 
 Verify that `pg_cron` and `graph` are installed and loaded:

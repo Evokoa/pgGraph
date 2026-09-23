@@ -12,7 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
-| [v1.2.1 candidate](#v1-2-1-pggraph-stability-candidate) |
+| [v1.2.1](#v1-2-1-pggraph-stability-release) |
 | [v1.2.0](#v1-2-0-pggraph-open-vocabulary-relationship-types) |
 | [v1.1.0](#v1-1-0-pggraph-caller-scoped-rls-and-safe-replacement) |
 | [v1.0.0](#v1-0-0-pggraph-production-release) |
@@ -26,10 +26,11 @@ so these sections remain explicit.
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
 
-## v1.2.1: pgGraph Stability Candidate
+<a id="v1-2-1-pggraph-stability-candidate" />
 
-pgGraph 1.2.1 is a stability candidate, not yet tagged or published. It fixes
-sync replay, registration, artifact isolation, and transactional graph
+## v1.2.1: pgGraph Stability Release
+
+pgGraph 1.2.1 fixes sync replay, registration, artifact isolation, and transactional graph
 publication. PostgreSQL 14 through 18 remain the supported target matrix.
 
 ### Correctness And Security
@@ -37,6 +38,9 @@ publication. PostgreSQL 14 through 18 remain the supported target matrix.
 - `csr_readonly` replay accepts valid new relationship labels, including the
   first label after an empty build. Rolled-back mutations and fixed-snapshot
   replay state no longer leak into later backend queries.
+- Topology reads in PostgreSQL read-only transactions defer retention
+  housekeeping writes. Reader health diagnostics use authorized, graph-scoped
+  catalog access while preserving source ACL and RLS checks.
 - Dotted JSONB property registration preserves INSERT, UPDATE, and mapped GQL
   writes. Invalid filter columns and incompatible types report input errors
   instead of internal-bug diagnostics.
@@ -87,7 +91,7 @@ files for rollback and old readers; see
 
 ### Upgrade, Rebuild, And Rollback
 
-Back up PostgreSQL before installing the matching 1.2.1 candidate package.
+Back up PostgreSQL before installing the matching 1.2.1 package.
 Update each database and rebuild every registered graph, selecting named graphs
 before their build:
 
@@ -114,9 +118,9 @@ and Linux snapshot lifetime. The small RLS runner regression validates its
 acceptance gate and refuses existing fixture databases and roles. Retained
 exact-result, [1M](../release/evidence/engine/2026-09-11-p5-selective-rls-1m/README.md)
 and [10M selective-RLS evidence](../release/evidence/engine/2026-09-12-p5-selective-rls-10m/README.md)
-cover their stated profiles and resource envelopes. Candidate release gates
-remain in progress; these notes do not certify published packages or universal
-performance guarantees.
+cover their stated profiles and resource envelopes. These measurements do not
+establish universal performance guarantees. Verify package signatures,
+checksums, and attestations for the release artifacts you install.
 
 ## v1.2.0: pgGraph Open-Vocabulary Relationship Types
 
