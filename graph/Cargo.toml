@@ -2,7 +2,7 @@
 name = "graph"
 version = "1.2.1"
 edition = "2021"
-rust-version = "1.96"
+rust-version = "1.99.1"
 description = "Sub-millisecond graph traversal for PostgreSQL"
 license = "Apache-2.0"
 autobenches = false
@@ -11,25 +11,20 @@ autobenches = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Official support follows PostgreSQL majors that still receive upstream fixes:
-# pg14 through pg18. The pg13 feature remains available as legacy best-effort
-# because pgrx still exposes it, but release gates do not cover PG13.
-# Keep the supported matrix aligned with docs/user_guide/installation.mdx and
-# graph/tests/heavy/run_pg_matrix.sh.
+# pgrx 0.20.1 provides bindings for PostgreSQL 15 through 19.
 default = ["pg17"]
-pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
-pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]
 pg_test = ["development"]
 fuzzing = []
 development = []
 benchmarks = []
 
 [dependencies]
-pgrx = "=0.19.1"
+pgrx = "=0.20.1"
 roaring = { version = "=0.11.4", features = ["serde"] }
 xxhash-rust = { version = "=0.8.15", features = ["xxh3"] }
 bitvec = "=1.1.1"
@@ -66,7 +61,7 @@ panic = "allow"
 unwrap_used = "allow"
 
 [dev-dependencies]
-pgrx-tests = "=0.19.1"
+pgrx-tests = "=0.20.1"
 criterion = { version = "=0.8.2", features = ["html_reports"] }
 proptest = "=1.11.0"
 

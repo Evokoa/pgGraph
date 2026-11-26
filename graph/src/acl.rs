@@ -126,30 +126,16 @@ pub(crate) fn require_rls_bypass_privilege() -> GraphResult<()> {
         // pointer returned by PostgreSQL.
         pgrx::pg_sys::GetOuterUserId()
     };
-    let allowed = if unsafe {
-        // SAFETY: `caller_oid` is a backend-owned role OID and superuser_arg
-        // performs a catalog lookup without retaining Rust memory.
+    let allowed = unsafe {
+        // SAFETY: caller_oid is a backend-owned role OID and the parameter
+        // name is a static NUL-terminated string. PostgreSQL evaluates both
+        // privileges for the same role.
         pgrx::pg_sys::superuser_arg(caller_oid)
-    } {
-        true
-    } else {
-        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17", feature = "pg18"))]
-        {
-            unsafe {
-                // SAFETY: The parameter name is a static NUL-terminated C
-                // string; caller_oid is valid for this backend. PostgreSQL 15+
-                // owns and evaluates parameter ACLs.
-                pgrx::pg_sys::pg_parameter_aclcheck(
-                    c"graph.rls_mode".as_ptr(),
-                    caller_oid,
-                    pgrx::pg_sys::ACL_SET as pgrx::pg_sys::AclMode,
-                ) == pgrx::pg_sys::AclResult::ACLCHECK_OK
-            }
-        }
-        #[cfg(any(feature = "pg13", feature = "pg14"))]
-        {
-            false
-        }
+            || pgrx::pg_sys::pg_parameter_aclcheck(
+                c"graph.rls_mode".as_ptr(),
+                caller_oid,
+                pgrx::pg_sys::ACL_SET as pgrx::pg_sys::AclMode,
+            ) == pgrx::pg_sys::AclResult::ACLCHECK_OK
     };
     if allowed {
         Ok(())

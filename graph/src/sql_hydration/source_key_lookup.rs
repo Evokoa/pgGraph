@@ -112,8 +112,8 @@ impl SourceKeyLookup {
             // search_path cannot redirect a later source query to a shadow.
             let table_name = format!(
                 "{}.{}",
-                crate::quote::quote_ident(relation.namespace()),
-                crate::quote::quote_ident(relation.name()),
+                crate::quote::quote_ident(&relation.namespace()),
+                crate::quote::quote_ident(&relation.name()),
             );
             drop(relation);
             let key_expr = catalog::primary_key_expr(alias, columns);
