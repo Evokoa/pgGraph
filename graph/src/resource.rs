@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 #[inline]
 pub(crate) fn check_postgres_interrupts() {
     #[cfg(not(test))]
-    pgrx::check_for_interrupts!();
+    pgrx::check_for_interrupts();
 }
 
 /// Exact byte quantity used for allocation and residency decisions.
